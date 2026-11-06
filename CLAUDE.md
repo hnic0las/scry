@@ -9,7 +9,17 @@ Accepted decisions so far:
 - Start with the merge tool (vault decision 0001).
 - Agent routes (vault decision 0002): an MCP server from the start; the user's Claude API key by default for the app's own model calls; a hand-off to the user's agent when there is no key; a provider interface in the core. The app never launches the `claude` CLI and never uses claude.ai credentials.
 
-Proposed but not decided: a Rust core with a SwiftUI app through UniFFI. Do not scaffold a language or framework before it is decided.
+- Rust core and SwiftUI Mac app through UniFFI (vault decision 0003). Syntax highlighting is computed in the core with tree-sitter.
+
+The repository layout is not agreed yet; ask before scaffolding.
+
+## Portability rules (decision 0003)
+
+1. The core owns all state and logic (merge session, undo and redo, line alignment, conflict blocks, word-level diff, highlight spans, folding, provenance). The SwiftUI app renders and forwards input only.
+2. The core talks to UIs through serialisable commands and events, so another UI can use the same contract.
+3. No macOS-specific code in the core except behind traits (secrets, file watching, spawning `git`, line endings, file-system case, paths).
+4. CI runs on macOS, Linux and Windows from the first code commit.
+5. The theme is defined in the core as roles; each UI maps roles to colours.
 
 ## Design rules
 
