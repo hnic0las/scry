@@ -1,0 +1,170 @@
+//! Detecting the operation in progress on real repositories, built with the
+//! `git` executable in temporary directories.
+
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
+use scry_core::git::GitCli;
+use scry_core::operation::{self, OperationKind, Progress, SideRole};
+use tempfile::TempDir;
+
+/// A throwaway repository whose git commands ignore the user's own
+/// configuration (signing, hooks, default branch).
+struct Repo {
+    root: TempDir,
+}
+
+impl Repo {
+    fn new() -> Repo {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("gitconfig"), "").unwrap();
+        fs::create_dir(root.path().join("repo")).unwrap();
+        let repo = Repo { root };
+        assert!(repo.git(&["init", "--quiet", "--initial-branch=main"]));
+        repo
+    }
+
+    fn path(&self) -> PathBuf {
+        self.root.path().join("repo")
+    }
+
+    /// Runs git and tells whether it succeeded.
+    fn git(&self, args: &[&str]) -> bool {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(self.path())
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", self.root.path().join("gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Scry Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Scry Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .env("GIT_EDITOR", "true")
+            .output()
+            .unwrap();
+        output.status.success()
+    }
+
+    fn commit(&self, file: &str, content: &str, message: &str) {
+        fs::write(self.path().join(file), content).unwrap();
+        assert!(self.git(&["add", file]));
+        assert!(self.git(&["commit", "--quiet", "-m", message]));
+    }
+
+    fn scry_git(&self) -> GitCli {
+        GitCli::new(self.path())
+    }
+}
+
+/// main and feature both change the one line of `file.txt`; feature first
+/// adds an unrelated file, so a rebase has two commits to replay.
+fn diverged() -> Repo {
+    let repo = Repo::new();
+    repo.commit("file.txt", "line\n", "base");
+    assert!(repo.git(&["switch", "--quiet", "-c", "feature"]));
+    repo.commit("other.txt", "other\n", "add other");
+    repo.commit("file.txt", "feature line\n", "feature change");
+    assert!(repo.git(&["switch", "--quiet", "main"]));
+    repo.commit("file.txt", "main line\n", "main change");
+    repo
+}
+
+#[test]
+fn no_operation() {
+    let repo = Repo::new();
+    repo.commit("file.txt", "line\n", "base");
+    assert_eq!(operation::current(&repo.scry_git()).unwrap(), None);
+}
+
+#[test]
+fn merge() {
+    let repo = diverged();
+    assert!(repo.git(&["switch", "--quiet", "feature"]));
+    assert!(!repo.git(&["merge", "main"]));
+
+    let git = repo.scry_git();
+    let operation = operation::current(&git).unwrap().unwrap();
+    assert_eq!(operation.kind, OperationKind::Merge);
+    assert_eq!(operation.branch.as_deref(), Some("feature"));
+    assert_eq!(operation.ours.role, SideRole::CurrentBranch);
+    assert_eq!(operation.ours.label(), "feature · current branch");
+    assert_eq!(operation.ours.commit.subject, "feature change");
+    let theirs = operation.theirs.as_ref().unwrap();
+    assert_eq!(theirs.label(), "main · being merged");
+    assert_eq!(theirs.commit.subject, "main change");
+    assert_eq!(operation.summary(), "Merging main into feature");
+    assert_eq!(operation::conflicted_paths(&git).unwrap(), ["file.txt"]);
+}
+
+#[test]
+fn rebase() {
+    let repo = diverged();
+    assert!(repo.git(&["switch", "--quiet", "feature"]));
+    assert!(!repo.git(&["rebase", "main"]));
+
+    let git = repo.scry_git();
+    let operation = operation::current(&git).unwrap().unwrap();
+    assert_eq!(operation.kind, OperationKind::Rebase);
+    assert_eq!(operation.branch.as_deref(), Some("feature"));
+    assert_eq!(
+        operation.progress,
+        Some(Progress {
+            current: 2,
+            total: 2
+        })
+    );
+    // Git's "ours" is main plus the commit already replayed.
+    assert_eq!(operation.ours.role, SideRole::RebaseTarget { replayed: 1 });
+    assert_eq!(
+        operation.ours.label(),
+        "main + 1 rebased commit · rebase target"
+    );
+    assert_eq!(operation.ours.commit.subject, "add other");
+    // Git's "theirs" is the user's own commit.
+    let theirs = operation.theirs.as_ref().unwrap();
+    assert_eq!(theirs.role, SideRole::CommitBeingRebased);
+    assert_eq!(theirs.commit.subject, "feature change");
+    assert_eq!(
+        operation.summary(),
+        format!(
+            "Rebasing feature onto main · commit 2 of 2: {} feature change",
+            theirs.commit.short_id
+        )
+    );
+    assert_eq!(operation::conflicted_paths(&git).unwrap(), ["file.txt"]);
+}
+
+#[test]
+fn cherry_pick() {
+    let repo = diverged();
+    assert!(!repo.git(&["cherry-pick", "feature"]));
+
+    let operation = operation::current(&repo.scry_git()).unwrap().unwrap();
+    assert_eq!(operation.kind, OperationKind::CherryPick);
+    assert_eq!(operation.ours.label(), "main · current branch");
+    let theirs = operation.theirs.as_ref().unwrap();
+    assert_eq!(theirs.role, SideRole::CherryPickedCommit);
+    assert_eq!(theirs.commit.subject, "feature change");
+}
+
+#[test]
+fn revert() {
+    let repo = diverged();
+    repo.commit("file.txt", "main line 2\n", "second main change");
+    assert!(!repo.git(&["revert", "--no-edit", "HEAD~1"]));
+
+    let operation = operation::current(&repo.scry_git()).unwrap().unwrap();
+    assert_eq!(operation.kind, OperationKind::Revert);
+    let theirs = operation.theirs.as_ref().unwrap();
+    assert_eq!(theirs.role, SideRole::RevertedCommit);
+    assert_eq!(theirs.commit.subject, "main change");
+    assert!(operation.summary().starts_with("Reverting "));
+}
+
+#[test]
+fn not_a_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(operation::current(&GitCli::new(dir.path().to_path_buf())).is_err());
+}

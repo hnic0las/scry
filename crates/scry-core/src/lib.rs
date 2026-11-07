@@ -5,3 +5,5 @@
 //! free of platform-specific code (vault decision 0003).
 
 pub mod conflict;
+pub mod git;
+pub mod operation;

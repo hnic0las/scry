@@ -26,11 +26,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Try the CLI on a file with conflict markers:
+Try the CLI:
 
 ```sh
 cargo run -p git-scry -- conflicts path/to/file
+cargo run -p git-scry -- session    # the operation in progress and who is on each side
 ```
+
+To try it on real conflicts, `scripts/make-conflicts.sh` rebuilds `conflicts/` (ignored by git) with one repository stopped on a conflict per operation: `rebase`, `merge`, `cherry-pick` and `revert`.
 
 ## Layout
 

@@ -16,3 +16,6 @@
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Throwaway repositories built by scripts/make-conflicts.sh
+/conflicts/
