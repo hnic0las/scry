@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 use scry_core::conflict;
 use scry_core::git::GitCli;
 use scry_core::operation;
+use scry_core::resolution;
 
 #[derive(Parser)]
 #[command(
@@ -71,19 +72,32 @@ fn list_conflicts(file: &PathBuf) -> ExitCode {
     }
 
     println!("{}: {} conflict(s)", file.display(), conflicts.len());
-    for conflict in conflicts {
+    let analyses = resolution::analyze(&segments);
+    for (conflict, analysis) in conflicts.iter().zip(&analyses) {
+        let ours = side_name(&conflict.ours.label, "ours");
+        let theirs = side_name(&conflict.theirs.label, "theirs");
+        println!();
+        println!(
+            "  {}. {}  line {}  {}",
+            analysis.number,
+            analysis.id,
+            analysis.start_line,
+            analysis.kind.describe(ours, theirs)
+        );
         let base = match &conflict.base {
-            Some(base) => format!(", base {} line(s)", base.text.lines().count()),
+            Some(base) => format!(" · base {}", line_count(&base.text)),
             None => String::new(),
         };
         println!(
-            "  line {}: ours {:?} {} line(s), theirs {:?} {} line(s){base}",
-            conflict.start_line,
-            conflict.ours.label,
-            conflict.ours.text.lines().count(),
-            conflict.theirs.label,
-            conflict.theirs.text.lines().count(),
+            "     ours {ours} {} · theirs {theirs} {}{base}",
+            line_count(&conflict.ours.text),
+            line_count(&conflict.theirs.text),
         );
+        let ids: Vec<&str> = analysis.candidates.iter().map(|c| c.kind.id()).collect();
+        println!("     candidates: {}", ids.join(", "));
+        if let Some(suggestion) = analysis.suggestion {
+            println!("     suggested by rule: {}", suggestion.id());
+        }
     }
     ExitCode::from(1)
 }
@@ -131,4 +145,16 @@ fn show_session() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// The label git wrote on a marker, or a fallback when it wrote none.
+fn side_name<'a>(label: &'a str, fallback: &'a str) -> &'a str {
+    if label.is_empty() { fallback } else { label }
+}
+
+fn line_count(text: &str) -> String {
+    match text.lines().count() {
+        1 => String::from("(1 line)"),
+        count => format!("({count} lines)"),
+    }
 }

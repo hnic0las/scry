@@ -15,26 +15,27 @@ export GIT_AUTHOR_NAME="Alex Martin" GIT_AUTHOR_EMAIL=alex@example.com
 export GIT_COMMITTER_NAME="Alex Martin" GIT_COMMITTER_EMAIL=alex@example.com
 export GIT_EDITOR=true
 
-# main adds a timeout to upload(); feature/offline-sync documents offline
-# mode, adds retries to upload(), then updates the notes.
+# main adds a timeout to upload() and a cancel() function; feature/offline-sync
+# documents offline mode, adds retries to upload() and a pause() function at
+# the same place as cancel(), then updates the notes.
 diverged() {
   local dir="$root/$1"
   mkdir -p "$dir" && cd "$dir"
   git init --quiet --initial-branch=main
   git config merge.conflictStyle zdiff3
-  printf 'func upload(_ item: Item) async throws {\n    try await client.send(item)\n}\n' > SyncEngine.swift
+  printf 'func upload(_ item: Item) async throws {\n    try await client.send(item)\n}\n\nfunc download(_ id: Item.ID) async throws -> Item {\n    try await client.fetch(id)\n}\n' > SyncEngine.swift
   git add . && git commit --quiet -m "Initial sync engine"
 
   git switch --quiet -c feature/offline-sync
   printf '# Offline mode\n' > Notes.md
   git add . && git commit --quiet -m "Document offline mode"
-  printf 'func upload(_ item: Item) async throws {\n    try await retry(times: 3, backoff: .exponential) {\n        try await client.send(item)\n    }\n}\n' > SyncEngine.swift
+  printf 'func upload(_ item: Item) async throws {\n    try await retry(times: 3, backoff: .exponential) {\n        try await client.send(item)\n    }\n}\n\nfunc download(_ id: Item.ID) async throws -> Item {\n    try await client.fetch(id)\n}\n\nfunc pause() {\n    queue.suspend()\n}\n' > SyncEngine.swift
   git commit --quiet -am "Retry failed uploads with backoff"
   printf 'Uploads are retried.\n' >> Notes.md
   git commit --quiet -am "Update notes"
 
   git switch --quiet main
-  printf 'func upload(_ item: Item) async throws {\n    try await client.send(item, timeout: .seconds(30))\n}\n' > SyncEngine.swift
+  printf 'func upload(_ item: Item) async throws {\n    try await client.send(item, timeout: .seconds(30))\n}\n\nfunc download(_ id: Item.ID) async throws -> Item {\n    try await client.fetch(id)\n}\n\nfunc cancel() {\n    queue.cancelAll()\n}\n' > SyncEngine.swift
   git commit --quiet -am "Add a 30 s timeout to uploads (#412)"
 }
 
@@ -52,7 +53,7 @@ diverged cherry-pick
 git cherry-pick ":/Retry failed uploads" > /dev/null 2>&1 || true
 
 diverged revert
-printf 'func upload(_ item: Item) async throws {\n    try await client.send(item, timeout: .seconds(60))\n}\n' > SyncEngine.swift
+printf 'func upload(_ item: Item) async throws {\n    try await client.send(item, timeout: .seconds(60))\n}\n\nfunc download(_ id: Item.ID) async throws -> Item {\n    try await client.fetch(id)\n}\n\nfunc cancel() {\n    queue.cancelAll()\n}\n' > SyncEngine.swift
 git commit --quiet -am "Raise the upload timeout to 60 s"
 git revert --no-edit HEAD~1 > /dev/null 2>&1 || true
 
