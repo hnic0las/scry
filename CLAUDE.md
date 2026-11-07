@@ -8,10 +8,16 @@ Accepted decisions so far:
 
 - Start with the merge tool (vault decision 0001).
 - Agent routes (vault decision 0002): an MCP server from the start; the user's Claude API key by default for the app's own model calls; a hand-off to the user's agent when there is no key; a provider interface in the core. The app never launches the `claude` CLI and never uses claude.ai credentials.
-
 - Rust core and SwiftUI Mac app through UniFFI (vault decision 0003). Syntax highlighting is computed in the core with tree-sitter.
 
-The repository layout is not agreed yet; ask before scaffolding.
+Layout and commands: `README.md`. Add `crates/scry-mcp`, `crates/scry-ffi` and `apps/macos` with their first code, not as empty placeholders.
+
+## Working mode
+
+- Claude writes both the Rust core and the SwiftUI app; Nicolas validates and orchestrates. Nicolas is new to Rust and an experienced SwiftUI developer.
+- Write plain Rust: no complex lifetime annotations, clever generics, custom macros, or `async` in the core until needed.
+- After each Rust change, explain briefly in the conversation what is new language-wise; code comments explain why, not Rust basics.
+- Work in small increments that can be shown, each with what to run or look at to validate it.
 
 ## Portability rules (decision 0003)
 
