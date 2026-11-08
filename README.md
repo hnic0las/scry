@@ -33,7 +33,17 @@ cargo run -p git-scry -- conflicts path/to/file
 cargo run -p git-scry -- session    # the operation in progress and who is on each side
 ```
 
-To try it on real conflicts, `scripts/make-conflicts.sh` rebuilds `conflicts/` (ignored by git) with one repository stopped on a conflict per operation: `rebase`, `merge`, `cherry-pick` and `revert`.
+Use it as git's merge tool (terminal only until the app exists):
+
+```sh
+git config --global merge.tool scry
+git config --global mergetool.scry.cmd 'git-scry resolve "$BASE" "$LOCAL" "$REMOTE" "$MERGED"'
+git config --global mergetool.scry.trustExitCode true
+```
+
+`git mergetool` then asks for a candidate per conflict (the same digits as the app's shortcuts: 1 ours, 2 theirs, 3 both, 0 base, 9 none) and writes the file only when every conflict is resolved.
+
+To try it on real conflicts, `scripts/make-conflicts.sh` rebuilds `conflicts/` (ignored by git) with one repository stopped on a conflict per operation: `rebase`, `merge`, `cherry-pick` and `revert`. In each, `git mergetool` runs this checkout's `git-scry`.
 
 ## Layout
 

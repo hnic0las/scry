@@ -78,6 +78,20 @@ impl CandidateKind {
             CandidateKind::Base => "base",
         }
     }
+
+    /// The candidate kind with this ID, as typed in the CLI or sent over MCP.
+    pub fn from_id(id: &str) -> Option<CandidateKind> {
+        [
+            CandidateKind::Ours,
+            CandidateKind::Theirs,
+            CandidateKind::OursThenTheirs,
+            CandidateKind::TheirsThenOurs,
+            CandidateKind::Neither,
+            CandidateKind::Base,
+        ]
+        .into_iter()
+        .find(|kind| kind.id() == id)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

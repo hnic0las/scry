@@ -4,11 +4,13 @@
 #
 #   scripts/make-conflicts.sh
 #   cd conflicts/rebase && git scry session
+#   cd conflicts/rebase && git mergetool      # runs this checkout's git-scry
 #
 # The repositories ignore your git configuration (no signing, no hooks).
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")/.." && pwd)/conflicts"
+workspace="$(cd "$(dirname "$0")/.." && pwd)"
+root="$workspace/conflicts"
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME="Alex Martin" GIT_AUTHOR_EMAIL=alex@example.com
@@ -23,6 +25,12 @@ diverged() {
   mkdir -p "$dir" && cd "$dir"
   git init --quiet --initial-branch=main
   git config merge.conflictStyle zdiff3
+  # git mergetool runs this checkout's code, rebuilt if needed.
+  git config merge.tool scry
+  git config mergetool.scry.cmd "cargo run -q --manifest-path '$workspace/Cargo.toml' -p git-scry -- resolve \"\$BASE\" \"\$LOCAL\" \"\$REMOTE\" \"\$MERGED\""
+  git config mergetool.scry.trustExitCode true
+  git config mergetool.prompt false
+  git config mergetool.keepBackup false
   printf 'func upload(_ item: Item) async throws {\n    try await client.send(item)\n}\n\nfunc download(_ id: Item.ID) async throws -> Item {\n    try await client.fetch(id)\n}\n' > SyncEngine.swift
   git add . && git commit --quiet -m "Initial sync engine"
 

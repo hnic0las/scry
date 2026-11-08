@@ -8,3 +8,4 @@ pub mod conflict;
 pub mod git;
 pub mod operation;
 pub mod resolution;
+pub mod session;

@@ -12,3 +12,6 @@ scry-core = { path = "../scry-core" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

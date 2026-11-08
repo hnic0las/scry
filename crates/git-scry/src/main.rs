@@ -3,6 +3,8 @@
 //! Git runs any `git-<name>` executable on the PATH as `git <name>`, so this
 //! binary is also available as `git scry`.
 
+mod resolve;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -39,6 +41,30 @@ enum Command {
     /// Exits with 0, or 2 when git cannot answer (for example outside a
     /// repository).
     Session,
+    /// Resolve a conflicted file, as the merge tool `git mergetool` runs:
+    ///
+    ///   git config merge.tool scry
+    ///   git config mergetool.scry.cmd 'git-scry resolve "$BASE" "$LOCAL" "$REMOTE" "$MERGED"'
+    ///   git config mergetool.scry.trustExitCode true
+    ///
+    /// Asks for a candidate per conflict in the terminal, unless --take or
+    /// --suggested are given. Writes the file only when every conflict is
+    /// resolved. Exits with 0 when written, 1 when conflicts are left
+    /// (nothing written), 2 on error.
+    Resolve {
+        base: PathBuf,
+        local: PathBuf,
+        remote: PathBuf,
+        merged: PathBuf,
+        /// Choose without asking: <conflict>=<candidate>, where <conflict>
+        /// is a number or an ID and <candidate> one of ours, theirs,
+        /// ours-then-theirs, theirs-then-ours, neither, base. Repeatable.
+        #[arg(long = "take", value_name = "CONFLICT=CANDIDATE")]
+        takes: Vec<String>,
+        /// Choose the rule suggestion wherever there is one, without asking.
+        #[arg(long)]
+        suggested: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -46,6 +72,18 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Conflicts { file } => list_conflicts(&file),
         Command::Session => show_session(),
+        Command::Resolve {
+            base,
+            local,
+            remote,
+            merged,
+            takes,
+            suggested,
+        } => resolve::run(resolve::Options {
+            files: resolve::files(&base, &local, &remote, &merged),
+            takes,
+            suggested,
+        }),
     }
 }
 

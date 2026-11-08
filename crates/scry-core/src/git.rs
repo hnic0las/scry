@@ -8,10 +8,32 @@ use std::io;
 use std::path::PathBuf;
 use std::process::Command;
 
+/// What a git command produced.
+pub struct GitOutput {
+    /// The exit code; `None` when git was killed by a signal.
+    pub status: Option<i32>,
+    /// Raw bytes: file contents may not be UTF-8.
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+}
+
 /// Something that runs git commands in one repository.
 pub trait Git {
-    /// Runs git with these arguments and returns its standard output.
-    fn run(&self, args: &[&str]) -> Result<String, GitError>;
+    /// Runs git with these arguments, whatever its exit code.
+    fn output(&self, args: &[&str]) -> Result<GitOutput, GitError>;
+
+    /// Runs git with these arguments and returns its standard output, or an
+    /// error when git reports a failure.
+    fn run(&self, args: &[&str]) -> Result<String, GitError> {
+        let output = self.output(args)?;
+        if output.status != Some(0) {
+            return Err(GitError::Failed {
+                command: args.join(" "),
+                stderr: output.stderr,
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
 }
 
 /// Runs the `git` executable found on the `PATH`.
@@ -27,7 +49,7 @@ impl GitCli {
 }
 
 impl Git for GitCli {
-    fn run(&self, args: &[&str]) -> Result<String, GitError> {
+    fn output(&self, args: &[&str]) -> Result<GitOutput, GitError> {
         let output = Command::new("git")
             .arg("-C")
             .arg(&self.dir)
@@ -37,13 +59,11 @@ impl Git for GitCli {
             .env("GIT_OPTIONAL_LOCKS", "0")
             .output()
             .map_err(GitError::Spawn)?;
-        if !output.status.success() {
-            return Err(GitError::Failed {
-                command: args.join(" "),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            });
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(GitOutput {
+            status: output.status.code(),
+            stdout: output.stdout,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
     }
 }
 
