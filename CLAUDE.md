@@ -19,6 +19,10 @@ Layout and commands: `README.md`. Add `crates/scry-mcp`, `crates/scry-ffi` and `
 - After each Rust change, explain briefly in the conversation what is new language-wise; code comments explain why, not Rust basics.
 - Work in small increments that can be shown, each with what to run or look at to validate it.
 
+## Design prototype
+
+`ui/prototype` is exported by Claude Design; never edit it. Start from its `README.md` and `SPEC.md`. Raise design problems with Nicolas, who passes them to Claude Design; each new export lands as a commit, and the app follows its diff.
+
 ## Portability rules (decision 0003)
 
 1. The core owns all state and logic (merge session, undo and redo, line alignment, conflict blocks, word-level diff, highlight spans, folding, provenance). The SwiftUI app renders and forwards input only.
