@@ -15,6 +15,7 @@ use scry_core::operation::{self, SideRole};
 use scry_core::resolution::CandidateKind;
 use scry_core::session::{self, MergeSession};
 use scry_core::syntax::{Language, ParseCheck};
+use scry_core::words;
 
 uniffi::setup_scaffolding!();
 
@@ -93,14 +94,36 @@ pub struct Span {
     pub role: SyntaxRole,
 }
 
+/// A part of a cell's text, in UTF-8 bytes from its start, end excluded.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ByteRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// How a side's line in a conflict differs from the base.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum LineChange {
+    Unchanged,
+    Added,
+    /// `words` are the changed parts; empty when only whitespace changed or
+    /// the base is unknown.
+    Edited {
+        words: Vec<ByteRange>,
+    },
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Cell {
     pub number: Option<u32>,
     pub text: String,
     pub kind: CellKind,
     pub spans: Vec<Span>,
+    pub change: LineChange,
 }
 
+// Same as the core's rows: almost every row is a code row.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum Row {
     Lens {
@@ -379,6 +402,19 @@ fn cell(cell: layout::Cell) -> Cell {
             layout::CellKind::Removed => CellKind::Removed,
         },
         spans: cell.spans.into_iter().map(span).collect(),
+        change: match cell.change {
+            words::LineChange::Unchanged => LineChange::Unchanged,
+            words::LineChange::Added => LineChange::Added,
+            words::LineChange::Edited { words } => LineChange::Edited {
+                words: words
+                    .into_iter()
+                    .map(|range| ByteRange {
+                        start: range.start as u32,
+                        end: range.end as u32,
+                    })
+                    .collect(),
+            },
+        },
     }
 }
 

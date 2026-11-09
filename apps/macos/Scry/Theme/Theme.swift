@@ -54,6 +54,8 @@ enum Metrics {
     static let statusBarHeight: CGFloat = 26
     static let provenanceStrip: CGFloat = 3
     static let blockTintOpacity = 0.07
+    /// Changed words in a conflict side: the side's colour at 24 %.
+    static let changedWordOpacity = 0.24
     static let badgeHeight: CGFloat = 18
     static let cardCornerRadius: CGFloat = 8
     static let previewLines = 3

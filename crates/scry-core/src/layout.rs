@@ -7,6 +7,7 @@
 use crate::conflict::Segment;
 use crate::highlight::Span;
 use crate::session::{MergeSession, Pane};
+use crate::words::{self, LineChange};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellKind {
@@ -34,6 +35,9 @@ pub struct Cell {
     /// Syntax highlighting of `text`; empty for plain text or without a
     /// grammar.
     pub spans: Vec<Span>,
+    /// For a side's line in a conflict, how it differs from the base;
+    /// `Unchanged` everywhere else.
+    pub change: LineChange,
 }
 
 // Almost every row is a code row, so boxing the large variant would add an
@@ -73,6 +77,7 @@ fn line(number: &mut usize, text: &str, kind: CellKind, spans: &[Vec<Span>]) -> 
         text: text.to_string(),
         kind,
         spans: spans.get(*number - 1).cloned().unwrap_or_default(),
+        change: LineChange::Unchanged,
     };
     *number += 1;
     cell
@@ -84,6 +89,7 @@ fn empty(kind: CellKind) -> Cell {
         text: String::new(),
         kind,
         spans: Vec::new(),
+        change: LineChange::Unchanged,
     }
 }
 
@@ -150,6 +156,13 @@ impl MergeSession {
         ours: &str,
         theirs: &str,
     ) {
+        let base = self
+            .conflict(index)
+            .base
+            .as_ref()
+            .map(|base| base.text.as_str());
+        let mut ours_changes = words::line_changes(base, ours);
+        let mut theirs_changes = words::line_changes(base, theirs);
         let ours: Vec<&str> = ours.lines().collect();
         let theirs: Vec<&str> = theirs.lines().collect();
         let chosen_text = self.chosen(index).map(|candidate| candidate.text.as_str());
@@ -163,16 +176,26 @@ impl MergeSession {
 
         for row in 0..count {
             let ours_cell = match ours.get(row) {
-                Some(text) => line(&mut numbers.ours, text, CellKind::Conflict, highlights.ours),
+                Some(text) => {
+                    let mut cell =
+                        line(&mut numbers.ours, text, CellKind::Conflict, highlights.ours);
+                    cell.change = std::mem::replace(&mut ours_changes[row], LineChange::Unchanged);
+                    cell
+                }
                 None => empty(CellKind::Spacer),
             };
             let theirs_cell = match theirs.get(row) {
-                Some(text) => line(
-                    &mut numbers.theirs,
-                    text,
-                    CellKind::Conflict,
-                    highlights.theirs,
-                ),
+                Some(text) => {
+                    let mut cell = line(
+                        &mut numbers.theirs,
+                        text,
+                        CellKind::Conflict,
+                        highlights.theirs,
+                    );
+                    cell.change =
+                        std::mem::replace(&mut theirs_changes[row], LineChange::Unchanged);
+                    cell
+                }
                 None => empty(CellKind::Spacer),
             };
             let result_cell = match (chosen_text, result.get(row)) {
@@ -299,6 +322,35 @@ mod tests {
         };
         assert_eq!(theirs.text, "let z = 2");
         assert!(roles(theirs).contains(&SyntaxRole::Number));
+    }
+
+    /// Conflict cells carry their line change against the base (added, edited with the
+    /// changed words), and cells outside conflicts carry none.
+    #[test]
+    fn conflict_lines_carry_their_change_against_the_base() {
+        let text = "a\n<<<<<<< ours\nsend(item, timeout)\n||||||| base\nsend(item)\n=======\nretry {\n    send(item)\n}\n>>>>>>> theirs\nz\n";
+        let session = MergeSession::from_text(text, None).unwrap();
+        let rows = session.rows();
+        let changes: Vec<(LineChange, LineChange)> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Code { ours, theirs, .. } => {
+                    Some((ours.change.clone(), theirs.change.clone()))
+                }
+                Row::Lens { .. } => None,
+            })
+            .collect();
+        let edited = |words: Vec<std::ops::Range<usize>>| LineChange::Edited { words };
+        assert_eq!(
+            changes,
+            [
+                (LineChange::Unchanged, LineChange::Unchanged),
+                (edited(std::iter::once(9..18).collect()), LineChange::Added),
+                (LineChange::Unchanged, edited(Vec::new())),
+                (LineChange::Unchanged, LineChange::Added),
+                (LineChange::Unchanged, LineChange::Unchanged),
+            ]
+        );
     }
 
     /// Choosing none removes the block; the result shows one row saying so.

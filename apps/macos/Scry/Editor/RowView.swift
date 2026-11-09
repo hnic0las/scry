@@ -83,7 +83,7 @@ struct CellView: View {
                 .italic()
                 .foregroundStyle(Theme.Surfaces.textSecondary)
         default:
-            Text(cell.highlighted)
+            Text(cell.highlighted(wordTint: wordTint))
                 .font(Metrics.code)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -92,10 +92,24 @@ struct CellView: View {
 
     private var mark: String {
         switch cell.kind {
-        case .conflict: return "~"
+        case .conflict:
+            switch cell.change {
+            case .added: return "+"
+            case .edited: return "~"
+            case .unchanged: return ""
+            }
         case .unresolved: return "!"
         case .chosen: return invalid ? "!" : ""
         default: return ""
+        }
+    }
+
+    /// Changed words are tinted with their side's colour.
+    private var wordTint: Color? {
+        switch (cell.kind, pane) {
+        case (.conflict, .ours): return Theme.Sides.ours.opacity(Metrics.changedWordOpacity)
+        case (.conflict, .theirs): return Theme.Sides.theirs.opacity(Metrics.changedWordOpacity)
+        default: return nil
         }
     }
 
