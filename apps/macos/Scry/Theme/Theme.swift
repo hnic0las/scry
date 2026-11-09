@@ -61,6 +61,16 @@ enum Metrics {
     static let previewLines = 3
 
     static let code = Font.system(size: 12, design: .monospaced)
+    /// The width of one character of `code`, to measure lines without
+    /// laying them out.
+    static let codeCharacterWidth: CGFloat = {
+        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        return ("0" as NSString).size(withAttributes: [.font: font]).width
+    }()
+    /// A line cut at the pane's edge fades over this width.
+    static let clipFadeWidth: CGFloat = 26
+    /// The tab that marks a cut line, over the end of the fade.
+    static let clipIndicatorWidth: CGFloat = 16
     static let lineNumber = Font.system(size: 11, design: .monospaced)
     static let codeSmall = Font.system(size: 10.5, design: .monospaced)
     static let headline = Font.system(size: 13, weight: .semibold)

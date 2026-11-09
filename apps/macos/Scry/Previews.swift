@@ -18,10 +18,11 @@ enum PreviewFiles {
 private struct DemoEditor: View {
     let operation: String
     var choose: [(Int, String)] = []
+    var scrollX: CGFloat = 0
 
     var body: some View {
         if let model = try? EditorModel(path: PreviewFiles.demo(operation)) {
-            MergeEditorView(model: model)
+            MergeEditorView(model: model, scrollX: scrollX)
                 .onAppear {
                     for (conflict, candidate) in choose {
                         model.choose(candidate, conflict: conflict)
@@ -44,4 +45,8 @@ private struct DemoEditor: View {
 #Preview("Rebase, dark", traits: .fixedLayout(width: 1440, height: 900)) {
     DemoEditor(operation: "rebase", choose: [(0, "theirs"), (1, "ours-then-theirs-closed")])
         .preferredColorScheme(.dark)
+}
+
+#Preview("Rebase, scrolled sideways", traits: .fixedLayout(width: 1100, height: 600)) {
+    DemoEditor(operation: "rebase", scrollX: 120)
 }

@@ -6,6 +6,8 @@ struct RowView: View {
     let row: Row
     let widths: PaneWidths
     let model: EditorModel
+    /// The panes' shared sideways scroll.
+    let scrollX: CGFloat
 
     var body: some View {
         switch row {
@@ -14,15 +16,18 @@ struct RowView: View {
         case .code(let ours, let result, let theirs, let conflict):
             let index = conflict.map { Int($0) }
             HStack(spacing: 0) {
-                CellView(cell: ours, pane: .ours, invalid: false)
+                CellView(cell: ours, pane: .ours, invalid: false, scrollX: scrollX, codeWidth: widths.code(widths.side))
                     .frame(width: widths.side)
                 Connector(color: Theme.Sides.ours, active: index != nil)
                     .frame(width: widths.connector)
-                CellView(cell: result, pane: .result, invalid: isInvalid(index))
+                CellView(
+                    cell: result, pane: .result, invalid: isInvalid(index),
+                    scrollX: scrollX, codeWidth: widths.code(widths.result)
+                )
                     .frame(width: widths.result)
                 Connector(color: Theme.Sides.theirs, active: index != nil)
                     .frame(width: widths.connector)
-                CellView(cell: theirs, pane: .theirs, invalid: false)
+                CellView(cell: theirs, pane: .theirs, invalid: false, scrollX: scrollX, codeWidth: widths.code(widths.side))
                     .frame(width: widths.side)
             }
             .frame(height: Metrics.rowHeight)
@@ -49,6 +54,9 @@ struct CellView: View {
     let pane: Pane
     /// The chosen candidate does not parse.
     let invalid: Bool
+    let scrollX: CGFloat
+    /// The width the code is shown in, gutters excluded.
+    let codeWidth: CGFloat
 
     var body: some View {
         HStack(spacing: 0) {
@@ -62,7 +70,8 @@ struct CellView: View {
                 .foregroundStyle(markColor)
                 .frame(width: Metrics.markWidth, alignment: .leading)
             content
-            Spacer(minLength: 0)
+                .frame(width: codeWidth, alignment: .leading)
+                .clipped()
         }
         .frame(maxHeight: .infinity)
         .background(background)
@@ -83,10 +92,51 @@ struct CellView: View {
                 .italic()
                 .foregroundStyle(Theme.Surfaces.textSecondary)
         default:
+            // No wrapping: rows stay one line high so the panes stay aligned.
             Text(cell.highlighted(wordTint: wordTint))
                 .font(Metrics.code)
                 .lineLimit(1)
-                .truncationMode(.tail)
+                .fixedSize()
+                .offset(x: -scrollX)
+                .frame(width: codeWidth, alignment: .leading)
+                .mask { clipped ? AnyView(fadeMask) : AnyView(Color.black) }
+                .overlay(alignment: .trailing) {
+                    if clipped { clipIndicator }
+                }
+        }
+    }
+
+    /// Whether the line goes on past the pane's right edge.
+    private var clipped: Bool {
+        CGFloat(cell.text.count) * Metrics.codeCharacterWidth - scrollX > codeWidth
+    }
+
+    /// An opaque tab on the pane's edge, with the cell's own background and a
+    /// rule on its left, so it reads as part of the interface, not as a `>`
+    /// in the code.
+    private var clipIndicator: some View {
+        ZStack {
+            Theme.Surfaces.pane
+            background
+            Image(systemName: "chevron.right")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+                .frame(width: Metrics.clipIndicatorWidth - 4, height: Metrics.rowHeight - 6)
+                .background(RoundedRectangle(cornerRadius: 3).fill(Theme.Surfaces.textTertiary.opacity(0.3)))
+        }
+        .frame(width: Metrics.clipIndicatorWidth)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(Theme.Surfaces.hairline).frame(width: 1)
+        }
+    }
+
+    /// Opaque, then fading out over the last points, so a cut line never
+    /// looks complete.
+    private var fadeMask: some View {
+        HStack(spacing: 0) {
+            Color.black
+            LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
+                .frame(width: Metrics.clipFadeWidth)
         }
     }
 

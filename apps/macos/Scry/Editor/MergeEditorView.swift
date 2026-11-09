@@ -5,6 +5,14 @@ struct MergeEditorView: View {
     @Bindable var model: EditorModel
     @State private var showInspector = true
     @State private var confirmInvalidWrite = false
+    /// How far the three panes are scrolled sideways, shared by all rows.
+    @State private var scrollX: CGFloat
+
+    /// `scrollX` starts the panes scrolled sideways, for previews.
+    init(model: EditorModel, scrollX: CGFloat = 0) {
+        self.model = model
+        _scrollX = State(initialValue: scrollX)
+    }
 
     var body: some View {
         // The inspector is a plain column under the toolbar, as in the
@@ -57,9 +65,14 @@ struct MergeEditorView: View {
             ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(model.rows.enumerated()), id: \.offset) { offset, row in
-                        RowView(row: row, widths: widths, model: model)
+                        RowView(row: row, widths: widths, model: model, scrollX: clampedScrollX(widths))
                             .id(offset)
                     }
+                }
+            }
+            .background {
+                HorizontalScrollMonitor { delta in
+                    scrollX = min(max(clampedScrollX(widths) + delta, 0), maxScrollX(widths))
                 }
             }
             .onChange(of: model.current) { _, conflict in
@@ -68,6 +81,17 @@ struct MergeEditorView: View {
                 }
             }
         }
+    }
+
+    /// Far enough for the longest line to show whole in the narrowest pane.
+    private func maxScrollX(_ widths: PaneWidths) -> CGFloat {
+        let longest = CGFloat(model.longestLine) * Metrics.codeCharacterWidth + Metrics.clipFadeWidth
+        return max(longest - widths.code(widths.side), 0)
+    }
+
+    /// The offset, kept in range when the window narrows or the rows change.
+    private func clampedScrollX(_ widths: PaneWidths) -> CGFloat {
+        min(scrollX, maxScrollX(widths))
     }
 
     @ToolbarContentBuilder
@@ -205,6 +229,12 @@ struct PaneWidths {
         let flexible = max(total - 2 * Metrics.connectorWidth, 0)
         side = flexible / 3.25
         result = flexible * 1.25 / 3.25
+    }
+
+    /// The width left for code in a pane, after the line-number and mark
+    /// gutters, which do not scroll.
+    func code(_ pane: CGFloat) -> CGFloat {
+        max(pane - Metrics.lineNumberWidth - Metrics.markWidth, 0)
     }
 }
 
