@@ -2,7 +2,7 @@
 
 ## Project knowledge
 
-Specifications, decisions and investigations live in the Bigsool Obsidian vault, not in this repository: `~/Documents/Bigsool/Projects/git-scry/Home.md`. Read it before starting work and follow its links.
+Specifications, decisions and investigations live in the Workshop Obsidian vault, not in this repository: `~/Documents/Workshop/Projects/git-scry/Home.md`. Read it before starting work and follow its links.
 
 Accepted decisions so far:
 
