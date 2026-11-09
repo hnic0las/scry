@@ -70,6 +70,10 @@ impl MergeSession {
         }
     }
 
+    pub(crate) fn segments(&self) -> &[Segment] {
+        &self.segments
+    }
+
     pub fn language(&self) -> Option<Language> {
         self.language
     }

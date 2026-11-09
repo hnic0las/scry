@@ -45,9 +45,20 @@ git config --global mergetool.scry.trustExitCode true
 
 To try it on real conflicts, `scripts/make-conflicts.sh` rebuilds `conflicts/` (ignored by git) with one repository stopped on a conflict per operation: `rebase`, `merge`, `cherry-pick` and `revert`. In each, `git mergetool` runs this checkout's `git-scry`.
 
+## macOS app
+
+```sh
+scripts/build-ffi.sh        # once before opening Xcode: builds the core and the Swift bindings
+open apps/macos/Scry.xcodeproj
+```
+
+Xcode runs `scripts/build-ffi.sh` before each build. Pass a conflicted file as the launch argument (scheme › Run › Arguments), or use Open Conflicted File… (⌘O). Colours come from the design tokens: after a new export in `~/workspace/git-scry-ui`, run `scripts/generate-theme.py`.
+
 ## Layout
 
 - `crates/scry-core`: all state and logic, shared by every front end. No platform-specific code.
 - `crates/git-scry`: the `git-scry` command-line binary.
+- `crates/scry-ffi`: the core exposed to Swift through UniFFI.
+- `apps/macos`: the SwiftUI app (standard Xcode project).
 
-The MCP server, the UniFFI bindings and the SwiftUI app (`apps/macos`) will be added with their first code.
+The MCP server will be added with its first code.
