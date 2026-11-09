@@ -21,7 +21,7 @@ Layout and commands: `README.md`. Add `crates/scry-mcp`, `crates/scry-ffi` and `
 
 ## Design prototype
 
-The UI design lives in its own repository, `~/workspace/git-scry-ui` (images in Git LFS), so this one keeps only code. Its `prototype/` folder is exported by Claude Design; never edit it. Start from `prototype/README.md` and `prototype/SPEC.md`. Raise design problems with Nicolas, who passes them to Claude Design; each new export lands as a commit there, and the app follows its diff.
+The UI design lives in its own repository, `~/workspace/scry-ui` (images in Git LFS), so this one keeps only code. Its `prototype/` folder is exported by Claude Design; never edit it. Start from `prototype/README.md` and `prototype/SPEC.md`. Raise design problems with Nicolas, who passes them to Claude Design; each new export lands as a commit there, and the app follows its diff.
 
 ## Portability rules (decision 0003)
 

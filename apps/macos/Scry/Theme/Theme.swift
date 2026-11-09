@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// Colour roles and metrics from the design tokens in
-/// `git-scry-ui/prototype/tokens`. Views ask for a role, never a hex value;
+/// `scry-ui/prototype/tokens`. Views ask for a role, never a hex value;
 /// the roles themselves are generated into `Colors.swift`.
 enum Theme {
     struct RGBA: Sendable {
