@@ -8,6 +8,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use scry_core::blame;
 use scry_core::git::GitCli;
 use scry_core::highlight;
 use scry_core::layout;
@@ -168,6 +169,19 @@ pub struct ConflictInfo {
     pub candidates: Vec<CandidateInfo>,
     /// The chosen candidate's ID.
     pub chosen: Option<String>,
+    /// The commit that last touched the conflict's lines on each side, for
+    /// the lens row; `None` outside an operation or when git has no answer.
+    pub ours_commit: Option<LensCommit>,
+    pub theirs_commit: Option<LensCommit>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct LensCommit {
+    pub short_id: String,
+    pub subject: String,
+    pub author: String,
+    /// "today", "2 days ago"…
+    pub age: String,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -184,6 +198,8 @@ pub struct Status {
 pub struct MergeDocument {
     path: PathBuf,
     header: Header,
+    /// Per conflict; computed once, since the sides never change.
+    commits: Vec<blame::ConflictCommits>,
     // UniFFI shares the object with Swift behind an `Arc`, so methods take
     // `&self`; the mutex lets `choose` change the session safely.
     session: Mutex<MergeSession>,
@@ -200,10 +216,23 @@ impl MergeDocument {
             .map_err(|error| failed(format!("cannot read {}: {error}", path.display())))?;
         let language = Language::from_path(&path);
         let session = MergeSession::from_text(&text, language).map_err(failed)?;
-        let header = header(&path, &session, language);
+        let directory = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let git = GitCli::new(directory);
+        let operation = operation::current(&git).ok().flatten();
+        let header = header(&path, &session, language, operation.as_ref());
+        let commits = match (&operation, path.file_name()) {
+            (Some(operation), Some(name)) => {
+                blame::conflict_commits(&git, operation, &name.to_string_lossy(), &session)
+            }
+            _ => Vec::new(),
+        };
         Ok(Arc::new(MergeDocument {
             path,
             header,
+            commits,
             session: Mutex::new(session),
         }))
     }
@@ -289,18 +318,36 @@ impl MergeDocument {
             classification: analysis.kind.describe(ours, theirs),
             candidates,
             chosen: session.choice(index).map(|kind| kind.id().to_string()),
+            ours_commit: self.lens_commit(index, true),
+            theirs_commit: self.lens_commit(index, false),
         }
+    }
+
+    fn lens_commit(&self, index: usize, ours: bool) -> Option<LensCommit> {
+        let commits = self.commits.get(index)?;
+        let commit = if ours { &commits.ours } else { &commits.theirs };
+        let commit = commit.as_ref()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs() as i64)
+            .unwrap_or(commit.time);
+        Some(LensCommit {
+            short_id: commit.short_id.clone(),
+            subject: commit.subject.clone(),
+            author: commit.author.clone(),
+            age: blame::age(commit.time, now),
+        })
     }
 }
 
-fn header(path: &Path, session: &MergeSession, language: Option<Language>) -> Header {
-    let directory = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
-    let git = GitCli::new(directory);
-    let (summary, ours, theirs) = match operation::current(&git) {
-        Ok(Some(operation)) => {
+fn header(
+    path: &Path,
+    session: &MergeSession,
+    language: Option<Language>,
+    operation: Option<&operation::Operation>,
+) -> Header {
+    let (summary, ours, theirs) = match operation {
+        Some(operation) => {
             let ours = pane_side(&operation.ours, "ours");
             let theirs = match &operation.theirs {
                 Some(side) => pane_side(side, "theirs"),

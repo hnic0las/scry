@@ -253,7 +253,9 @@ struct LensRow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Color.clear.frame(width: widths.side + widths.connector)
+            LensCommitView(commit: info?.oursCommit)
+                .frame(width: widths.side)
+            Color.clear.frame(width: widths.connector)
             HStack(spacing: 6) {
                 Button("Conflict \(conflict + 1)") { model.current = conflict }
                     .buttonStyle(.plain)
@@ -269,7 +271,9 @@ struct LensRow: View {
             }
             .padding(.horizontal, 10)
             .frame(width: widths.result)
-            Color.clear.frame(width: widths.connector + widths.side)
+            Color.clear.frame(width: widths.connector)
+            LensCommitView(commit: info?.theirsCommit)
+                .frame(width: widths.side)
         }
         .frame(height: Metrics.lensHeight)
         .background(Theme.Surfaces.sidebar)
@@ -277,6 +281,10 @@ struct LensRow: View {
     }
 
     private var focused: Bool { model.current == conflict }
+
+    private var info: ConflictInfo? {
+        model.conflicts.indices.contains(conflict) ? model.conflicts[conflict] : nil
+    }
 
     @ViewBuilder
     private var badges: some View {
@@ -306,4 +314,53 @@ struct Badge: View {
             .background(RoundedRectangle(cornerRadius: 4).fill(color.opacity(0.13)))
             .lineLimit(1)
     }
+}
+
+/// A side's part of the lens row: the commit that last touched the
+/// conflict's lines on that side, as `sha message · author · age`.
+struct LensCommitView: View {
+    let commit: LensCommit?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if let commit {
+                Text(commit.shortId)
+                    .font(Metrics.lineNumber)
+                    .foregroundStyle(Theme.Surfaces.text)
+                // The message gives way first; author and age always show.
+                Text(commit.subject)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(0)
+                Text("· \(commit.author) · \(commit.age)")
+                    .lineLimit(1)
+                    .fixedSize()
+                    .layoutPriority(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .font(Metrics.caption)
+        .foregroundStyle(Theme.Surfaces.textSecondary)
+        .padding(.leading, 10)
+        .padding(.trailing, 8)
+        .help(commit.map { "\($0.shortId) \($0.subject)\n\($0.author) · \($0.age)" } ?? "")
+    }
+}
+
+#Preview("Lens commit", traits: .fixedLayout(width: 360, height: 90)) {
+    VStack(spacing: 0) {
+        LensCommitView(commit: LensCommit(
+            shortId: "9f8e7d6", subject: "Add a 30 s timeout to uploads (#412)",
+            author: "Alex Martin", age: "2 days ago"
+        ))
+        .frame(height: Metrics.lensHeight)
+        LensCommitView(commit: LensCommit(
+            shortId: "a1b2c3d", subject: "Retry failed uploads with exponential backoff and jitter",
+            author: "You", age: "today"
+        ))
+        .frame(height: Metrics.lensHeight)
+        LensCommitView(commit: nil)
+            .frame(height: Metrics.lensHeight)
+    }
+    .background(Theme.Surfaces.sidebar)
 }

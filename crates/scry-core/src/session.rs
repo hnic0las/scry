@@ -125,6 +125,31 @@ impl MergeSession {
         text
     }
 
+    /// The first and last lines (from 1) of a conflict's side in that
+    /// side's own file; `None` when the side has no line there.
+    pub(crate) fn side_lines(&self, index: usize, pane: Pane) -> Option<(usize, usize)> {
+        let mut line = 1;
+        let mut conflict = 0;
+        for segment in &self.segments {
+            match segment {
+                Segment::Common(common) => line += common.lines().count(),
+                Segment::Conflict(found) => {
+                    let side = match pane {
+                        Pane::Theirs => &found.theirs.text,
+                        _ => &found.ours.text,
+                    };
+                    let count = side.lines().count();
+                    if conflict == index {
+                        return (count > 0).then(|| (line, line + count - 1));
+                    }
+                    line += count;
+                    conflict += 1;
+                }
+            }
+        }
+        None
+    }
+
     pub(crate) fn ours_spans(&self) -> &[Vec<Span>] {
         &self.ours_spans
     }
@@ -591,6 +616,22 @@ mod tests {
             session.merged_text().as_deref(),
             Some("start\na\nb\nmiddle\nsame\nend\n")
         );
+    }
+
+    /// The lens rows blame each side's lines in that side's own file, so the
+    /// line numbers must count only that side's text before the conflict.
+    #[test]
+    fn side_lines_count_each_side_on_its_own() {
+        let session = MergeSession::from_text(TEXT, None).unwrap();
+        assert_eq!(session.side_lines(0, Pane::Ours), Some((2, 2)));
+        assert_eq!(session.side_lines(1, Pane::Ours), Some((4, 4)));
+        let text = "a\n<<<<<<< ours\n||||||| base\nx\n=======\nt1\nt2\n>>>>>>> theirs\nz\n<<<<<<< ours\no\n||||||| base\n=======\nt\n>>>>>>> theirs\n";
+        let session = MergeSession::from_text(text, None).unwrap();
+        // Ours deleted the first block: no line to blame there.
+        assert_eq!(session.side_lines(0, Pane::Ours), None);
+        assert_eq!(session.side_lines(0, Pane::Theirs), Some((2, 3)));
+        assert_eq!(session.side_lines(1, Pane::Ours), Some((3, 3)));
+        assert_eq!(session.side_lines(1, Pane::Theirs), Some((5, 5)));
     }
 
     /// Choosing a candidate the conflict does not offer, or a conflict that does not exist,
