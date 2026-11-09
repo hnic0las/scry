@@ -98,15 +98,20 @@ final class EditorModel {
         return document.highlightDraft(conflict: UInt32(editing), text: text)
     }
 
-    /// What Return inserts in the editor, from the core.
+    /// What Return does in the editor, from the core: the text replacing
+    /// the current line up to the cursor.
     func newline(before: String, after: String) -> Newline {
-        document.newline(before: before, after: after)
+        guard let editing else {
+            return Newline(text: "\n", cursor: 1)
+        }
+        return document.newline(conflict: UInt32(editing), before: before, after: after)
     }
 
-    /// The indentation for a line where `closer` is typed, from the core.
-    func closingIndent(before: String, closer: String) -> String? {
+    /// The indentation for the current line once `typed` is typed, from
+    /// the core; `nil` to type it as it is.
+    func typedIndent(before: String, typed: String) -> String? {
         guard let editing else { return nil }
-        return document.closingIndent(conflict: UInt32(editing), before: before, closer: closer)
+        return document.typedIndent(conflict: UInt32(editing), before: before, typed: typed)
     }
 
     func cancelEdit() {

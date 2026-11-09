@@ -16,7 +16,7 @@ struct EditBlockView: View {
                     text: $model.draft,
                     highlight: model.highlightDraft,
                     newline: model.newline,
-                    closingIndent: model.closingIndent
+                    typedIndent: model.typedIndent
                 )
                     .frame(height: editorHeight)
                     .overlay(
@@ -59,12 +59,17 @@ struct CodeTextView: NSViewRepresentable {
     @Binding var text: String
     /// Spans per line of the text, from the core.
     var highlight: (String) -> [[Span]] = { _ in [] }
-    /// What Return inserts, given the line's text before and after the
-    /// cursor; a plain line break by default.
-    var newline: (String, String) -> Newline = { _, _ in Newline(text: "\n", cursor: 1) }
-    /// The indentation for a line where a closing bracket is typed, given
-    /// the text before the cursor and the bracket; `nil` to type it as is.
-    var closingIndent: (String, String) -> String? = { _, _ in nil }
+    /// What Return does, given all the text before the cursor and the rest
+    /// of its line: the text replacing the line up to the cursor. By
+    /// default, a plain line break.
+    var newline: (String, String) -> Newline = { before, _ in
+        let line = before.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? ""
+        return Newline(text: line + "\n", cursor: UInt32(line.utf8.count + 1))
+    }
+    /// The indentation for the current line once a character is typed,
+    /// given the text before the cursor and the character; `nil` to type it
+    /// as it is.
+    var typedIndent: (String, String) -> String? = { _, _ in nil }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -127,9 +132,10 @@ struct CodeTextView: NSViewRepresentable {
             colour(textView)
         }
 
-        /// Return inserts what the core says: the line break and the
-        /// indentation, and for a block opened between brackets, the
-        /// closing one on its own line. Inserted as typing, so ⌘Z undoes it.
+        /// Return does what the core says: the current line, moved back
+        /// when it closes a block (`end`, `fi`), then the line break and the
+        /// indentation, and for a block opened between a pair the closing
+        /// part on its own line. One edit, as typing, so ⌘Z undoes it.
         func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
             guard selector == #selector(NSResponder.insertNewline(_:)) else { return false }
             let string = textView.string as NSString
@@ -141,39 +147,46 @@ struct CodeTextView: NSViewRepresentable {
                   CharacterSet.newlines.contains(scalar) {
                 lineEnd -= 1
             }
-            let before = string.substring(with: NSRange(
-                location: line.location,
-                length: selection.location - line.location
-            ))
+            let before = string.substring(to: selection.location)
             let selectionEnd = selection.location + selection.length
             let after = string.substring(with: NSRange(
                 location: selectionEnd,
                 length: max(lineEnd - selectionEnd, 0)
             ))
             let newline = parent.newline(before, after)
-            textView.insertText(newline.text, replacementRange: selection)
+            // Replaces the line from its start, so it can move back.
+            let replaced = NSRange(location: line.location, length: selectionEnd - line.location)
+            textView.insertText(newline.text, replacementRange: replaced)
             // The core counts UTF-8 bytes; AppKit counts UTF-16 units.
             let cursor = String(decoding: newline.text.utf8.prefix(Int(newline.cursor)), as: UTF8.self)
-            textView.setSelectedRange(NSRange(location: selection.location + cursor.utf16.count, length: 0))
+            textView.setSelectedRange(NSRange(location: line.location + cursor.utf16.count, length: 0))
             return true
         }
 
-        /// A closing bracket typed on a blank line moves back to the
-        /// indentation the core gives, that of its block's opening line.
+        /// Characters that can close a block as they are typed: brackets on
+        /// a blank line, the colon of `case …:` or Python's `else:`, and the
+        /// `>` of an HTML closing tag.
+        private static let closing: Set<String> = ["}", ")", "]", ":", ">"]
+
+        /// When the core says the line closes a block, it moves back to the
+        /// indentation of the block's opening line as the character is
+        /// typed.
         func textView(
             _ textView: NSTextView,
             shouldChangeTextIn range: NSRange,
             replacementString text: String?
         ) -> Bool {
-            guard let text, range.length == 0, ["}", ")", "]"].contains(text) else { return true }
+            guard let text, range.length == 0, Self.closing.contains(text) else { return true }
             let string = textView.string as NSString
             let before = string.substring(to: range.location)
-            guard let indentation = parent.closingIndent(before, text) else { return true }
+            guard let indentation = parent.typedIndent(before, text) else { return true }
             let lineStart = string.lineRange(for: NSRange(location: range.location, length: 0)).location
-            // Replaces the line's blanks and types the bracket in one step,
-            // so ⌘Z undoes both.
+            let typed = string.substring(with: NSRange(location: lineStart, length: range.location - lineStart))
+            let content = typed.drop { $0 == " " || $0 == "\t" }
+            // The line's new indentation, its text and the character in one
+            // edit, so ⌘Z undoes them together.
             textView.insertText(
-                indentation + text,
+                indentation + content + text,
                 replacementRange: NSRange(location: lineStart, length: range.location - lineStart)
             )
             return false

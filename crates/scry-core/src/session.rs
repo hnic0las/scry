@@ -297,20 +297,25 @@ impl MergeSession {
         Ok(())
     }
 
-    /// What Return inserts while editing a conflict by hand, with `before`
-    /// and `after` the current line's text on each side of the cursor.
-    pub fn newline(&self, before: &str, after: &str) -> Newline {
-        indent::newline(before, after, &self.indent_unit, self.language)
+    /// What Return does while editing conflict `index` by hand, with
+    /// `before` the draft's text before the cursor and `after` the rest of
+    /// the cursor's line. `Newline::text` replaces the current line up to
+    /// the cursor. The file before the conflict is searched too, for a
+    /// block opened outside it.
+    pub fn newline(&self, index: usize, before: &str, after: &str) -> Newline {
+        let mut text = self.text_before_conflict(index);
+        text.push_str(before);
+        indent::newline(&text, after, &self.indent_unit, self.language)
     }
 
-    /// The indentation for the current line when `closer` is typed while
+    /// The indentation for the current line when `typed` is typed while
     /// editing conflict `index`, with `before` the draft's text before the
     /// cursor; `None` to type it as it is. The file before the conflict is
     /// searched too, for a block opened outside it.
-    pub fn closing_indent(&self, index: usize, before: &str, closer: char) -> Option<String> {
+    pub fn typed_indent(&self, index: usize, before: &str, typed: char) -> Option<String> {
         let mut text = self.text_before_conflict(index);
         text.push_str(before);
-        indent::closing_indent(&text, closer, &self.indent_unit)
+        indent::typed_indent(&text, typed, &self.indent_unit, self.language)
     }
 
     /// The file before conflict `index`: common text, and earlier conflicts
@@ -905,7 +910,10 @@ mod tests {
     #[test]
     fn newline_uses_the_files_indent_unit() {
         let session = MergeSession::from_text(SWIFT, Some(Language::Swift)).unwrap();
-        assert_eq!(session.newline("func stop() {", "}").text, "\n    \n");
+        assert_eq!(
+            session.newline(0, "func stop() {", "}").text,
+            "func stop() {\n    \n"
+        );
     }
 
     /// A closing brace typed in a conflict finds its block's opening line
@@ -916,7 +924,7 @@ mod tests {
         let session = MergeSession::from_text(text, Some(Language::Swift)).unwrap();
         assert_eq!(
             session
-                .closing_indent(0, "        c()\n        ", '}')
+                .typed_indent(0, "        c()\n        ", '}')
                 .as_deref(),
             Some("    ")
         );

@@ -114,8 +114,8 @@ pub enum LineChange {
     },
 }
 
-/// What Return inserts while editing by hand, and where the cursor goes,
-/// in UTF-8 bytes from the start of `text`.
+/// What Return does while editing by hand: `text` replaces the current
+/// line up to the cursor; `cursor` is in UTF-8 bytes from its start.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Newline {
     pub text: String,
@@ -280,26 +280,26 @@ impl MergeDocument {
         self.lock().edit(conflict as usize, &text).map_err(failed)
     }
 
-    /// What Return inserts in the editor, with `before` and `after` the
-    /// current line's text on each side of the cursor.
-    pub fn newline(&self, before: String, after: String) -> Newline {
-        let newline = self.lock().newline(&before, &after);
+    /// What Return does while editing the conflict at `conflict`, with
+    /// `before` the draft's text before the cursor and `after` the rest of
+    /// its line. `Newline.text` replaces the current line up to the cursor.
+    pub fn newline(&self, conflict: u32, before: String, after: String) -> Newline {
+        let newline = self.lock().newline(conflict as usize, &before, &after);
         Newline {
             text: newline.text,
             cursor: newline.cursor as u32,
         }
     }
 
-    /// The indentation for the current line when `closer` (one character)
+    /// The indentation for the current line when `typed` (one character)
     /// is typed while editing the conflict at `conflict`, with `before` the
     /// draft's text before the cursor; `None` to type it as it is.
-    pub fn closing_indent(&self, conflict: u32, before: String, closer: String) -> Option<String> {
-        let mut characters = closer.chars();
-        let (Some(closer), None) = (characters.next(), characters.next()) else {
+    pub fn typed_indent(&self, conflict: u32, before: String, typed: String) -> Option<String> {
+        let mut characters = typed.chars();
+        let (Some(typed), None) = (characters.next(), characters.next()) else {
             return None;
         };
-        self.lock()
-            .closing_indent(conflict as usize, &before, closer)
+        self.lock().typed_indent(conflict as usize, &before, typed)
     }
 
     /// Highlight spans, one list per line, of `text` being typed for the
