@@ -15,19 +15,42 @@ enum PreviewFiles {
     }
 }
 
+/// A demo editor, set up before the first render: a static preview is
+/// captured before `onAppear` runs.
 private struct DemoEditor: View {
-    let operation: String
-    var choose: [(Int, String)] = []
-    var scrollX: CGFloat = 0
+    @State private var model: EditorModel?
+    private let scrollX: CGFloat
+
+    /// `choose`: candidates by conflict; `edited`: a conflict resolved by
+    /// hand with this text; `editing`: a conflict left open in the editor.
+    init(
+        operation: String,
+        choose: [(Int, String)] = [],
+        scrollX: CGFloat = 0,
+        edited: (Int, String)? = nil,
+        editing: Int? = nil
+    ) {
+        self.scrollX = scrollX
+        let model = try? EditorModel(path: PreviewFiles.demo(operation))
+        if let model {
+            for (conflict, candidate) in choose {
+                model.choose(candidate, conflict: conflict)
+            }
+            if let (conflict, text) = edited {
+                model.startEditing(conflict: conflict)
+                model.draft = text
+                model.applyEdit()
+            }
+            if let editing {
+                model.startEditing(conflict: editing)
+            }
+        }
+        _model = State(initialValue: model)
+    }
 
     var body: some View {
-        if let model = try? EditorModel(path: PreviewFiles.demo(operation)) {
+        if let model {
             MergeEditorView(model: model, scrollX: scrollX)
-                .onAppear {
-                    for (conflict, candidate) in choose {
-                        model.choose(candidate, conflict: conflict)
-                    }
-                }
         } else {
             EmptyStateView(error: "Run scripts/make-conflicts.sh first.", open: {})
         }
@@ -49,4 +72,16 @@ private struct DemoEditor: View {
 
 #Preview("Rebase, scrolled sideways", traits: .fixedLayout(width: 1100, height: 600)) {
     DemoEditor(operation: "rebase", scrollX: 120)
+}
+
+#Preview("Rebase, editing by hand", traits: .fixedLayout(width: 1440, height: 900)) {
+    DemoEditor(operation: "rebase", choose: [(0, "theirs")], editing: 1)
+}
+
+#Preview("Rebase, edited by hand", traits: .fixedLayout(width: 1440, height: 900)) {
+    DemoEditor(
+        operation: "rebase",
+        choose: [(0, "theirs")],
+        edited: (1, "func cancel() {\n    queue.cancelAll()\n}\n\nfunc pause() {\n    queue.suspend()")
+    )
 }

@@ -59,6 +59,20 @@ struct InspectorView: View {
                 model.choose(candidate.id, conflict: Int(conflict.number) - 1)
             }
         }
+
+        let index = Int(conflict.number) - 1
+        if let edited = model.chosenCandidate(of: index), edited.id == CandidateInfo.editedID {
+            CandidateCard(candidate: edited, selected: true, language: model.status.language) {
+                model.startEditing(conflict: index)
+            }
+        }
+        Button {
+            model.startEditing(conflict: index)
+        } label: {
+            Label("Edit by Hand", systemImage: "pencil")
+        }
+        .help("Write this conflict's result yourself (↩)")
+        .disabled(model.editing != nil)
     }
 
     private var card: some View {
@@ -172,9 +186,15 @@ struct CandidateProvenance {
 }
 
 extension CandidateInfo {
-    /// The "closed" variants are made by a rule; the others are git's sides
-    /// as they are.
+    /// The ID the core gives a conflict resolved by hand.
+    static let editedID = "edited"
+
+    /// The "closed" variants are made by a rule, an edit by the user; the
+    /// others are git's sides as they are.
     var provenance: CandidateProvenance {
+        if id == Self.editedID {
+            return CandidateProvenance(name: "you", symbol: "person.fill", color: Theme.Provenance.human)
+        }
         if id.hasSuffix("-closed") {
             return CandidateProvenance(name: "rule", symbol: "ruler", color: Theme.Provenance.rule)
         }

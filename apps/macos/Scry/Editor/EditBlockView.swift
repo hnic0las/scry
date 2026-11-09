@@ -1,0 +1,206 @@
+import AppKit
+import SwiftUI
+
+/// Under the lens row of the conflict being edited: its text in an editor,
+/// in the result column, with Cancel and Apply. The core checks the text
+/// once applied, like a candidate.
+struct EditBlockView: View {
+    @Bindable var model: EditorModel
+    let widths: PaneWidths
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Color.clear.frame(width: widths.side + widths.connector)
+            VStack(alignment: .leading, spacing: 6) {
+                CodeTextView(
+                    text: $model.draft,
+                    highlight: model.highlightDraft,
+                    newline: model.newline
+                )
+                    .frame(height: editorHeight)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Theme.Provenance.human, lineWidth: 1.5)
+                    )
+                HStack(spacing: 8) {
+                    Label("Editing by hand", systemImage: "person.fill")
+                        .font(Metrics.captionBold)
+                        .foregroundStyle(Theme.Provenance.human)
+                    Spacer()
+                    Button("Cancel", action: model.cancelEdit)
+                        .keyboardShortcut(.cancelAction)
+                        .help("Discard this edit (Esc)")
+                    Button("Apply", action: model.applyEdit)
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .buttonStyle(.borderedProminent)
+                        .help("Resolve the conflict with this text (⌘↩)")
+                }
+            }
+            .padding(8)
+            .frame(width: widths.result)
+            .background(Theme.Provenance.human.opacity(Metrics.blockTintOpacity))
+            Color.clear.frame(width: widths.connector + widths.side)
+        }
+    }
+
+    /// One row per line, plus one to type into, between 3 and 20 rows.
+    private var editorHeight: CGFloat {
+        let lines = model.draft.split(separator: "\n", omittingEmptySubsequences: false).count
+        return CGFloat(min(max(lines + 1, 3), 20)) * Metrics.rowHeight + 8
+    }
+}
+
+/// A code editor: monospaced, no wrapping, and none of the substitutions
+/// (smart quotes, dashes, spelling) that would change code, which SwiftUI's
+/// `TextEditor` cannot turn off. The core colours the text as it is typed
+/// and decides what Return inserts, so indentation follows the file.
+struct CodeTextView: NSViewRepresentable {
+    @Binding var text: String
+    /// Spans per line of the text, from the core.
+    var highlight: (String) -> [[Span]] = { _ in [] }
+    /// What Return inserts, given the line's text before and after the
+    /// cursor; a plain line break by default.
+    var newline: (String, String) -> Newline = { _, _ in Newline(text: "\n", cursor: 1) }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        scrollView.hasHorizontalScroller = true
+        scrollView.drawsBackground = false
+        guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
+        textView.font = Coordinator.font
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.isAutomaticLinkDetectionEnabled = false
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 4, height: 4)
+        // No wrapping: lines scroll sideways, as in the panes.
+        textView.isHorizontallyResizable = true
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.string = text
+        textView.delegate = context.coordinator
+        context.coordinator.colour(textView)
+        // Ready to type as soon as it opens.
+        DispatchQueue.main.async { textView.window?.makeFirstResponder(textView) }
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.parent = self
+        guard let textView = scrollView.documentView as? NSTextView,
+              textView.string != text
+        else { return }
+        textView.string = text
+        context.coordinator.colour(textView)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        static let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        static let italic = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+
+        var parent: CodeTextView
+
+        init(parent: CodeTextView) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+            colour(textView)
+        }
+
+        /// Return inserts what the core says: the line break and the
+        /// indentation, and for a block opened between brackets, the
+        /// closing one on its own line. Inserted as typing, so ⌘Z undoes it.
+        func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            guard selector == #selector(NSResponder.insertNewline(_:)) else { return false }
+            let string = textView.string as NSString
+            let selection = textView.selectedRange()
+            let line = string.lineRange(for: NSRange(location: selection.location, length: 0))
+            var lineEnd = line.location + line.length
+            while lineEnd > line.location,
+                  let scalar = UnicodeScalar(string.character(at: lineEnd - 1)),
+                  CharacterSet.newlines.contains(scalar) {
+                lineEnd -= 1
+            }
+            let before = string.substring(with: NSRange(
+                location: line.location,
+                length: selection.location - line.location
+            ))
+            let selectionEnd = selection.location + selection.length
+            let after = string.substring(with: NSRange(
+                location: selectionEnd,
+                length: max(lineEnd - selectionEnd, 0)
+            ))
+            let newline = parent.newline(before, after)
+            textView.insertText(newline.text, replacementRange: selection)
+            // The core counts UTF-8 bytes; AppKit counts UTF-16 units.
+            let cursor = String(decoding: newline.text.utf8.prefix(Int(newline.cursor)), as: UTF8.self)
+            textView.setSelectedRange(NSRange(location: selection.location + cursor.utf16.count, length: 0))
+            return true
+        }
+
+        /// Applies the core's spans to the text, without changing it.
+        func colour(_ textView: NSTextView) {
+            guard let storage = textView.textStorage else { return }
+            let string = textView.string
+            let spans = parent.highlight(string)
+            storage.beginEditing()
+            let whole = NSRange(location: 0, length: (string as NSString).length)
+            storage.addAttributes(
+                [.foregroundColor: NSColor(Theme.Syntax.plain), .font: Self.font],
+                range: whole
+            )
+            var lineStart = 0
+            for (index, line) in string.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                if index < spans.count {
+                    for span in spans[index] {
+                        guard let range = Self.range(of: span, in: line) else { continue }
+                        var attributes: [NSAttributedString.Key: Any] = [.foregroundColor: NSColor(span.role.color)]
+                        if span.role == .comment { attributes[.font] = Self.italic }
+                        storage.addAttributes(
+                            attributes,
+                            range: NSRange(location: lineStart + range.location, length: range.length)
+                        )
+                    }
+                }
+                lineStart += line.utf16.count + 1
+            }
+            storage.endEditing()
+            textView.typingAttributes[.foregroundColor] = NSColor(Theme.Syntax.plain)
+            textView.typingAttributes[.font] = Self.font
+        }
+
+        /// A span's UTF-8 byte offsets as a UTF-16 range within its line.
+        private static func range(of span: Span, in line: Substring) -> NSRange? {
+            let utf8 = line.utf8
+            guard let from = utf8.index(utf8.startIndex, offsetBy: Int(span.start), limitedBy: utf8.endIndex),
+                  let to = utf8.index(utf8.startIndex, offsetBy: Int(span.end), limitedBy: utf8.endIndex),
+                  from <= to
+            else { return nil }
+            let location = line.utf16.distance(from: line.startIndex, to: from)
+            let length = line.utf16.distance(from: from, to: to)
+            return NSRange(location: location, length: length)
+        }
+    }
+}
+
+#Preview("Code editor", traits: .fixedLayout(width: 420, height: 120)) {
+    @Previewable @State var text = "func cancel() {\n    queue.cancelAll()\n}\n"
+    CodeTextView(text: $text)
+        .padding(8)
+}

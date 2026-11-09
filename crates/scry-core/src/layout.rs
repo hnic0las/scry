@@ -165,7 +165,7 @@ impl MergeSession {
         let mut theirs_changes = words::line_changes(base, theirs);
         let ours: Vec<&str> = ours.lines().collect();
         let theirs: Vec<&str> = theirs.lines().collect();
-        let chosen_text = self.chosen(index).map(|candidate| candidate.text.as_str());
+        let chosen_text = self.chosen_text(index);
         // The result shows the chosen lines, or one row saying the block is
         // unresolved or removed.
         let result: Vec<&str> = chosen_text

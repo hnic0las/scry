@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use crate::conflict::{self, Conflict, ParseError, Segment};
 use crate::git::{Git, GitError};
 use crate::highlight::{Highlighter, Span};
+use crate::indent::{self, Newline};
 use crate::resolution::{self, Analysis, Candidate, CandidateKind};
 use crate::syntax::{self, Language, ParseCheck};
 
@@ -32,11 +33,37 @@ pub struct MergetoolFiles {
     pub merged: PathBuf,
 }
 
+/// How a conflict is resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Choice {
+    /// One of the candidates the core offers.
+    Candidate(CandidateKind),
+    /// Text the user wrote by hand.
+    Edited(Edit),
+}
+
+/// A conflict's text written by hand, with its check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edit {
+    pub text: String,
+    /// Checked like a candidate: the whole file parsed with this text in
+    /// place.
+    pub parse: ParseCheck,
+}
+
+/// One step of the history: the conflicts it changed, each with the choice
+/// it had before.
+type Change = Vec<(usize, Option<Choice>)>;
+
 pub struct MergeSession {
     segments: Vec<Segment>,
     conflicts: Vec<Conflict>,
     analyses: Vec<Analysis>,
-    choices: Vec<Option<CandidateKind>>,
+    choices: Vec<Option<Choice>>,
+    /// Changes to undo, the latest last, and changes undone that can be
+    /// redone. A new change clears the redo history, as in any editor.
+    undo_history: Vec<Change>,
+    redo_history: Vec<Change>,
     rebuilt: bool,
     language: Option<Language>,
     /// Whether a reference version of the file parses. Grammars reject some
@@ -48,6 +75,8 @@ pub struct MergeSession {
     /// they never change during the session.
     ours_spans: Vec<Vec<Span>>,
     theirs_spans: Vec<Vec<Span>>,
+    /// The file's indent unit, for text typed by hand.
+    indent_unit: String,
 }
 
 impl MergeSession {
@@ -79,13 +108,17 @@ impl MergeSession {
             conflicts,
             analyses,
             choices,
+            undo_history: Vec::new(),
+            redo_history: Vec::new(),
             rebuilt,
             language,
             checkable,
             highlighter,
             ours_spans: Vec::new(),
             theirs_spans: Vec::new(),
+            indent_unit: String::new(),
         };
+        session.indent_unit = indent::indent_unit(&session.side_text(Pane::Ours));
         session.ours_spans = session.highlight(&session.side_text(Pane::Ours));
         session.theirs_spans = session.highlight(&session.side_text(Pane::Theirs));
         session
@@ -113,8 +146,8 @@ impl MergeSession {
                         Pane::Ours => text.push_str(&conflict.ours.text),
                         Pane::Theirs => text.push_str(&conflict.theirs.text),
                         Pane::Result => {
-                            if let Some(candidate) = self.chosen(index) {
-                                text.push_str(&candidate.text);
+                            if let Some(chosen) = self.chosen_text(index) {
+                                text.push_str(chosen);
                             }
                         }
                     }
@@ -158,13 +191,17 @@ impl MergeSession {
         &self.theirs_spans
     }
 
-    /// The candidate chosen for a conflict, if any.
-    pub(crate) fn chosen(&self, index: usize) -> Option<&Candidate> {
-        let kind = self.choices[index]?;
-        self.analyses[index]
-            .candidates
-            .iter()
-            .find(|candidate| candidate.kind == kind)
+    /// The text that resolves a conflict: its chosen candidate's, or the
+    /// text written by hand; `None` while unresolved.
+    pub fn chosen_text(&self, index: usize) -> Option<&str> {
+        match self.choices[index].as_ref()? {
+            Choice::Candidate(kind) => self.analyses[index]
+                .candidates
+                .iter()
+                .find(|candidate| candidate.kind == *kind)
+                .map(|candidate| candidate.text.as_str()),
+            Choice::Edited(edit) => Some(edit.text.as_str()),
+        }
     }
 
     pub(crate) fn segments(&self) -> &[Segment] {
@@ -205,8 +242,8 @@ impl MergeSession {
         &self.analyses[index]
     }
 
-    pub fn choice(&self, index: usize) -> Option<CandidateKind> {
-        self.choices[index]
+    pub fn choice(&self, index: usize) -> Option<&Choice> {
+        self.choices[index].as_ref()
     }
 
     /// The index of a conflict given by its number ("2") or its ID
@@ -238,23 +275,156 @@ impl MergeSession {
                 candidate: kind.id(),
             });
         }
-        self.choices[index] = Some(kind);
+        self.apply(vec![(index, Some(Choice::Candidate(kind)))]);
         Ok(())
     }
 
-    /// Chooses the rule suggestion for every conflict that has one and no
-    /// choice yet. Returns how many were chosen.
-    pub fn apply_suggestions(&mut self) -> usize {
-        let mut applied = 0;
-        for (choice, analysis) in self.choices.iter_mut().zip(&self.analyses) {
-            if choice.is_none()
-                && let Some(suggestion) = analysis.suggestion
-            {
-                *choice = Some(suggestion);
-                applied += 1;
+    /// Resolves a conflict with text written by hand, checked by parsing
+    /// like a candidate. A text without a final line break gets one, so the
+    /// line after the conflict stays on its own line.
+    pub fn edit(&mut self, index: usize, text: &str) -> Result<(), ChooseError> {
+        let Some(conflict) = self.conflicts.get(index) else {
+            return Err(ChooseError::NoSuchConflict(index + 1));
+        };
+        let mut text = text.to_string();
+        if !text.is_empty() && !text.ends_with('\n') {
+            // Follow the file's line endings.
+            let crlf = conflict.ours.text.contains("\r\n") || conflict.theirs.text.contains("\r\n");
+            text.push_str(if crlf { "\r\n" } else { "\n" });
+        }
+        let parse = self.check_in_place(index, &text);
+        self.apply(vec![(index, Some(Choice::Edited(Edit { text, parse })))]);
+        Ok(())
+    }
+
+    /// What Return inserts while editing a conflict by hand, with `before`
+    /// and `after` the current line's text on each side of the cursor.
+    pub fn newline(&self, before: &str, after: &str) -> Newline {
+        indent::newline(before, after, &self.indent_unit, self.language)
+    }
+
+    /// Highlight spans of `text` being typed for conflict `index`, one list
+    /// per line of `text`. It is highlighted in place in the file (the other
+    /// conflicts resolved as chosen, or with ours), so a string or comment
+    /// that spans lines is coloured as it will be once applied.
+    pub fn highlight_draft(&self, index: usize, text: &str) -> Vec<Vec<Span>> {
+        if self.highlighter.is_none() || index >= self.conflicts.len() {
+            return Vec::new();
+        }
+        let mut draft = text.to_string();
+        if !draft.is_empty() && !draft.ends_with('\n') {
+            draft.push('\n');
+        }
+        let mut texts: Vec<&str> = (0..self.conflicts.len())
+            .map(|other| {
+                self.chosen_text(other)
+                    .unwrap_or(&self.conflicts[other].ours.text)
+            })
+            .collect();
+        texts[index] = &draft;
+        // The draft's first line in the assembled file.
+        let mut first = 0;
+        let mut conflict = 0;
+        for segment in &self.segments {
+            match segment {
+                Segment::Common(common) => first += common.lines().count(),
+                Segment::Conflict(_) => {
+                    if conflict == index {
+                        break;
+                    }
+                    first += texts[conflict].lines().count();
+                    conflict += 1;
+                }
             }
         }
+        let count = draft.lines().count();
+        self.highlight(&assemble(&self.segments, &texts))
+            .into_iter()
+            .skip(first)
+            .take(count)
+            .collect()
+    }
+
+    /// Whether the file parses with `text` resolving conflict `index` and
+    /// the other conflicts filled with ours, as candidates are checked.
+    fn check_in_place(&self, index: usize, text: &str) -> ParseCheck {
+        let Some(language) = self.language else {
+            return ParseCheck::NotChecked;
+        };
+        if !self.checkable {
+            return ParseCheck::NotChecked;
+        }
+        let mut texts: Vec<&str> = self
+            .conflicts
+            .iter()
+            .map(|c| c.ours.text.as_str())
+            .collect();
+        texts[index] = text;
+        syntax::check(language, &assemble(&self.segments, &texts))
+    }
+
+    /// Chooses the rule suggestion for every conflict that has one and no
+    /// choice yet, as one step of the history. Returns how many were chosen.
+    pub fn apply_suggestions(&mut self) -> usize {
+        let mut changes = Vec::new();
+        for (index, analysis) in self.analyses.iter().enumerate() {
+            if self.choices[index].is_none()
+                && let Some(suggestion) = analysis.suggestion
+            {
+                changes.push((index, Some(Choice::Candidate(suggestion))));
+            }
+        }
+        let applied = changes.len();
+        if applied > 0 {
+            self.apply(changes);
+        }
         applied
+    }
+
+    /// Sets choices as one step of the history.
+    fn apply(&mut self, changes: Change) {
+        let previous = self.swap(changes);
+        self.undo_history.push(previous);
+        self.redo_history.clear();
+    }
+
+    /// Puts each choice in place and returns the ones it replaced.
+    fn swap(&mut self, changes: Change) -> Change {
+        changes
+            .into_iter()
+            .map(|(index, choice)| {
+                let previous = std::mem::replace(&mut self.choices[index], choice);
+                (index, previous)
+            })
+            .collect()
+    }
+
+    /// Undoes the last step; false when there is none.
+    pub fn undo(&mut self) -> bool {
+        let Some(change) = self.undo_history.pop() else {
+            return false;
+        };
+        let redo = self.swap(change);
+        self.redo_history.push(redo);
+        true
+    }
+
+    /// Redoes the last step undone; false when there is none.
+    pub fn redo(&mut self) -> bool {
+        let Some(change) = self.redo_history.pop() else {
+            return false;
+        };
+        let undo = self.swap(change);
+        self.undo_history.push(undo);
+        true
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo_history.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo_history.is_empty()
     }
 
     pub fn unresolved(&self) -> usize {
@@ -273,12 +443,7 @@ impl MergeSession {
             match segment {
                 Segment::Common(common) => text.push_str(common),
                 Segment::Conflict(_) => {
-                    let kind = self.choices[index]?;
-                    let candidate = self.analyses[index]
-                        .candidates
-                        .iter()
-                        .find(|candidate| candidate.kind == kind)?;
-                    text.push_str(&candidate.text);
+                    text.push_str(self.chosen_text(index)?);
                     index += 1;
                 }
             }
@@ -592,6 +757,7 @@ impl std::error::Error for LoadError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::highlight::SyntaxRole;
 
     const TEXT: &str = "start\n\
         <<<<<<< ours\na\n||||||| base\nx\n=======\nb\n>>>>>>> theirs\n\
@@ -616,6 +782,115 @@ mod tests {
             session.merged_text().as_deref(),
             Some("start\na\nb\nmiddle\nsame\nend\n")
         );
+    }
+
+    /// A conflict resolved by hand merges its text as written, with a final
+    /// line break added so the next line stays on its own line.
+    #[test]
+    fn edited_text_resolves_the_conflict() {
+        let mut session = MergeSession::from_text(TEXT, None).unwrap();
+        session.choose(1, CandidateKind::Ours).unwrap();
+        session.edit(0, "a and b").unwrap();
+        assert_eq!(session.chosen_text(0), Some("a and b\n"));
+        assert_eq!(
+            session.merged_text().as_deref(),
+            Some("start\na and b\nmiddle\nsame\nend\n")
+        );
+        // An empty text removes the block, like "none".
+        session.edit(0, "").unwrap();
+        assert_eq!(session.chosen_text(0), Some(""));
+        assert_eq!(session.edit(7, "x"), Err(ChooseError::NoSuchConflict(8)));
+    }
+
+    /// A file with Windows line endings keeps them in the line break added to
+    /// an edit.
+    #[test]
+    fn edit_follows_crlf_line_endings() {
+        let text = "a\r\n<<<<<<< ours\r\no\r\n=======\r\nt\r\n>>>>>>> theirs\r\n";
+        let mut session = MergeSession::from_text(text, None).unwrap();
+        session.edit(0, "x").unwrap();
+        assert_eq!(session.chosen_text(0), Some("x\r\n"));
+    }
+
+    /// Text written by hand is checked by parsing like any candidate, so a
+    /// broken edit is caught before the file is written.
+    #[test]
+    fn edited_text_is_checked_by_parsing() {
+        let mut session = MergeSession::from_text(SWIFT, Some(Language::Swift)).unwrap();
+        session
+            .edit(
+                0,
+                "func cancel() {\n    queue.cancelAll()\n}\nfunc pause() {\n    queue.suspend()",
+            )
+            .unwrap();
+        let Some(Choice::Edited(edit)) = session.choice(0) else {
+            panic!("expected an edit");
+        };
+        assert_eq!(edit.parse, ParseCheck::Parses);
+        session.edit(0, "let = 1").unwrap();
+        let Some(Choice::Edited(edit)) = session.choice(0) else {
+            panic!("expected an edit");
+        };
+        assert!(matches!(edit.parse, ParseCheck::DoesNotParse { .. }));
+    }
+
+    /// Undo and redo walk the history of choices and edits, and a new choice
+    /// after an undo drops what could be redone, as in any editor.
+    #[test]
+    fn undo_and_redo_walk_the_history() {
+        let mut session = MergeSession::from_text(TEXT, None).unwrap();
+        assert!(!session.can_undo() && !session.undo());
+        session.choose(0, CandidateKind::Ours).unwrap();
+        session.edit(0, "mine").unwrap();
+        assert!(session.undo());
+        assert_eq!(session.chosen_text(0), Some("a\n"));
+        assert!(session.undo());
+        assert_eq!(session.choice(0), None);
+        assert!(session.can_redo());
+        assert!(session.redo());
+        assert_eq!(session.chosen_text(0), Some("a\n"));
+        session.choose(0, CandidateKind::Theirs).unwrap();
+        assert!(!session.can_redo());
+        assert!(session.undo());
+        assert_eq!(session.chosen_text(0), Some("a\n"));
+    }
+
+    /// Text typed by hand is highlighted in place in the file: the lines of
+    /// the draft get the spans of their own text, whatever comes before.
+    #[test]
+    fn draft_is_highlighted_in_place() {
+        let session = MergeSession::from_text(SWIFT, Some(Language::Swift)).unwrap();
+        let spans = session.highlight_draft(0, "func stop() {\n    // done");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0][0].role, SyntaxRole::Keyword);
+        assert_eq!((spans[0][0].start, spans[0][0].end), (0, 4));
+        assert!(spans[1].iter().any(|span| span.role == SyntaxRole::Comment));
+        // Without a grammar, nothing to colour.
+        let plain = MergeSession::from_text(SWIFT, None).unwrap();
+        assert!(plain.highlight_draft(0, "func a() {").is_empty());
+    }
+
+    /// Return keeps the file's own indent unit: the demo indents by four
+    /// spaces, so a new line after an opening brace goes four deeper.
+    #[test]
+    fn newline_uses_the_files_indent_unit() {
+        let session = MergeSession::from_text(SWIFT, Some(Language::Swift)).unwrap();
+        assert_eq!(session.newline("func stop() {", "}").text, "\n    \n");
+    }
+
+    /// Applying suggestions is one step: one undo takes them all back.
+    #[test]
+    fn suggestions_undo_in_one_step() {
+        let mut session = MergeSession::from_text(TEXT, None).unwrap();
+        assert_eq!(session.apply_suggestions(), 1);
+        assert!(session.undo());
+        assert_eq!(session.unresolved(), 2);
+        assert!(!session.can_undo());
+        // Nothing to suggest: no empty step in the history.
+        session.choose(1, CandidateKind::Ours).unwrap();
+        assert_eq!(session.apply_suggestions(), 0);
+        assert!(session.undo());
+        assert!(!session.can_undo());
     }
 
     /// The lens rows blame each side's lines in that side's own file, so the
@@ -660,7 +935,10 @@ mod tests {
         let mut session = MergeSession::from_text(TEXT, None).unwrap();
         assert_eq!(session.apply_suggestions(), 1);
         assert_eq!(session.choice(0), None);
-        assert_eq!(session.choice(1), Some(CandidateKind::Ours));
+        assert_eq!(
+            session.choice(1),
+            Some(&Choice::Candidate(CandidateKind::Ours))
+        );
     }
 
     /// The CLI's `--take` refers to conflicts by number or ID; both must resolve, and unknown

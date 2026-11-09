@@ -8,6 +8,7 @@ pub mod blame;
 pub mod conflict;
 pub mod git;
 pub mod highlight;
+pub mod indent;
 pub mod layout;
 pub mod operation;
 pub mod resolution;

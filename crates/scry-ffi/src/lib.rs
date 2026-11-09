@@ -14,7 +14,7 @@ use scry_core::highlight;
 use scry_core::layout;
 use scry_core::operation::{self, SideRole};
 use scry_core::resolution::CandidateKind;
-use scry_core::session::{self, MergeSession};
+use scry_core::session::{self, Choice, MergeSession};
 use scry_core::syntax::{Language, ParseCheck};
 use scry_core::words;
 
@@ -114,6 +114,14 @@ pub enum LineChange {
     },
 }
 
+/// What Return inserts while editing by hand, and where the cursor goes,
+/// in UTF-8 bytes from the start of `text`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct Newline {
+    pub text: String,
+    pub cursor: u32,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Cell {
     pub number: Option<u32>,
@@ -167,8 +175,13 @@ pub struct ConflictInfo {
     pub start_line: u32,
     pub classification: String,
     pub candidates: Vec<CandidateInfo>,
-    /// The chosen candidate's ID.
+    /// The chosen candidate's ID, or "edited" for text written by hand.
     pub chosen: Option<String>,
+    /// The check of the text written by hand, when `chosen` is "edited".
+    pub edited_parse: Option<ParseStatus>,
+    /// The text editing by hand starts from: the current resolution, or
+    /// ours while unresolved.
+    pub edit_text: String,
     /// The commit that last touched the conflict's lines on each side, for
     /// the lens row; `None` outside an operation or when git has no answer.
     pub ours_commit: Option<LensCommit>,
@@ -191,6 +204,8 @@ pub struct Status {
     /// Of the merged file, once every conflict has a choice.
     pub merged: ParseStatus,
     pub language: Option<String>,
+    pub can_undo: bool,
+    pub can_redo: bool,
 }
 
 /// One conflicted file open in the app.
@@ -259,9 +274,47 @@ impl MergeDocument {
         self.lock().choose(conflict as usize, kind).map_err(failed)
     }
 
+    /// Resolves the conflict at `conflict` (from 0) with text written by
+    /// hand.
+    pub fn edit(&self, conflict: u32, text: String) -> Result<(), ScryError> {
+        self.lock().edit(conflict as usize, &text).map_err(failed)
+    }
+
+    /// What Return inserts in the editor, with `before` and `after` the
+    /// current line's text on each side of the cursor.
+    pub fn newline(&self, before: String, after: String) -> Newline {
+        let newline = self.lock().newline(&before, &after);
+        Newline {
+            text: newline.text,
+            cursor: newline.cursor as u32,
+        }
+    }
+
+    /// Highlight spans, one list per line, of `text` being typed for the
+    /// conflict at `conflict` (from 0), coloured in place in the file.
+    pub fn highlight_draft(&self, conflict: u32, text: String) -> Vec<Vec<Span>> {
+        self.lock()
+            .highlight_draft(conflict as usize, &text)
+            .into_iter()
+            .map(|line| line.into_iter().map(span).collect())
+            .collect()
+    }
+
+    /// Undoes the last choice or edit; false when there is none.
+    pub fn undo(&self) -> bool {
+        self.lock().undo()
+    }
+
+    /// Redoes the last choice or edit undone; false when there is none.
+    pub fn redo(&self) -> bool {
+        self.lock().redo()
+    }
+
     pub fn status(&self) -> Status {
         let session = self.lock();
         Status {
+            can_undo: session.can_undo(),
+            can_redo: session.can_redo(),
             resolved: (session.conflict_count() - session.unresolved()) as u32,
             total: session.conflict_count() as u32,
             merged: parse_status(session.merged_check()),
@@ -317,7 +370,18 @@ impl MergeDocument {
             start_line: analysis.start_line as u32,
             classification: analysis.kind.describe(ours, theirs),
             candidates,
-            chosen: session.choice(index).map(|kind| kind.id().to_string()),
+            chosen: session.choice(index).map(|choice| match choice {
+                Choice::Candidate(kind) => kind.id().to_string(),
+                Choice::Edited(_) => String::from("edited"),
+            }),
+            edited_parse: match session.choice(index) {
+                Some(Choice::Edited(edit)) => Some(parse_status(edit.parse)),
+                _ => None,
+            },
+            edit_text: session
+                .chosen_text(index)
+                .unwrap_or(&session.conflict(index).ours.text)
+                .to_string(),
             ours_commit: self.lens_commit(index, true),
             theirs_commit: self.lens_commit(index, false),
         }
@@ -509,7 +573,7 @@ mod tests {
     use super::*;
 
     /// The Swift-facing API end to end: open a file, read its header and candidates, choose,
-    /// refuse saving while unresolved and save once resolved.
+    /// refuse saving while unresolved, save once resolved, then edit by hand and undo.
     #[test]
     fn open_choose_and_save() {
         let dir = tempfile::tempdir().unwrap();
@@ -536,5 +600,16 @@ mod tests {
         assert!(document.choose(0, String::from("nonsense")).is_err());
         document.save().unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "let a = 2\n");
+
+        // By hand, then undone back to "theirs".
+        document.edit(0, String::from("let a = 3")).unwrap();
+        let conflict = &document.conflicts()[0];
+        assert_eq!(conflict.chosen.as_deref(), Some("edited"));
+        assert!(matches!(conflict.edited_parse, Some(ParseStatus::Parses)));
+        assert_eq!(conflict.edit_text, "let a = 3\n");
+        assert!(document.status().can_undo);
+        assert!(document.undo());
+        assert_eq!(document.conflicts()[0].chosen.as_deref(), Some("theirs"));
+        assert!(document.status().can_redo);
     }
 }

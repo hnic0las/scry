@@ -67,6 +67,9 @@ struct MergeEditorView: View {
                     ForEach(Array(model.rows.enumerated()), id: \.offset) { offset, row in
                         RowView(row: row, widths: widths, model: model, scrollX: clampedScrollX(widths))
                             .id(offset)
+                        if case .lens(let conflict) = row, Int(conflict) == model.editing {
+                            EditBlockView(model: model, widths: widths)
+                        }
                     }
                 }
             }
@@ -171,7 +174,8 @@ struct MergeEditorView: View {
             }
             .keyboardShortcut(.return, modifiers: .command)
             .buttonStyle(.borderedProminent)
-            .disabled(!model.allResolved)
+            // While editing, ⌘↩ applies the edit instead.
+            .disabled(!model.allResolved || model.editing != nil)
             .help("Write the result (⌘↩)")
         }
     }
@@ -197,6 +201,19 @@ struct MergeEditorView: View {
                 .keyboardShortcut("0", modifiers: [.option, .command])
             Button("Take none") { model.take("neither") }
                 .keyboardShortcut("9", modifiers: [.option, .command])
+            // Disabled while editing, so ↩ types a line break and ⌘Z undoes
+            // typing in the editor.
+            Group {
+                Button("Edit by hand") { model.startEditing() }
+                    .keyboardShortcut(.return, modifiers: [])
+                Button("Undo", action: model.undo)
+                    .keyboardShortcut("z", modifiers: .command)
+                    .disabled(!model.status.canUndo)
+                Button("Redo", action: model.redo)
+                    .keyboardShortcut("z", modifiers: [.shift, .command])
+                    .disabled(!model.status.canRedo)
+            }
+            .disabled(model.editing != nil)
         }
         .frame(width: 0, height: 0)
         .opacity(0)

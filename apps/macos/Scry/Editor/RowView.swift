@@ -22,7 +22,8 @@ struct RowView: View {
                     .frame(width: widths.connector)
                 CellView(
                     cell: result, pane: .result, invalid: isInvalid(index),
-                    scrollX: scrollX, codeWidth: widths.code(widths.result)
+                    scrollX: scrollX, codeWidth: widths.code(widths.result),
+                    provenance: index.flatMap { model.chosenCandidate(of: $0)?.provenance.color } ?? Theme.Provenance.git
                 )
                     .frame(width: widths.result)
                 Connector(color: Theme.Sides.theirs, active: index != nil)
@@ -57,6 +58,8 @@ struct CellView: View {
     let scrollX: CGFloat
     /// The width the code is shown in, gutters excluded.
     let codeWidth: CGFloat
+    /// The colour of the chosen resolution's provenance, for the result.
+    var provenance: Color = Theme.Provenance.git
 
     var body: some View {
         HStack(spacing: 0) {
@@ -183,7 +186,7 @@ struct CellView: View {
         case .unresolved:
             Theme.Severity.error.opacity(Metrics.blockTintOpacity)
         case .chosen:
-            (invalid ? Theme.Severity.error : Theme.Provenance.git).opacity(Metrics.blockTintOpacity)
+            (invalid ? Theme.Severity.error : provenance).opacity(Metrics.blockTintOpacity)
         case .removed:
             Theme.Provenance.human.opacity(Metrics.blockTintOpacity)
         }
@@ -199,7 +202,7 @@ struct CellView: View {
         case .chosen where invalid:
             DottedStrip(color: Theme.Severity.error)
         case .chosen:
-            Rectangle().fill(Theme.Provenance.git).frame(width: Metrics.provenanceStrip)
+            Rectangle().fill(provenance).frame(width: Metrics.provenanceStrip)
         case .removed:
             Rectangle().fill(Theme.Provenance.human).frame(width: Metrics.provenanceStrip)
         default:
