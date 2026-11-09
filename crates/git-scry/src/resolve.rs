@@ -11,14 +11,17 @@ use std::process::ExitCode;
 
 use scry_core::git::GitCli;
 use scry_core::operation;
-use scry_core::resolution::CandidateKind;
+use scry_core::resolution::{Candidate, CandidateKind};
 use scry_core::session::{self, MergeSession, MergetoolFiles};
+use scry_core::syntax::ParseCheck;
 
 pub struct Options {
     pub files: MergetoolFiles,
     /// `<conflict>=<candidate>` choices given on the command line.
     pub takes: Vec<String>,
     pub suggested: bool,
+    /// Write even when the merged file does not parse.
+    pub allow_invalid: bool,
 }
 
 pub fn run(options: Options) -> ExitCode {
@@ -77,7 +80,19 @@ pub fn run(options: Options) -> ExitCode {
     let Some(text) = session.merged_text() else {
         return ExitCode::from(1);
     };
-    if interactive && !confirm(&format!("Write {name}?")) {
+    if let ParseCheck::DoesNotParse { line } = session.merged_check() {
+        let language = session.language().map_or("", |language| language.name());
+        let problem = format!("{name} does not parse as {language} near line {line}");
+        let write_anyway = if interactive {
+            ask_yes_no(&format!("{problem}. Write it anyway?"), false)
+        } else {
+            options.allow_invalid
+        };
+        if !write_anyway {
+            println!("{problem}; nothing written.");
+            return ExitCode::from(1);
+        }
+    } else if interactive && !ask_yes_no(&format!("Write {name}?"), true) {
         println!("Nothing written; {name} stays conflicted.");
         return ExitCode::from(1);
     }
@@ -116,6 +131,8 @@ fn key(kind: CandidateKind) -> &'static str {
         CandidateKind::TheirsThenOurs => "4",
         CandidateKind::Neither => "9",
         CandidateKind::Base => "0",
+        CandidateKind::OursThenTheirsClosed => "5",
+        CandidateKind::TheirsThenOursClosed => "6",
     }
 }
 
@@ -127,6 +144,8 @@ fn title(kind: CandidateKind) -> &'static str {
         CandidateKind::TheirsThenOurs => "both, theirs first",
         CandidateKind::Neither => "neither",
         CandidateKind::Base => "base",
+        CandidateKind::OursThenTheirsClosed => "both, ours first, each closed",
+        CandidateKind::TheirsThenOursClosed => "both, theirs first, each closed",
     }
 }
 
@@ -154,12 +173,15 @@ fn ask_each_conflict(session: &mut MergeSession, ours: &str, theirs: &str) -> bo
         }
         print_side(&format!("[2] theirs · {theirs}"), &conflict.theirs.text);
 
-        let choices: Vec<String> = analysis
+        let choices: Vec<String> = analysis.candidates.iter().map(choice_label).collect();
+        println!("{}", choices.join("  "));
+        if analysis
             .candidates
             .iter()
-            .map(|candidate| format!("[{}] {}", key(candidate.kind), title(candidate.kind)))
-            .collect();
-        println!("{}", choices.join("  "));
+            .any(|candidate| matches!(candidate.parse, ParseCheck::DoesNotParse { .. }))
+        {
+            println!("✗ the file would not parse with this candidate");
+        }
         let suggestion = analysis.suggestion;
         let hint = match suggestion {
             Some(kind) => format!(" · Enter: suggested by rule, {}", title(kind)),
@@ -218,11 +240,27 @@ fn prompt(question: &str) -> Option<String> {
     }
 }
 
-fn confirm(question: &str) -> bool {
-    match prompt(&format!("{question} [Y/n] ")) {
-        Some(answer) => matches!(answer.trim(), "" | "y" | "Y" | "yes"),
+/// Asks a yes-or-no question; Enter gives `default`.
+fn ask_yes_no(question: &str, default: bool) -> bool {
+    let hint = if default { "[Y/n]" } else { "[y/N]" };
+    match prompt(&format!("{question} {hint} ")) {
+        Some(answer) => match answer.trim() {
+            "" => default,
+            "y" | "Y" | "yes" => true,
+            _ => false,
+        },
         None => false,
     }
+}
+
+/// "[3] both, ours first ✗": the key, the title, and a mark when the file
+/// would not parse with this candidate.
+fn choice_label(candidate: &Candidate) -> String {
+    let mark = match candidate.parse {
+        ParseCheck::DoesNotParse { .. } => " ✗",
+        ParseCheck::Parses | ParseCheck::NotChecked => "",
+    };
+    format!("[{}] {}{mark}", key(candidate.kind), title(candidate.kind))
 }
 
 /// The four paths in the order git passes them.

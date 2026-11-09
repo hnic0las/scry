@@ -9,10 +9,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use scry_core::conflict;
 use scry_core::git::GitCli;
 use scry_core::operation;
-use scry_core::resolution;
+use scry_core::session::MergeSession;
+use scry_core::syntax::{Language, ParseCheck};
 
 #[derive(Parser)]
 #[command(
@@ -64,6 +64,9 @@ enum Command {
         /// Choose the rule suggestion wherever there is one, without asking.
         #[arg(long)]
         suggested: bool,
+        /// Without asking, write the file even when it does not parse.
+        #[arg(long)]
+        allow_invalid: bool,
     },
 }
 
@@ -79,10 +82,12 @@ fn main() -> ExitCode {
             merged,
             takes,
             suggested,
+            allow_invalid,
         } => resolve::run(resolve::Options {
             files: resolve::files(&base, &local, &remote, &merged),
             takes,
             suggested,
+            allow_invalid,
         }),
     }
 }
@@ -95,23 +100,24 @@ fn list_conflicts(file: &PathBuf) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let segments = match conflict::parse(&text) {
-        Ok(segments) => segments,
+    let session = match MergeSession::from_text(&text, Language::from_path(file)) {
+        Ok(session) => session,
         Err(error) => {
             eprintln!("git-scry: {}: {error}", file.display());
             return ExitCode::from(2);
         }
     };
 
-    let conflicts: Vec<_> = conflict::conflicts(&segments).collect();
-    if conflicts.is_empty() {
+    let count = session.conflict_count();
+    if count == 0 {
         println!("{}: no conflict", file.display());
         return ExitCode::SUCCESS;
     }
 
-    println!("{}: {} conflict(s)", file.display(), conflicts.len());
-    let analyses = resolution::analyze(&segments);
-    for (conflict, analysis) in conflicts.iter().zip(&analyses) {
+    println!("{}: {count} conflict(s)", file.display());
+    for index in 0..count {
+        let conflict = session.conflict(index);
+        let analysis = session.analysis(index);
         let ours = side_name(&conflict.ours.label, "ours");
         let theirs = side_name(&conflict.theirs.label, "theirs");
         println!();
@@ -131,11 +137,29 @@ fn list_conflicts(file: &PathBuf) -> ExitCode {
             line_count(&conflict.ours.text),
             line_count(&conflict.theirs.text),
         );
-        let ids: Vec<&str> = analysis.candidates.iter().map(|c| c.kind.id()).collect();
-        println!("     candidates: {}", ids.join(", "));
+        let candidates: Vec<String> = analysis
+            .candidates
+            .iter()
+            .map(|candidate| {
+                let mark = match candidate.parse {
+                    ParseCheck::Parses => " ✓",
+                    ParseCheck::DoesNotParse { .. } => " ✗",
+                    ParseCheck::NotChecked => "",
+                };
+                format!("{}{mark}", candidate.kind.id())
+            })
+            .collect();
+        println!("     candidates: {}", candidates.join(", "));
         if let Some(suggestion) = analysis.suggestion {
             println!("     suggested by rule: {}", suggestion.id());
         }
+    }
+    if let Some(language) = session.language() {
+        println!();
+        println!(
+            "✓ parses as {} with this candidate, ✗ does not",
+            language.name()
+        );
     }
     ExitCode::from(1)
 }

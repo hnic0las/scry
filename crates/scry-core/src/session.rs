@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 
 use crate::conflict::{self, Conflict, ParseError, Segment};
 use crate::git::{Git, GitError};
-use crate::resolution::{self, Analysis, CandidateKind};
+use crate::resolution::{self, Analysis, Candidate, CandidateKind};
+use crate::syntax::{self, Language, ParseCheck};
 
 /// The four files `git mergetool` passes to a merge tool.
 pub struct MergetoolFiles {
@@ -28,17 +29,35 @@ pub struct MergeSession {
     analyses: Vec<Analysis>,
     choices: Vec<Option<CandidateKind>>,
     rebuilt: bool,
+    language: Option<Language>,
+    /// Whether a reference version of the file parses. Grammars reject some
+    /// valid code; without such a reference, a parse failure says nothing
+    /// about the merge, so nothing is checked.
+    checkable: bool,
 }
 
 impl MergeSession {
-    /// A session on a text with conflict markers.
-    pub fn from_text(text: &str) -> Result<MergeSession, ParseError> {
-        Ok(MergeSession::from_segments(conflict::parse(text)?, false))
+    /// A session on a text with conflict markers. With a language, every
+    /// candidate is checked by parsing.
+    pub fn from_text(text: &str, language: Option<Language>) -> Result<MergeSession, ParseError> {
+        Ok(MergeSession::from_segments(
+            conflict::parse(text)?,
+            false,
+            language,
+        ))
     }
 
-    fn from_segments(segments: Vec<Segment>, rebuilt: bool) -> MergeSession {
+    fn from_segments(
+        segments: Vec<Segment>,
+        rebuilt: bool,
+        language: Option<Language>,
+    ) -> MergeSession {
         let conflicts: Vec<Conflict> = conflict::conflicts(&segments).cloned().collect();
-        let analyses = resolution::analyze(&segments);
+        let mut analyses = resolution::analyze(&segments);
+        let checkable = match language {
+            Some(language) => verify(&segments, &conflicts, &mut analyses, language),
+            None => false,
+        };
         let choices = vec![None; conflicts.len()];
         MergeSession {
             segments,
@@ -46,6 +65,22 @@ impl MergeSession {
             analyses,
             choices,
             rebuilt,
+            language,
+            checkable,
+        }
+    }
+
+    pub fn language(&self) -> Option<Language> {
+        self.language
+    }
+
+    /// Whether the merged text parses; `NotChecked` without a language,
+    /// when no reference version of the file parses, or while a conflict has
+    /// no choice.
+    pub fn merged_check(&self) -> ParseCheck {
+        match (self.language, self.merged_text()) {
+            (Some(language), Some(text)) if self.checkable => syntax::check(language, &text),
+            _ => ParseCheck::NotChecked,
         }
     }
 
@@ -151,6 +186,138 @@ impl MergeSession {
     }
 }
 
+/// Checks every candidate by parsing the whole file with it in place, and
+/// adds the "closed" variants of "both" where they repair it.
+///
+/// Only when the file parses both with every conflict taken from ours and
+/// with every conflict taken from theirs: grammars reject some valid code
+/// (newer syntax, macros), and a failure must never be blamed on a candidate
+/// for that. The other conflicts are filled with ours while one is checked.
+/// Returns whether the file could be checked.
+fn verify(
+    segments: &[Segment],
+    conflicts: &[Conflict],
+    analyses: &mut [Analysis],
+    language: Language,
+) -> bool {
+    let ours: Vec<&str> = conflicts.iter().map(|c| c.ours.text.as_str()).collect();
+    let theirs: Vec<&str> = conflicts.iter().map(|c| c.theirs.text.as_str()).collect();
+    if !parses(language, &assemble(segments, &ours))
+        || !parses(language, &assemble(segments, &theirs))
+    {
+        return false;
+    }
+    let reference = ours;
+
+    for (index, analysis) in analyses.iter_mut().enumerate() {
+        add_closed_candidates(
+            segments,
+            &conflicts[index],
+            &reference,
+            index,
+            analysis,
+            language,
+        );
+        for candidate in &mut analysis.candidates {
+            let check = {
+                let mut texts = reference.clone();
+                texts[index] = candidate.text.as_str();
+                syntax::check(language, &assemble(segments, &texts))
+            };
+            candidate.parse = check;
+        }
+    }
+    true
+}
+
+/// Adds "both, closed" when plain "both" does not parse: each side followed
+/// by the first one, two or three lines after the conflict, whichever count
+/// first makes the file parse.
+fn add_closed_candidates(
+    segments: &[Segment],
+    conflict: &Conflict,
+    reference: &[&str],
+    index: usize,
+    analysis: &mut Analysis,
+    language: Language,
+) {
+    let ours = conflict.ours.text.as_str();
+    let theirs = conflict.theirs.text.as_str();
+    if ours.is_empty() || theirs.is_empty() {
+        return;
+    }
+    let Some(following) = text_after_conflict(segments, index) else {
+        return;
+    };
+    let lines: Vec<&str> = following.split_inclusive('\n').take(3).collect();
+    let orders = [
+        (CandidateKind::OursThenTheirsClosed, ours, theirs),
+        (CandidateKind::TheirsThenOursClosed, theirs, ours),
+    ];
+    let parses_with = |text: &str| {
+        let mut texts = reference.to_vec();
+        texts[index] = text;
+        parses(language, &assemble(segments, &texts))
+    };
+
+    for (kind, first, second) in orders {
+        if parses_with(&format!("{first}{second}")) {
+            continue;
+        }
+        for count in 1..=lines.len() {
+            let text = format!("{first}{}{second}", lines[..count].concat());
+            if parses_with(&text) {
+                if !analysis.candidates.iter().any(|c| c.text == text) {
+                    analysis.candidates.push(Candidate {
+                        kind,
+                        text,
+                        parse: ParseCheck::NotChecked,
+                    });
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// The common text right after the conflict at `index`, if any.
+fn text_after_conflict(segments: &[Segment], index: usize) -> Option<&str> {
+    let mut seen = 0;
+    let mut segments = segments.iter();
+    for segment in segments.by_ref() {
+        if let Segment::Conflict(_) = segment {
+            if seen == index {
+                break;
+            }
+            seen += 1;
+        }
+    }
+    match segments.next()? {
+        Segment::Common(text) => Some(text.as_str()),
+        Segment::Conflict(_) => None,
+    }
+}
+
+/// The file with conflict `i` replaced by `texts[i]`.
+fn assemble(segments: &[Segment], texts: &[&str]) -> String {
+    let mut result = String::new();
+    let mut index = 0;
+    for segment in segments {
+        match segment {
+            Segment::Common(text) => result.push_str(text),
+            Segment::Conflict(_) => {
+                result.push_str(texts[index]);
+                index += 1;
+            }
+        }
+    }
+    result
+}
+
+fn parses(language: Language, text: &str) -> bool {
+    syntax::check(language, text) == ParseCheck::Parses
+}
+
 /// Loads the session for the files `git mergetool` passed.
 ///
 /// Uses the merged file as it is when every conflict in it shows the base
@@ -163,6 +330,7 @@ pub fn load(
     ours: &str,
     theirs: &str,
 ) -> Result<MergeSession, LoadError> {
+    let language = Language::from_path(&files.merged);
     let merged = read_text(&files.merged)?;
     if let Ok(segments) = conflict::parse(&merged) {
         // Computed first: the borrow of `segments` ends before it moves into
@@ -172,13 +340,13 @@ pub fn load(
             conflicts.peek().is_some() && conflicts.all(|conflict| conflict.base.is_some())
         };
         if all_with_base {
-            return Ok(MergeSession::from_segments(segments, false));
+            return Ok(MergeSession::from_segments(segments, false, language));
         }
     }
 
     let text = merge_file(git, files, ours, theirs)?;
     let segments = conflict::parse(&text).map_err(LoadError::Parse)?;
-    Ok(MergeSession::from_segments(segments, true))
+    Ok(MergeSession::from_segments(segments, true, language))
 }
 
 fn merge_file(
@@ -332,7 +500,7 @@ mod tests {
 
     #[test]
     fn nothing_merged_until_every_conflict_has_a_choice() {
-        let mut session = MergeSession::from_text(TEXT).unwrap();
+        let mut session = MergeSession::from_text(TEXT, None).unwrap();
         assert_eq!(session.conflict_count(), 2);
         assert_eq!(session.unresolved(), 2);
         assert_eq!(session.merged_text(), None);
@@ -349,7 +517,7 @@ mod tests {
 
     #[test]
     fn only_offered_candidates_can_be_chosen() {
-        let mut session = MergeSession::from_text(TEXT).unwrap();
+        let mut session = MergeSession::from_text(TEXT, None).unwrap();
         // Conflict 2 has the same text on both sides: "theirs" is not offered.
         assert_eq!(
             session.choose(1, CandidateKind::Theirs),
@@ -366,7 +534,7 @@ mod tests {
 
     #[test]
     fn suggestions_fill_only_open_conflicts_that_have_one() {
-        let mut session = MergeSession::from_text(TEXT).unwrap();
+        let mut session = MergeSession::from_text(TEXT, None).unwrap();
         assert_eq!(session.apply_suggestions(), 1);
         assert_eq!(session.choice(0), None);
         assert_eq!(session.choice(1), Some(CandidateKind::Ours));
@@ -374,7 +542,7 @@ mod tests {
 
     #[test]
     fn find_by_number_or_id() {
-        let session = MergeSession::from_text(TEXT).unwrap();
+        let session = MergeSession::from_text(TEXT, None).unwrap();
         assert_eq!(session.find("1"), Some(0));
         assert_eq!(session.find("2"), Some(1));
         assert_eq!(session.find("3"), None);
@@ -392,5 +560,93 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
         let names: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(names.len(), 1);
+    }
+
+    /// The demo's second conflict: zdiff3 moved the closing brace both added
+    /// functions end with below the conflict.
+    const SWIFT: &str = "func upload() {\n    send()\n}\n\n\
+        <<<<<<< ours\nfunc cancel() {\n    queue.cancelAll()\n\
+        ||||||| base\n=======\nfunc pause() {\n    queue.suspend()\n>>>>>>> theirs\n}\n";
+
+    fn candidate(session: &MergeSession, kind: CandidateKind) -> Option<&Candidate> {
+        session
+            .analysis(0)
+            .candidates
+            .iter()
+            .find(|c| c.kind == kind)
+    }
+
+    #[test]
+    fn candidates_are_checked_by_parsing() {
+        let session = MergeSession::from_text(SWIFT, Some(Language::Swift)).unwrap();
+        let parse = |kind| candidate(&session, kind).unwrap().parse;
+        assert_eq!(parse(CandidateKind::Ours), ParseCheck::Parses);
+        assert_eq!(parse(CandidateKind::Theirs), ParseCheck::Parses);
+        assert!(matches!(
+            parse(CandidateKind::OursThenTheirs),
+            ParseCheck::DoesNotParse { .. }
+        ));
+    }
+
+    #[test]
+    fn closed_both_repairs_the_moved_brace() {
+        let mut session = MergeSession::from_text(SWIFT, Some(Language::Swift)).unwrap();
+        let closed = candidate(&session, CandidateKind::OursThenTheirsClosed).unwrap();
+        assert_eq!(closed.parse, ParseCheck::Parses);
+        assert!(candidate(&session, CandidateKind::TheirsThenOursClosed).is_some());
+
+        session
+            .choose(0, CandidateKind::OursThenTheirsClosed)
+            .unwrap();
+        assert_eq!(
+            session.merged_text().as_deref(),
+            Some(
+                "func upload() {\n    send()\n}\n\nfunc cancel() {\n    queue.cancelAll()\n}\nfunc pause() {\n    queue.suspend()\n}\n"
+            )
+        );
+        assert_eq!(session.merged_check(), ParseCheck::Parses);
+    }
+
+    #[test]
+    fn no_closed_candidate_when_plain_both_parses() {
+        let text = "<<<<<<< ours\nlet a = 1\n||||||| base\n=======\nlet b = 2\n>>>>>>> theirs\n";
+        let session = MergeSession::from_text(text, Some(Language::Swift)).unwrap();
+        assert!(candidate(&session, CandidateKind::OursThenTheirsClosed).is_none());
+        assert_eq!(
+            candidate(&session, CandidateKind::OursThenTheirs)
+                .unwrap()
+                .parse,
+            ParseCheck::Parses
+        );
+    }
+
+    #[test]
+    fn nothing_checked_without_a_language() {
+        let session = MergeSession::from_text(SWIFT, None).unwrap();
+        assert!(
+            session
+                .analysis(0)
+                .candidates
+                .iter()
+                .all(|c| c.parse == ParseCheck::NotChecked)
+        );
+        assert!(candidate(&session, CandidateKind::OursThenTheirsClosed).is_none());
+    }
+
+    #[test]
+    fn nothing_checked_when_the_grammar_rejects_both_sides() {
+        // Valid for the user's compiler, rejected by the grammar: here, plain
+        // garbage stands in for it on both sides.
+        let text = "@@@ {\n<<<<<<< ours\na()\n||||||| base\n=======\nb()\n>>>>>>> theirs\n";
+        let mut session = MergeSession::from_text(text, Some(Language::Swift)).unwrap();
+        assert!(
+            session
+                .analysis(0)
+                .candidates
+                .iter()
+                .all(|c| c.parse == ParseCheck::NotChecked)
+        );
+        session.choose(0, CandidateKind::Ours).unwrap();
+        assert_eq!(session.merged_check(), ParseCheck::NotChecked);
     }
 }

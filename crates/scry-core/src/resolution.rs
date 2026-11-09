@@ -6,6 +6,7 @@
 //! candidate IDs, or adds its own candidate, instead of rewriting the file.
 
 use crate::conflict::{Conflict, Segment, conflicts};
+use crate::syntax::ParseCheck;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictKind {
@@ -64,6 +65,13 @@ pub enum CandidateKind {
     TheirsThenOurs,
     Neither,
     Base,
+    /// Both sides with the lines that follow the conflict repeated after the
+    /// first one. With `diff3` and `zdiff3`, git moves the lines both sides
+    /// end with (often a closing brace) below the conflict, so plain "both"
+    /// leaves the first side unclosed. Offered only when plain "both" does
+    /// not parse and this does.
+    OursThenTheirsClosed,
+    TheirsThenOursClosed,
 }
 
 impl CandidateKind {
@@ -76,6 +84,8 @@ impl CandidateKind {
             CandidateKind::TheirsThenOurs => "theirs-then-ours",
             CandidateKind::Neither => "neither",
             CandidateKind::Base => "base",
+            CandidateKind::OursThenTheirsClosed => "ours-then-theirs-closed",
+            CandidateKind::TheirsThenOursClosed => "theirs-then-ours-closed",
         }
     }
 
@@ -88,6 +98,8 @@ impl CandidateKind {
             CandidateKind::TheirsThenOurs,
             CandidateKind::Neither,
             CandidateKind::Base,
+            CandidateKind::OursThenTheirsClosed,
+            CandidateKind::TheirsThenOursClosed,
         ]
         .into_iter()
         .find(|kind| kind.id() == id)
@@ -99,6 +111,9 @@ pub struct Candidate {
     pub kind: CandidateKind,
     /// The text that replaces the whole conflict, markers included.
     pub text: String,
+    /// Whether the file parses with this candidate in place; filled by the
+    /// merge session when it knows the language.
+    pub parse: ParseCheck,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,7 +209,11 @@ fn candidates(conflict: &Conflict) -> Vec<Candidate> {
     let mut candidates: Vec<Candidate> = Vec::new();
     for (kind, text) in texts {
         if !candidates.iter().any(|candidate| candidate.text == text) {
-            candidates.push(Candidate { kind, text });
+            candidates.push(Candidate {
+                kind,
+                text,
+                parse: ParseCheck::NotChecked,
+            });
         }
     }
     candidates
