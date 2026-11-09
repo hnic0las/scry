@@ -96,7 +96,7 @@ impl Language {
         }
     }
 
-    fn grammar(self) -> tree_sitter::Language {
+    pub(crate) fn grammar(self) -> tree_sitter::Language {
         match self {
             Language::Swift => tree_sitter_swift::LANGUAGE.into(),
             Language::ObjectiveC => tree_sitter_objc::LANGUAGE.into(),

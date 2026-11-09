@@ -83,9 +83,8 @@ struct CellView: View {
                 .italic()
                 .foregroundStyle(Theme.Surfaces.textSecondary)
         default:
-            Text(cell.text)
+            Text(cell.highlighted)
                 .font(Metrics.code)
-                .foregroundStyle(Theme.Surfaces.text)
                 .lineLimit(1)
                 .truncationMode(.tail)
         }

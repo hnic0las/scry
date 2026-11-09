@@ -3,6 +3,7 @@
 //! Git runs any `git-<name>` executable on the PATH as `git <name>`, so this
 //! binary is also available as `git scry`.
 
+mod highlight;
 mod resolve;
 
 use std::path::PathBuf;
@@ -41,6 +42,17 @@ enum Command {
     /// Exits with 0, or 2 when git cannot answer (for example outside a
     /// repository).
     Session,
+    /// Print a file with the syntax highlighting the app shows.
+    ///
+    /// Exits with 0, or 2 when the file cannot be read or Scry has no
+    /// grammar or highlight query for it.
+    Highlight {
+        /// File to show.
+        file: PathBuf,
+        /// Print each line's spans and their roles instead of colours.
+        #[arg(long)]
+        spans: bool,
+    },
     /// Resolve a conflicted file, as the merge tool `git mergetool` runs:
     ///
     ///   git config merge.tool scry
@@ -75,6 +87,7 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Conflicts { file } => list_conflicts(&file),
         Command::Session => show_session(),
+        Command::Highlight { file, spans } => highlight::run(&file, spans),
         Command::Resolve {
             base,
             local,

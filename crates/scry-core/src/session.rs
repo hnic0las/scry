@@ -12,8 +12,17 @@ use std::path::{Path, PathBuf};
 
 use crate::conflict::{self, Conflict, ParseError, Segment};
 use crate::git::{Git, GitError};
+use crate::highlight::{Highlighter, Span};
 use crate::resolution::{self, Analysis, Candidate, CandidateKind};
 use crate::syntax::{self, Language, ParseCheck};
+
+/// The three panes of the merge editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pane {
+    Ours,
+    Result,
+    Theirs,
+}
 
 /// The four files `git mergetool` passes to a merge tool.
 pub struct MergetoolFiles {
@@ -34,6 +43,11 @@ pub struct MergeSession {
     /// valid code; without such a reference, a parse failure says nothing
     /// about the merge, so nothing is checked.
     checkable: bool,
+    highlighter: Option<Highlighter>,
+    /// Highlight spans of the ours and theirs versions of the file, by line;
+    /// they never change during the session.
+    ours_spans: Vec<Vec<Span>>,
+    theirs_spans: Vec<Vec<Span>>,
 }
 
 impl MergeSession {
@@ -59,7 +73,8 @@ impl MergeSession {
             None => false,
         };
         let choices = vec![None; conflicts.len()];
-        MergeSession {
+        let highlighter = language.and_then(Highlighter::new);
+        let mut session = MergeSession {
             segments,
             conflicts,
             analyses,
@@ -67,7 +82,64 @@ impl MergeSession {
             rebuilt,
             language,
             checkable,
+            highlighter,
+            ours_spans: Vec::new(),
+            theirs_spans: Vec::new(),
+        };
+        session.ours_spans = session.highlight(&session.side_text(Pane::Ours));
+        session.theirs_spans = session.highlight(&session.side_text(Pane::Theirs));
+        session
+    }
+
+    /// Spans per line of `text`; none without a highlighter.
+    pub(crate) fn highlight(&self, text: &str) -> Vec<Vec<Span>> {
+        match &self.highlighter {
+            Some(highlighter) => highlighter.lines(text),
+            None => Vec::new(),
         }
+    }
+
+    /// The text a pane shows, as one file: the common text with each
+    /// conflict's ours side, theirs side, or chosen candidate (an
+    /// unresolved conflict adds nothing to the result).
+    pub(crate) fn side_text(&self, pane: Pane) -> String {
+        let mut text = String::new();
+        let mut index = 0;
+        for segment in &self.segments {
+            match segment {
+                Segment::Common(common) => text.push_str(common),
+                Segment::Conflict(conflict) => {
+                    match pane {
+                        Pane::Ours => text.push_str(&conflict.ours.text),
+                        Pane::Theirs => text.push_str(&conflict.theirs.text),
+                        Pane::Result => {
+                            if let Some(candidate) = self.chosen(index) {
+                                text.push_str(&candidate.text);
+                            }
+                        }
+                    }
+                    index += 1;
+                }
+            }
+        }
+        text
+    }
+
+    pub(crate) fn ours_spans(&self) -> &[Vec<Span>] {
+        &self.ours_spans
+    }
+
+    pub(crate) fn theirs_spans(&self) -> &[Vec<Span>] {
+        &self.theirs_spans
+    }
+
+    /// The candidate chosen for a conflict, if any.
+    pub(crate) fn chosen(&self, index: usize) -> Option<&Candidate> {
+        let kind = self.choices[index]?;
+        self.analyses[index]
+            .candidates
+            .iter()
+            .find(|candidate| candidate.kind == kind)
     }
 
     pub(crate) fn segments(&self) -> &[Segment] {

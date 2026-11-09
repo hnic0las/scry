@@ -31,6 +31,7 @@ Try the CLI:
 ```sh
 cargo run -p git-scry -- conflicts path/to/file
 cargo run -p git-scry -- session    # the operation in progress and who is on each side
+cargo run -p git-scry -- highlight path/to/file   # the syntax colours the app shows (--spans to list them)
 ```
 
 Use it as git's merge tool (terminal only until the app exists):
@@ -52,7 +53,7 @@ scripts/build-ffi.sh        # once before opening Xcode: builds the core and the
 open apps/macos/Scry.xcodeproj
 ```
 
-Xcode runs `scripts/build-ffi.sh` before each build. Pass a conflicted file as the launch argument (scheme › Run › Arguments), or use Open Conflicted File… (⌘O). Colours come from the design tokens: after a new export in `~/workspace/scry-ui`, run `scripts/generate-theme.py`.
+Xcode runs `scripts/build-ffi.sh` before each build. On a fresh checkout without `scripts/build-ffi.sh` run first, the first build fails on missing types (`Cell`, `Row`…) because Xcode lists the sources before the script writes the bindings; build again. Pass a conflicted file as the launch argument (scheme › Run › Arguments), or use Open Conflicted File… (⌘O). Colours come from the design tokens: after a new export in `~/workspace/scry-ui`, run `scripts/generate-theme.py`.
 
 ## Layout
 

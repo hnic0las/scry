@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use scry_core::git::GitCli;
+use scry_core::highlight;
 use scry_core::layout;
 use scry_core::operation::{self, SideRole};
 use scry_core::resolution::CandidateKind;
@@ -67,11 +68,37 @@ pub enum CellKind {
     Removed,
 }
 
+/// The design's syntax colour roles; text without a span is plain.
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum SyntaxRole {
+    Keyword,
+    String,
+    Number,
+    Comment,
+    Type,
+    Function,
+    Variable,
+    Constant,
+    Operator,
+    Punctuation,
+    Attribute,
+}
+
+/// A run of one role in a cell's text, in UTF-8 bytes from its start, end
+/// excluded.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct Span {
+    pub start: u32,
+    pub end: u32,
+    pub role: SyntaxRole,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Cell {
     pub number: Option<u32>,
     pub text: String,
     pub kind: CellKind,
+    pub spans: Vec<Span>,
 }
 
 #[derive(Debug, Clone, uniffi::Enum)]
@@ -350,6 +377,27 @@ fn cell(cell: layout::Cell) -> Cell {
             layout::CellKind::Unresolved => CellKind::Unresolved,
             layout::CellKind::Chosen => CellKind::Chosen,
             layout::CellKind::Removed => CellKind::Removed,
+        },
+        spans: cell.spans.into_iter().map(span).collect(),
+    }
+}
+
+fn span(span: highlight::Span) -> Span {
+    Span {
+        start: span.start as u32,
+        end: span.end as u32,
+        role: match span.role {
+            highlight::SyntaxRole::Keyword => SyntaxRole::Keyword,
+            highlight::SyntaxRole::String => SyntaxRole::String,
+            highlight::SyntaxRole::Number => SyntaxRole::Number,
+            highlight::SyntaxRole::Comment => SyntaxRole::Comment,
+            highlight::SyntaxRole::Type => SyntaxRole::Type,
+            highlight::SyntaxRole::Function => SyntaxRole::Function,
+            highlight::SyntaxRole::Variable => SyntaxRole::Variable,
+            highlight::SyntaxRole::Constant => SyntaxRole::Constant,
+            highlight::SyntaxRole::Operator => SyntaxRole::Operator,
+            highlight::SyntaxRole::Punctuation => SyntaxRole::Punctuation,
+            highlight::SyntaxRole::Attribute => SyntaxRole::Attribute,
         },
     }
 }
