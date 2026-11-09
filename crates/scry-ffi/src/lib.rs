@@ -425,6 +425,8 @@ fn row(row: layout::Row) -> Row {
 mod tests {
     use super::*;
 
+    /// The Swift-facing API end to end: open a file, read its header and candidates, choose,
+    /// refuse saving while unresolved and save once resolved.
     #[test]
     fn open_choose_and_save() {
         let dir = tempfile::tempdir().unwrap();

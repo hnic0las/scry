@@ -346,6 +346,8 @@ mod tests {
             .map(|(_, role)| role)
     }
 
+    /// Every grammar's highlight query must compile against its grammar, so a grammar update
+    /// that breaks one fails here; Kotlin has no query.
     #[test]
     fn every_query_compiles_except_kotlin() {
         for language in ALL {
@@ -358,6 +360,8 @@ mod tests {
         }
     }
 
+    /// The demo's Swift gets the roles the design shows: keywords, functions, types,
+    /// comments, numbers, strings with escapes and attributes.
     #[test]
     fn swift_from_the_demo() {
         let text = "@MainActor\nfunc upload(_ item: Item) async throws {\n    // Retry\n    try await client.send(item, timeout: .seconds(30), label: \"a\\n\")\n}\n";
@@ -376,6 +380,7 @@ mod tests {
         assert_eq!(role_of(text, swift, "\"a\\n\""), Some(SyntaxRole::String));
     }
 
+    /// Query order differs between grammars; the more specific pattern must win either way.
     #[test]
     fn specific_pattern_wins_whatever_the_query_order() {
         // JavaScript lists `(identifier) @variable` first, Go last.
@@ -393,6 +398,8 @@ mod tests {
         assert_eq!(role_of(go, Language::Go, "d"), Some(SyntaxRole::Variable));
     }
 
+    /// Specificity is the pattern's nesting depth; lists of alternatives, string literals and
+    /// comments in the query must not inflate it.
     #[test]
     fn depth_ignores_alternatives_strings_and_comments() {
         assert_eq!(depth("(identifier) @variable"), 1);
@@ -403,6 +410,8 @@ mod tests {
         assert_eq!(depth("[\"(\" \")\" (a) (b) (c)] @x ; (((comment)))"), 1);
     }
 
+    /// A YAML key must not take the string role from the long list of scalar patterns, the
+    /// case that ruled out pattern length as specificity.
     #[test]
     fn yaml_keys_are_not_strings() {
         // The scalar list is longer than the key pattern but less nested.
@@ -417,6 +426,8 @@ mod tests {
         );
     }
 
+    /// Languages built on another (TypeScript on JavaScript, Objective-C on C) get both
+    /// queries; C preprocessor directives show as attributes, as the design wants.
     #[test]
     fn extended_queries_keep_their_base() {
         let ts = "const a: number = load();\n";
@@ -440,6 +451,8 @@ mod tests {
         );
     }
 
+    /// Spans are per line as `str::lines` splits them, CRLF included, with offsets that are
+    /// valid UTF-8 boundaries, so the UIs can slice the text with them.
     #[test]
     fn lines_follow_str_lines_with_crlf_and_utf8() {
         let text = "let é = \"à\"\r\nlet b = 1\r\n";
@@ -459,6 +472,7 @@ mod tests {
         }
     }
 
+    /// Spans come in order and never overlap, so a UI can draw them in one pass.
     #[test]
     fn spans_are_sorted_and_do_not_overlap() {
         let text = "fn main() {\n    let x = vec![1, 2]; // done\n}\n";

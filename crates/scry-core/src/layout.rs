@@ -220,6 +220,8 @@ mod tests {
             .collect()
     }
 
+    /// A conflict takes as many rows as its longest side, with spacers in shorter panes, and
+    /// each pane keeps numbering its own lines after it.
     #[test]
     fn unresolved_conflict_is_padded_to_its_longest_side() {
         let session = MergeSession::from_text(TEXT, None).unwrap();
@@ -252,6 +254,7 @@ mod tests {
         assert_eq!(ours.text, "z");
     }
 
+    /// Once a candidate is chosen, the result pane shows its lines, padded like the sides.
     #[test]
     fn chosen_candidate_fills_the_result() {
         let mut session = MergeSession::from_text(TEXT, None).unwrap();
@@ -268,6 +271,8 @@ mod tests {
         );
     }
 
+    /// Each cell is highlighted as a line of its own pane's file, so a side's line after the
+    /// conflict gets the spans of that side, not another pane's.
     #[test]
     fn cells_carry_the_spans_of_their_pane() {
         let text = "let a = 1\n<<<<<<< ours\nlet b = \"x\"\n||||||| base\nlet b = 0\n=======\n// none\n>>>>>>> theirs\nlet z = 2\n";
@@ -296,6 +301,7 @@ mod tests {
         assert!(roles(theirs).contains(&SyntaxRole::Number));
     }
 
+    /// Choosing none removes the block; the result shows one row saying so.
     #[test]
     fn removed_block_shows_one_row() {
         let mut session = MergeSession::from_text(TEXT, None).unwrap();

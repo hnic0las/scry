@@ -18,6 +18,7 @@ Layout and commands: `README.md`. Add `crates/scry-mcp`, `crates/scry-ffi` and `
 - Write plain Rust: no complex lifetime annotations, clever generics, custom macros, or `async` in the core until needed.
 - After each Rust change, explain briefly in the conversation what is new language-wise; code comments explain why, not Rust basics.
 - Work in small increments that can be shown, each with what to run or look at to validate it.
+- Every test starts with a `///` comment stating its intent: the behaviour it protects and why it matters.
 
 ## Design prototype
 

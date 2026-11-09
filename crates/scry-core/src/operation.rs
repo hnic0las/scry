@@ -377,6 +377,8 @@ mod tests {
         }
     }
 
+    /// During a rebase git's ours and theirs are swapped from the user's view; the labels must
+    /// say which side is the rebase target and which is the user's commit.
     #[test]
     fn rebase_labels_say_who_is_who() {
         assert_eq!(
@@ -397,6 +399,7 @@ mod tests {
         );
     }
 
+    /// Merge, cherry-pick and revert sides get labels that say what each side is.
     #[test]
     fn other_labels() {
         assert_eq!(
@@ -417,6 +420,8 @@ mod tests {
         );
     }
 
+    /// A branch side shows the commit it points at; a commit side has no detail, since its
+    /// label already names the commit.
     #[test]
     fn detail_only_for_branch_like_sides() {
         assert_eq!(
@@ -426,6 +431,8 @@ mod tests {
         assert_eq!(side(SideRole::CommitBeingRebased, "a1b2c3d").detail(), None);
     }
 
+    /// The rebase summary names the branch, the target, the progress and the commit being
+    /// replayed, as the window subtitle shows it.
     #[test]
     fn rebase_summary() {
         let operation = Operation {
@@ -444,6 +451,7 @@ mod tests {
         );
     }
 
+    /// A merge on a detached HEAD still gets a readable summary.
     #[test]
     fn merge_summary_on_detached_head() {
         let operation = Operation {

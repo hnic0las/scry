@@ -187,6 +187,7 @@ fn first_error(node: Node<'_>) -> Option<Node<'_>> {
 mod tests {
     use super::*;
 
+    /// The language comes from the file extension, and unknown files get none.
     #[test]
     fn language_from_extension() {
         assert_eq!(
@@ -201,6 +202,8 @@ mod tests {
         assert_eq!(Language::from_path(Path::new("Makefile")), None);
     }
 
+    /// Apple and tooling files map to their grammar by name or extension (headers as
+    /// Objective-C, Podfile as Ruby, `.xcstrings` as JSON), and `.pbxproj` to none.
     #[test]
     fn names_and_extensions() {
         let cases = [
@@ -307,12 +310,14 @@ mod tests {
         }
     }
 
+    /// The demo's Swift parses, so checks on the demo are meaningful.
     #[test]
     fn swift_from_the_demo_parses() {
         let text = "func upload(_ item: Item) async throws {\n    try await retry(times: 3, backoff: .exponential) {\n        try await client.send(item, timeout: .seconds(30))\n    }\n}\n";
         assert_eq!(check(Language::Swift, text), ParseCheck::Parses);
     }
 
+    /// A missing closing brace is reported, with the line where it is missing.
     #[test]
     fn missing_brace_is_reported_with_a_line() {
         let text =

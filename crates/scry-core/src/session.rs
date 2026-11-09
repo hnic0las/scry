@@ -574,6 +574,8 @@ mod tests {
         <<<<<<< ours\nsame\n||||||| base\nold\n=======\nsame\n>>>>>>> theirs\n\
         end\n";
 
+    /// No merged text exists while a conflict is open, so a half-resolved file can never be
+    /// written.
     #[test]
     fn nothing_merged_until_every_conflict_has_a_choice() {
         let mut session = MergeSession::from_text(TEXT, None).unwrap();
@@ -591,6 +593,8 @@ mod tests {
         );
     }
 
+    /// Choosing a candidate the conflict does not offer, or a conflict that does not exist,
+    /// is an error rather than a silent no-op.
     #[test]
     fn only_offered_candidates_can_be_chosen() {
         let mut session = MergeSession::from_text(TEXT, None).unwrap();
@@ -608,6 +612,8 @@ mod tests {
         );
     }
 
+    /// Applying suggestions fills only the conflicts a rule settles and leaves the others
+    /// open.
     #[test]
     fn suggestions_fill_only_open_conflicts_that_have_one() {
         let mut session = MergeSession::from_text(TEXT, None).unwrap();
@@ -616,6 +622,8 @@ mod tests {
         assert_eq!(session.choice(1), Some(CandidateKind::Ours));
     }
 
+    /// The CLI's `--take` refers to conflicts by number or ID; both must resolve, and unknown
+    /// ones must not.
     #[test]
     fn find_by_number_or_id() {
         let session = MergeSession::from_text(TEXT, None).unwrap();
@@ -627,6 +635,7 @@ mod tests {
         assert_eq!(session.find("cffffff"), None);
     }
 
+    /// Writing replaces the file in one step and leaves no temporary file behind.
     #[test]
     fn atomic_write_replaces_the_file_and_leaves_no_temporary() {
         let dir = tempfile::tempdir().unwrap();
@@ -652,6 +661,8 @@ mod tests {
             .find(|c| c.kind == kind)
     }
 
+    /// Each candidate is checked by parsing the whole file with it; the demo's plain "both"
+    /// does not parse because git moved the shared brace.
     #[test]
     fn candidates_are_checked_by_parsing() {
         let session = MergeSession::from_text(SWIFT, Some(Language::Swift)).unwrap();
@@ -664,6 +675,8 @@ mod tests {
         ));
     }
 
+    /// The closed variants of "both" repair the brace git moved out of the conflict, and the
+    /// merged file parses.
     #[test]
     fn closed_both_repairs_the_moved_brace() {
         let mut session = MergeSession::from_text(SWIFT, Some(Language::Swift)).unwrap();
@@ -683,6 +696,8 @@ mod tests {
         assert_eq!(session.merged_check(), ParseCheck::Parses);
     }
 
+    /// Closed variants are offered only when they repair something: not when plain "both"
+    /// already parses.
     #[test]
     fn no_closed_candidate_when_plain_both_parses() {
         let text = "<<<<<<< ours\nlet a = 1\n||||||| base\n=======\nlet b = 2\n>>>>>>> theirs\n";
@@ -696,6 +711,7 @@ mod tests {
         );
     }
 
+    /// Without a grammar nothing is checked, and no closed variant is offered.
     #[test]
     fn nothing_checked_without_a_language() {
         let session = MergeSession::from_text(SWIFT, None).unwrap();
@@ -709,6 +725,8 @@ mod tests {
         assert!(candidate(&session, CandidateKind::OursThenTheirsClosed).is_none());
     }
 
+    /// When the grammar rejects the file on both sides, a parse failure says nothing about
+    /// the merge, so nothing is checked and nothing is blocked.
     #[test]
     fn nothing_checked_when_the_grammar_rejects_both_sides() {
         // Valid for the user's compiler, rejected by the grammar: here, plain

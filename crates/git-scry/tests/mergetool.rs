@@ -82,6 +82,7 @@ impl Repo {
     }
 }
 
+/// Through the real `git mergetool`: a resolved file is written and git stages it.
 #[test]
 fn resolved_file_is_written_and_staged() {
     let repo = Repo::stopped_rebase("merge", "--take 1=theirs-then-ours");
@@ -92,6 +93,8 @@ fn resolved_file_is_written_and_staged() {
     assert_eq!(repo.unmerged(), "");
 }
 
+/// With a conflict left and no terminal to ask in, the file stays untouched and still
+/// conflicted.
 #[test]
 fn unresolved_file_is_left_as_it_was() {
     let repo = Repo::stopped_rebase("zdiff3", "");
@@ -104,6 +107,7 @@ fn unresolved_file_is_left_as_it_was() {
     assert_eq!(repo.unmerged(), "file.txt\n");
 }
 
+/// An unknown candidate in `--take` fails with a message and writes nothing.
 #[test]
 fn invalid_choice_fails_without_writing() {
     let repo = Repo::stopped_rebase("zdiff3", "--take 1=nonsense");

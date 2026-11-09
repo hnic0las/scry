@@ -241,6 +241,7 @@ mod tests {
         found[0]
     }
 
+    /// A file without markers must come back whole, byte for byte, so nothing is lost.
     #[test]
     fn file_without_conflict_is_one_common_segment() {
         let text = "a\nb\n";
@@ -250,11 +251,14 @@ mod tests {
         );
     }
 
+    /// An empty file is valid input and gives nothing to show, not an error.
     #[test]
     fn empty_file_has_no_segment() {
         assert_eq!(parse("").unwrap(), vec![]);
     }
 
+    /// The default `merge` style: both sides, their labels, no base, and the text around the
+    /// conflict kept apart.
     #[test]
     fn merge_style_conflict() {
         let text = "before\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feature\nafter\n";
@@ -282,6 +286,8 @@ mod tests {
         );
     }
 
+    /// The `diff3` style adds the base; the parser must keep it with its label, since
+    /// classification and word changes compare against it.
     #[test]
     fn diff3_style_conflict_keeps_the_base() {
         let text = "<<<<<<< HEAD\nours\n||||||| merged common ancestors\nbase\n=======\ntheirs\n>>>>>>> feature\n";
@@ -298,6 +304,8 @@ mod tests {
         );
     }
 
+    /// Windows line endings stay in the sides' text and out of the labels, so a merge never
+    /// rewrites them.
     #[test]
     fn crlf_line_endings_are_preserved() {
         let text = "a\r\n<<<<<<< HEAD\r\nours\r\n=======\r\ntheirs\r\n>>>>>>> b\r\n";
@@ -308,6 +316,8 @@ mod tests {
         assert_eq!(conflict.theirs.label, "b");
     }
 
+    /// Markers may carry no label and a side may be empty (one side added lines); both are
+    /// still a conflict.
     #[test]
     fn markers_without_labels_and_empty_sides() {
         let text = "<<<<<<<\n=======\nadded\n>>>>>>>\n";
@@ -317,6 +327,8 @@ mod tests {
         assert_eq!(conflict.theirs.text, "added\n");
     }
 
+    /// A closing marker on the file's last line, without a final newline, still closes the
+    /// conflict.
     #[test]
     fn last_line_without_newline() {
         let text = "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> b";
@@ -327,6 +339,7 @@ mod tests {
         assert_eq!(conflict.theirs.label, "b");
     }
 
+    /// Each conflict reports the line it starts on, in file order, for navigation.
     #[test]
     fn several_conflicts_in_order() {
         let text =
@@ -336,6 +349,8 @@ mod tests {
         assert_eq!(lines, vec![1, 7]);
     }
 
+    /// `=======` and `>>>>>>>` alone are ordinary text (a Markdown underline, a quote), not
+    /// an error.
     #[test]
     fn separator_and_closing_markers_outside_a_conflict_are_text() {
         let text = "Title\n=======\n>>>>>>> not a conflict\n";
@@ -345,6 +360,7 @@ mod tests {
         );
     }
 
+    /// A run longer than the marker size is text: only exact markers count.
     #[test]
     fn longer_runs_of_marker_characters_are_text() {
         let text = "<<<<<<<< eight\n";
@@ -354,6 +370,7 @@ mod tests {
         );
     }
 
+    /// Git always puts a space before a label, so `<<<<<<<HEAD` is text, not a marker.
     #[test]
     fn marker_followed_by_text_without_space_is_text() {
         let text = "<<<<<<<HEAD\n";
@@ -363,6 +380,8 @@ mod tests {
         );
     }
 
+    /// With `conflict-marker-size` set, markers have another length; the parser follows the
+    /// size it is given and nothing else.
     #[test]
     fn custom_marker_size() {
         let text = "<<<<<<<<<< HEAD\nours\n==========\ntheirs\n>>>>>>>>>> b\n";
@@ -375,6 +394,8 @@ mod tests {
         );
     }
 
+    /// A conflict never closed is refused rather than guessed, and the error points to where
+    /// it opens.
     #[test]
     fn unterminated_conflict_reports_its_opening_line() {
         let text = "x\n<<<<<<< HEAD\nours\n=======\ntheirs\n";
@@ -387,6 +408,8 @@ mod tests {
         );
     }
 
+    /// Markers out of order (a second opening inside a conflict) are refused: guessing could
+    /// lose the user's work.
     #[test]
     fn nested_opening_marker_is_an_error() {
         let text = "<<<<<<< HEAD\n<<<<<<< again\n";
@@ -399,6 +422,7 @@ mod tests {
         );
     }
 
+    /// A closing marker before the separator is refused, with the line it is on.
     #[test]
     fn closing_marker_before_separator_is_an_error() {
         let text = "<<<<<<< HEAD\nours\n>>>>>>> b\n";
@@ -411,6 +435,7 @@ mod tests {
         );
     }
 
+    /// The error shown to the user names the line, so they can find the problem in the file.
     #[test]
     fn error_message_names_the_line() {
         let error = parse("<<<<<<< HEAD\n").unwrap_err();

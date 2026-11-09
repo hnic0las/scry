@@ -71,6 +71,7 @@ fn diverged() -> Repo {
     repo
 }
 
+/// A repository with nothing in progress reports no operation.
 #[test]
 fn no_operation() {
     let repo = Repo::new();
@@ -78,6 +79,8 @@ fn no_operation() {
     assert_eq!(operation::current(&repo.scry_git()).unwrap(), None);
 }
 
+/// A real conflicted merge: the current branch is ours, the merged branch theirs, with
+/// their commits and the conflicted file.
 #[test]
 fn merge() {
     let repo = diverged();
@@ -98,6 +101,8 @@ fn merge() {
     assert_eq!(operation::conflicted_paths(&git).unwrap(), ["file.txt"]);
 }
 
+/// A real conflicted rebase: ours is the target plus the commits already replayed, theirs
+/// is the user's commit, with the rebase progress.
 #[test]
 fn rebase() {
     let repo = diverged();
@@ -136,6 +141,7 @@ fn rebase() {
     assert_eq!(operation::conflicted_paths(&git).unwrap(), ["file.txt"]);
 }
 
+/// A real conflicted cherry-pick: theirs is the picked commit.
 #[test]
 fn cherry_pick() {
     let repo = diverged();
@@ -149,6 +155,7 @@ fn cherry_pick() {
     assert_eq!(theirs.commit.subject, "feature change");
 }
 
+/// A real conflicted revert: theirs is the commit being reverted.
 #[test]
 fn revert() {
     let repo = diverged();
@@ -163,6 +170,7 @@ fn revert() {
     assert!(operation.summary().starts_with("Reverting "));
 }
 
+/// Outside a repository git fails, and the error comes back instead of a wrong answer.
 #[test]
 fn not_a_repository() {
     let dir = tempfile::tempdir().unwrap();

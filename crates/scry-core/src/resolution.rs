@@ -277,6 +277,7 @@ mod tests {
         analysis.candidates.iter().map(|c| c.kind.id()).collect()
     }
 
+    /// Every classification is decided from the three texts alone, with no judgement.
     #[test]
     fn classifications() {
         let cases = [
@@ -304,6 +305,8 @@ mod tests {
         }
     }
 
+    /// A rule suggests a candidate only when the answer is certain (same change, or one side
+    /// unchanged); a whitespace-only difference is left to the user.
     #[test]
     fn rules_suggest_only_when_no_judgement_is_needed() {
         assert_eq!(
@@ -322,6 +325,8 @@ mod tests {
         assert_eq!(analyze_one("a\n", Some("x\n"), "  a\n").suggestion, None);
     }
 
+    /// Candidates come in a fixed order, with their exact text, so every UI lists the same
+    /// thing.
     #[test]
     fn candidates_in_order_with_their_text() {
         let analysis = analyze_one("a\n", Some("x\n"), "b\n");
@@ -344,6 +349,8 @@ mod tests {
         assert_eq!(texts, ["a\n", "b\n", "a\nb\n", "b\na\n", "", "x\n"]);
     }
 
+    /// Candidates with the same text are offered once, and no base candidate exists without a
+    /// base.
     #[test]
     fn duplicate_candidates_are_dropped() {
         // Ours is empty: "ours-then-theirs" equals "theirs", "neither" equals "ours".
@@ -354,6 +361,8 @@ mod tests {
         assert!(!candidate_ids(&analyze_one("a\n", None, "b\n")).contains(&"base"));
     }
 
+    /// A conflict's ID comes from its content, so it stays the same when other conflicts are
+    /// resolved and the numbers shift.
     #[test]
     fn ids_follow_content_not_position() {
         let first = conflict("a\n", Some("x\n"), "b\n");
@@ -370,6 +379,8 @@ mod tests {
         assert!(both[0].id.starts_with('c') && both[0].id.len() == 7);
     }
 
+    /// IDs ignore the marker labels, which change when a file is rebuilt, and must never
+    /// change between builds or Rust versions.
     #[test]
     fn ids_ignore_labels_and_survive_rebuilds() {
         let text = "<<<<<<< HEAD\na\n||||||| base\nx\n=======\nb\n>>>>>>> 1234567 (Other label)\n";
@@ -380,6 +391,7 @@ mod tests {
         assert_eq!(analysis.id, "c660efd");
     }
 
+    /// Two identical conflicts in a file still get distinct IDs.
     #[test]
     fn identical_conflicts_get_numbered_ids() {
         let one = conflict("a\n", Some("x\n"), "b\n");
@@ -387,6 +399,7 @@ mod tests {
         assert_eq!(analyses[1].id, format!("{}-2", analyses[0].id));
     }
 
+    /// Classification sentences use the human side labels, not git's ours and theirs.
     #[test]
     fn descriptions_name_the_sides() {
         assert_eq!(
