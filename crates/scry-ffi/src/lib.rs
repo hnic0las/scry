@@ -290,6 +290,18 @@ impl MergeDocument {
         }
     }
 
+    /// The indentation for the current line when `closer` (one character)
+    /// is typed while editing the conflict at `conflict`, with `before` the
+    /// draft's text before the cursor; `None` to type it as it is.
+    pub fn closing_indent(&self, conflict: u32, before: String, closer: String) -> Option<String> {
+        let mut characters = closer.chars();
+        let (Some(closer), None) = (characters.next(), characters.next()) else {
+            return None;
+        };
+        self.lock()
+            .closing_indent(conflict as usize, &before, closer)
+    }
+
     /// Highlight spans, one list per line, of `text` being typed for the
     /// conflict at `conflict` (from 0), coloured in place in the file.
     pub fn highlight_draft(&self, conflict: u32, text: String) -> Vec<Vec<Span>> {

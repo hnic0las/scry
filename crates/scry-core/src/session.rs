@@ -303,6 +303,36 @@ impl MergeSession {
         indent::newline(before, after, &self.indent_unit, self.language)
     }
 
+    /// The indentation for the current line when `closer` is typed while
+    /// editing conflict `index`, with `before` the draft's text before the
+    /// cursor; `None` to type it as it is. The file before the conflict is
+    /// searched too, for a block opened outside it.
+    pub fn closing_indent(&self, index: usize, before: &str, closer: char) -> Option<String> {
+        let mut text = self.text_before_conflict(index);
+        text.push_str(before);
+        indent::closing_indent(&text, closer, &self.indent_unit)
+    }
+
+    /// The file before conflict `index`: common text, and earlier conflicts
+    /// as chosen, or with ours while unresolved.
+    fn text_before_conflict(&self, index: usize) -> String {
+        let mut text = String::new();
+        let mut conflict = 0;
+        for segment in &self.segments {
+            match segment {
+                Segment::Common(common) => text.push_str(common),
+                Segment::Conflict(found) => {
+                    if conflict == index {
+                        break;
+                    }
+                    text.push_str(self.chosen_text(conflict).unwrap_or(&found.ours.text));
+                    conflict += 1;
+                }
+            }
+        }
+        text
+    }
+
     /// Highlight spans of `text` being typed for conflict `index`, one list
     /// per line of `text`. It is highlighted in place in the file (the other
     /// conflicts resolved as chosen, or with ours), so a string or comment
@@ -876,6 +906,20 @@ mod tests {
     fn newline_uses_the_files_indent_unit() {
         let session = MergeSession::from_text(SWIFT, Some(Language::Swift)).unwrap();
         assert_eq!(session.newline("func stop() {", "}").text, "\n    \n");
+    }
+
+    /// A closing brace typed in a conflict finds its block's opening line
+    /// in the file before the conflict too: here the function around it.
+    #[test]
+    fn closing_brace_finds_a_block_opened_before_the_conflict() {
+        let text = "func a() {\n    if b {\n<<<<<<< ours\n        c()\n=======\n        d()\n>>>>>>> theirs\n    }\n}\n";
+        let session = MergeSession::from_text(text, Some(Language::Swift)).unwrap();
+        assert_eq!(
+            session
+                .closing_indent(0, "        c()\n        ", '}')
+                .as_deref(),
+            Some("    ")
+        );
     }
 
     /// Applying suggestions is one step: one undo takes them all back.

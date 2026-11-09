@@ -103,6 +103,12 @@ final class EditorModel {
         document.newline(before: before, after: after)
     }
 
+    /// The indentation for a line where `closer` is typed, from the core.
+    func closingIndent(before: String, closer: String) -> String? {
+        guard let editing else { return nil }
+        return document.closingIndent(conflict: UInt32(editing), before: before, closer: closer)
+    }
+
     func cancelEdit() {
         editing = nil
     }

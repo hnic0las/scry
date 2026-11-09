@@ -98,6 +98,46 @@ pub fn newline(before: &str, after: &str, unit: &str, language: Option<Language>
     }
 }
 
+/// The indentation for a line where a closing bracket is being typed:
+/// that of the line holding its opening bracket, found by walking back
+/// through `before` (all the text before the cursor). `None` when the
+/// character is not a closing bracket or the line has text before the
+/// cursor, so the bracket is typed as it is. Brackets inside strings and
+/// comments are counted too; when no opening bracket is found, the line
+/// loses one unit.
+pub fn closing_indent(before: &str, closer: char, unit: &str) -> Option<String> {
+    let opener = match closer {
+        '}' => '{',
+        ')' => '(',
+        ']' => '[',
+        _ => return None,
+    };
+    let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+    let current = &before[line_start..];
+    if !current.chars().all(|c| c == ' ' || c == '\t') {
+        return None;
+    }
+    let mut depth = 0;
+    for (index, c) in before[..line_start].char_indices().rev() {
+        if c == closer {
+            depth += 1;
+        } else if c == opener {
+            if depth == 0 {
+                let start = before[..index].rfind('\n').map_or(0, |found| found + 1);
+                return Some(leading_whitespace(&before[start..]));
+            }
+            depth -= 1;
+        }
+    }
+    Some(current.strip_suffix(unit).unwrap_or(current).to_string())
+}
+
+fn leading_whitespace(line: &str) -> String {
+    line.chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +208,40 @@ mod tests {
         assert_eq!(
             newline("\tif (a) {", "", "\t", Some(Language::C)).text,
             "\n\t\t"
+        );
+    }
+
+    /// A closing brace typed on an indented empty line moves back to the
+    /// indentation of the line that opened its block, as in Xcode.
+    #[test]
+    fn closing_brace_aligns_with_its_opening_line() {
+        let before = "func a() {\n    if b {\n        c()\n        ";
+        assert_eq!(closing_indent(before, '}', "    ").as_deref(), Some("    "));
+        let before = "func a() {\n    if b {\n        c()\n    }\n    ";
+        assert_eq!(closing_indent(before, '}', "    ").as_deref(), Some(""));
+    }
+
+    /// Nested pairs in between are skipped, whatever their kind of bracket.
+    #[test]
+    fn closing_skips_nested_pairs() {
+        let before = "  call(\n      a(b),\n      [c]\n      ";
+        assert_eq!(closing_indent(before, ')', "  ").as_deref(), Some("  "));
+    }
+
+    /// With text before the cursor, or a character that is not a closing
+    /// bracket, nothing changes: the character is typed as it is.
+    #[test]
+    fn closing_only_on_a_blank_line() {
+        assert_eq!(closing_indent("    let a = b", '}', "    "), None);
+        assert_eq!(closing_indent("    ", 'x', "    "), None);
+    }
+
+    /// With no opening bracket to find, the line loses one unit.
+    #[test]
+    fn closing_without_opener_removes_one_unit() {
+        assert_eq!(
+            closing_indent("        ", '}', "    ").as_deref(),
+            Some("    ")
         );
     }
 }

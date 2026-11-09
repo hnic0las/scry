@@ -15,7 +15,8 @@ struct EditBlockView: View {
                 CodeTextView(
                     text: $model.draft,
                     highlight: model.highlightDraft,
-                    newline: model.newline
+                    newline: model.newline,
+                    closingIndent: model.closingIndent
                 )
                     .frame(height: editorHeight)
                     .overlay(
@@ -61,6 +62,9 @@ struct CodeTextView: NSViewRepresentable {
     /// What Return inserts, given the line's text before and after the
     /// cursor; a plain line break by default.
     var newline: (String, String) -> Newline = { _, _ in Newline(text: "\n", cursor: 1) }
+    /// The indentation for a line where a closing bracket is typed, given
+    /// the text before the cursor and the bracket; `nil` to type it as is.
+    var closingIndent: (String, String) -> String? = { _, _ in nil }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -152,6 +156,27 @@ struct CodeTextView: NSViewRepresentable {
             let cursor = String(decoding: newline.text.utf8.prefix(Int(newline.cursor)), as: UTF8.self)
             textView.setSelectedRange(NSRange(location: selection.location + cursor.utf16.count, length: 0))
             return true
+        }
+
+        /// A closing bracket typed on a blank line moves back to the
+        /// indentation the core gives, that of its block's opening line.
+        func textView(
+            _ textView: NSTextView,
+            shouldChangeTextIn range: NSRange,
+            replacementString text: String?
+        ) -> Bool {
+            guard let text, range.length == 0, ["}", ")", "]"].contains(text) else { return true }
+            let string = textView.string as NSString
+            let before = string.substring(to: range.location)
+            guard let indentation = parent.closingIndent(before, text) else { return true }
+            let lineStart = string.lineRange(for: NSRange(location: range.location, length: 0)).location
+            // Replaces the line's blanks and types the bracket in one step,
+            // so ⌘Z undoes both.
+            textView.insertText(
+                indentation + text,
+                replacementRange: NSRange(location: lineStart, length: range.location - lineStart)
+            )
+            return false
         }
 
         /// Applies the core's spans to the text, without changing it.
