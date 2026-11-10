@@ -13,40 +13,18 @@ struct ScryApp: App {
 
 /// Opens the file given on the command line, or asks for one.
 struct RootView: View {
-    @State private var model: EditorModel?
-    @State private var openError: String?
+    @State private var viewModel = RootViewModel()
 
     var body: some View {
         Group {
-            if let model {
-                MergeEditorView(model: model)
+            if let editor = viewModel.editor {
+                MergeEditorView(viewModel: editor)
             } else {
-                EmptyStateView(error: openError, open: chooseFile)
+                EmptyStateView(error: viewModel.openError, open: chooseFile)
             }
         }
         .frame(minWidth: 900, minHeight: 600)
-        .task {
-            if model == nil, let path = launchPath {
-                load(path)
-            }
-        }
-    }
-
-    /// The first argument naming an existing file. Xcode adds its own
-    /// arguments (`-NSDocumentRevisionsDebugMode YES`), so others are skipped.
-    private var launchPath: String? {
-        CommandLine.arguments.dropFirst().first { argument in
-            !argument.hasPrefix("-") && FileManager.default.fileExists(atPath: argument)
-        }
-    }
-
-    private func load(_ path: String) {
-        do {
-            model = try EditorModel(path: path)
-            openError = nil
-        } catch {
-            openError = "\(error)"
-        }
+        .task { viewModel.openLaunchFile() }
     }
 
     private func chooseFile() {
@@ -56,7 +34,7 @@ struct RootView: View {
         panel.allowsMultipleSelection = false
         panel.message = "Choose a file with conflict markers"
         if panel.runModal() == .OK, let url = panel.url {
-            load(url.path)
+            viewModel.open(url.path)
         }
     }
 }

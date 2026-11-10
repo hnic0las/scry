@@ -2,12 +2,12 @@ import SwiftUI
 
 /// S3: the focused conflict, its classification and its candidates.
 struct InspectorView: View {
-    let model: EditorModel
+    let viewModel: InspectorViewModel
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                if let conflict = model.currentConflict {
+                if let conflict = viewModel.conflict {
                     content(conflict)
                 } else {
                     Text("No conflict in this file.")
@@ -25,9 +25,9 @@ struct InspectorView: View {
     @ViewBuilder
     private func content(_ conflict: ConflictInfo) -> some View {
         HStack(alignment: .firstTextBaseline) {
-            Text("Conflict \(conflict.number) of \(model.conflicts.count)")
+            Text(viewModel.title)
                 .font(Metrics.headline)
-            Text("line \(conflict.startLine)")
+            Text(viewModel.line)
                 .font(Metrics.callout)
                 .foregroundStyle(Theme.Surfaces.textSecondary)
             Spacer()
@@ -50,29 +50,22 @@ struct InspectorView: View {
             .font(Metrics.captionBold)
             .foregroundStyle(Theme.Surfaces.textSecondary)
 
-        ForEach(conflict.candidates, id: \.id) { candidate in
-            CandidateCard(
-                candidate: candidate,
-                selected: conflict.chosen == candidate.id,
-                language: model.status.language
-            ) {
-                model.choose(candidate.id, conflict: Int(conflict.number) - 1)
+        ForEach(viewModel.cards) { card in
+            CandidateCard(candidate: card.candidate, selected: card.selected, language: viewModel.language) {
+                viewModel.choose(card.candidate.id)
             }
         }
 
-        let index = Int(conflict.number) - 1
-        if let edited = model.chosenCandidate(of: index), edited.id == CandidateInfo.editedID {
-            CandidateCard(candidate: edited, selected: true, language: model.status.language) {
-                model.startEditing(conflict: index)
+        if let edited = viewModel.editedCard {
+            CandidateCard(candidate: edited.candidate, selected: true, language: viewModel.language) {
+                viewModel.editByHand()
             }
         }
-        Button {
-            model.startEditing(conflict: index)
-        } label: {
+        Button(action: viewModel.editByHand) {
             Label("Edit by Hand", systemImage: "pencil")
         }
         .help("Write this conflict's result yourself (↩)")
-        .disabled(model.editing != nil)
+        .disabled(!viewModel.canEditByHand)
     }
 
     private var card: some View {
@@ -121,13 +114,8 @@ struct CandidateCard: View {
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
-    private var invalid: Bool {
-        if case .doesNotParse = candidate.parse { return true }
-        return false
-    }
-
     private var accent: Color {
-        invalid ? Theme.Severity.error : Theme.Interaction.focus
+        candidate.doesNotParse ? Theme.Severity.error : Theme.Interaction.focus
     }
 
     @ViewBuilder
@@ -178,26 +166,29 @@ struct CandidateCard: View {
     }
 }
 
-/// Where a candidate comes from, as the badges show it.
-struct CandidateProvenance {
-    let name: String
-    let symbol: String
-    let color: Color
-}
-
-extension CandidateInfo {
-    /// The ID the core gives a conflict resolved by hand.
-    static let editedID = "edited"
-
-    /// The "closed" variants are made by a rule, an edit by the user; the
-    /// others are git's sides as they are.
-    var provenance: CandidateProvenance {
-        if id == Self.editedID {
-            return CandidateProvenance(name: "you", symbol: "person.fill", color: Theme.Provenance.human)
+/// A provenance as the badges and the result's strip show it.
+extension Provenance {
+    var name: String {
+        switch self {
+        case .git: "git"
+        case .rule: "rule"
+        case .human: "you"
         }
-        if id.hasSuffix("-closed") {
-            return CandidateProvenance(name: "rule", symbol: "ruler", color: Theme.Provenance.rule)
+    }
+
+    var symbol: String {
+        switch self {
+        case .git: "arrow.triangle.branch"
+        case .rule: "ruler"
+        case .human: "person.fill"
         }
-        return CandidateProvenance(name: "git", symbol: "arrow.triangle.branch", color: Theme.Provenance.git)
+    }
+
+    var color: Color {
+        switch self {
+        case .git: Theme.Provenance.git
+        case .rule: Theme.Provenance.rule
+        case .human: Theme.Provenance.human
+        }
     }
 }

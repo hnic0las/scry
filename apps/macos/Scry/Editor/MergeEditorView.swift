@@ -2,15 +2,14 @@ import SwiftUI
 
 /// S2: ours, result and theirs side by side, with the inspector (S3).
 struct MergeEditorView: View {
-    @Bindable var model: EditorModel
+    @Bindable var viewModel: MergeEditorViewModel
     @State private var showInspector = true
-    @State private var confirmInvalidWrite = false
     /// How far the three panes are scrolled sideways, shared by all rows.
     @State private var scrollX: CGFloat
 
     /// `scrollX` starts the panes scrolled sideways, for previews.
-    init(model: EditorModel, scrollX: CGFloat = 0) {
-        self.model = model
+    init(viewModel: MergeEditorViewModel, scrollX: CGFloat = 0) {
+        self.viewModel = viewModel
         _scrollX = State(initialValue: scrollX)
     }
 
@@ -23,40 +22,50 @@ struct MergeEditorView: View {
                 GeometryReader { geometry in
                     let widths = PaneWidths(total: geometry.size.width)
                     VStack(spacing: 0) {
-                        PaneHeaders(model: model, widths: widths)
+                        PaneHeaders(
+                            ours: viewModel.oursHeader,
+                            result: viewModel.resultHeader,
+                            theirs: viewModel.theirsHeader,
+                            widths: widths
+                        )
                         Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1)
                         rowsList(widths: widths)
                     }
                 }
-                StatusBar(model: model)
+                StatusBar(
+                    resolved: viewModel.resolvedSummary,
+                    verification: viewModel.verification,
+                    written: viewModel.written,
+                    language: viewModel.language
+                )
             }
             .background(Theme.Surfaces.pane)
             if showInspector {
                 Rectangle().fill(Theme.Surfaces.hairline).frame(width: 1)
-                InspectorView(model: model)
+                InspectorView(viewModel: viewModel.inspector)
                     .frame(width: Metrics.inspectorWidth)
             }
         }
-        .navigationTitle(model.header.fileName)
-        .navigationSubtitle(model.header.summary ?? model.header.path)
+        .navigationTitle(viewModel.title)
+        .navigationSubtitle(viewModel.subtitle)
         .toolbar { toolbar }
         .background { hiddenShortcuts }
-        .alert("The result does not parse", isPresented: $confirmInvalidWrite) {
-            Button("Write Anyway", role: .destructive) { model.save() }
+        .alert("The result does not parse", isPresented: $viewModel.confirmingInvalidWrite) {
+            Button("Write Anyway", role: .destructive, action: viewModel.writeAnyway)
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(invalidMessage)
+            Text(viewModel.invalidWriteMessage)
         }
         .alert(
             "Something went wrong",
             isPresented: Binding(
-                get: { model.errorMessage != nil },
-                set: { if !$0 { model.errorMessage = nil } }
+                get: { viewModel.failure != nil },
+                set: { if !$0 { viewModel.failure = nil } }
             )
         ) {
-            Button("OK") { model.errorMessage = nil }
+            Button("OK") { viewModel.failure = nil }
         } message: {
-            Text(model.errorMessage ?? "")
+            Text(viewModel.failure ?? "")
         }
     }
 
@@ -64,11 +73,16 @@ struct MergeEditorView: View {
         ScrollViewReader { proxy in
             ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(model.rows.enumerated()), id: \.offset) { offset, row in
-                        RowView(row: row, widths: widths, model: model, scrollX: clampedScrollX(widths))
-                            .id(offset)
-                        if case .lens(let conflict) = row, Int(conflict) == model.editing {
-                            EditBlockView(model: model, widths: widths)
+                    ForEach(Array(viewModel.rows.enumerated()), id: \.offset) { offset, row in
+                        RowView(
+                            row: row,
+                            widths: widths,
+                            scrollX: clampedScrollX(widths),
+                            focus: viewModel.focus
+                        )
+                        .id(offset)
+                        if case .lens(let lens) = row, lens.editing, let editBlock = viewModel.editBlock {
+                            EditBlockView(viewModel: editBlock, widths: widths)
                         }
                     }
                 }
@@ -78,8 +92,8 @@ struct MergeEditorView: View {
                     scrollX = min(max(clampedScrollX(widths) + delta, 0), maxScrollX(widths))
                 }
             }
-            .onChange(of: model.current) { _, conflict in
-                if let row = model.lensRow(of: conflict) {
+            .onChange(of: viewModel.currentConflict) { _, conflict in
+                if let row = viewModel.lensRowIndex(of: conflict) {
                     withAnimation { proxy.scrollTo(row, anchor: .top) }
                 }
             }
@@ -88,7 +102,7 @@ struct MergeEditorView: View {
 
     /// Far enough for the longest line to show whole in the narrowest pane.
     private func maxScrollX(_ widths: PaneWidths) -> CGFloat {
-        let longest = CGFloat(model.longestLine) * Metrics.codeCharacterWidth + Metrics.clipFadeWidth
+        let longest = CGFloat(viewModel.longestLine) * Metrics.codeCharacterWidth + Metrics.clipFadeWidth
         return max(longest - widths.code(widths.side), 0)
     }
 
@@ -100,19 +114,19 @@ struct MergeEditorView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
-            Button(action: model.previous) {
+            Button(action: viewModel.previous) {
                 Image(systemName: "chevron.up")
             }
             .keyboardShortcut(.upArrow, modifiers: [.option, .command])
             .help("Previous conflict (⌥⌘↑)")
-            .disabled(model.current == 0)
+            .disabled(!viewModel.canGoToPrevious)
 
-            Button(action: model.next) {
+            Button(action: viewModel.next) {
                 Image(systemName: "chevron.down")
             }
             .keyboardShortcut(.downArrow, modifiers: [.option, .command])
             .help("Next conflict (⌥⌘↓)")
-            .disabled(model.current + 1 >= model.conflicts.count)
+            .disabled(!viewModel.canGoToNext)
         }
 
         // A label, not a control: its own item, with room on both sides, and
@@ -129,14 +143,14 @@ struct MergeEditorView: View {
                 // Icon and title in one HStack: a Label would show only one of
                 // them, at the toolbar's choice. Each side keeps its shape and
                 // colour (● ours, ■ theirs), so it reads without colour too.
-                Button { model.take("ours") } label: {
+                Button { viewModel.take("ours") } label: {
                     HStack(spacing: 5) {
                         SideShape.ours
                         Text("Ours")
                     }
                 }
                 .help("Take ours (⌥⌘1)")
-                Button(action: model.takeBoth) {
+                Button(action: viewModel.takeBoth) {
                     HStack(spacing: 5) {
                         HStack(spacing: 2) {
                             SideShape.ours
@@ -146,7 +160,7 @@ struct MergeEditorView: View {
                     }
                 }
                 .help("Take both, ours first; again for theirs first (⌥⌘3)")
-                Button { model.take("theirs") } label: {
+                Button { viewModel.take("theirs") } label: {
                     HStack(spacing: 5) {
                         Text("Theirs")
                         SideShape.theirs
@@ -165,7 +179,7 @@ struct MergeEditorView: View {
         }
 
         ToolbarItem(placement: .primaryAction) {
-            Button(action: markResolved) {
+            Button(action: viewModel.markResolved) {
                 HStack(spacing: 4) {
                     Image(systemName: "checkmark")
                     Text("Mark as Resolved")
@@ -175,13 +189,13 @@ struct MergeEditorView: View {
             .keyboardShortcut(.return, modifiers: .command)
             .buttonStyle(.borderedProminent)
             // While editing, ⌘↩ applies the edit instead.
-            .disabled(!model.allResolved || model.editing != nil)
+            .disabled(!viewModel.canMarkResolved)
             .help("Write the result (⌘↩)")
         }
     }
 
     private var conflictCounter: some View {
-        Text("Conflict \(min(model.current + 1, model.conflicts.count)) of \(model.conflicts.count)")
+        Text(viewModel.counter)
             .foregroundStyle(Theme.Surfaces.textSecondary)
             .monospacedDigit()
             .fixedSize()
@@ -191,49 +205,33 @@ struct MergeEditorView: View {
     /// Shortcuts without a visible button (SPEC: keyboard map).
     private var hiddenShortcuts: some View {
         Group {
-            Button("Take ours") { model.take("ours") }
+            Button("Take ours") { viewModel.take("ours") }
                 .keyboardShortcut("1", modifiers: [.option, .command])
-            Button("Take theirs") { model.take("theirs") }
+            Button("Take theirs") { viewModel.take("theirs") }
                 .keyboardShortcut("2", modifiers: [.option, .command])
-            Button("Take both", action: model.takeBoth)
+            Button("Take both", action: viewModel.takeBoth)
                 .keyboardShortcut("3", modifiers: [.option, .command])
-            Button("Take base") { model.take("base") }
+            Button("Take base") { viewModel.take("base") }
                 .keyboardShortcut("0", modifiers: [.option, .command])
-            Button("Take none") { model.take("neither") }
+            Button("Take none") { viewModel.take("neither") }
                 .keyboardShortcut("9", modifiers: [.option, .command])
             // Disabled while editing, so ↩ types a line break and ⌘Z undoes
             // typing in the editor.
-            Group {
-                Button("Edit by hand") { model.startEditing() }
-                    .keyboardShortcut(.return, modifiers: [])
-                Button("Undo", action: model.undo)
-                    .keyboardShortcut("z", modifiers: .command)
-                    .disabled(!model.status.canUndo)
-                Button("Redo", action: model.redo)
-                    .keyboardShortcut("z", modifiers: [.shift, .command])
-                    .disabled(!model.status.canRedo)
-            }
-            .disabled(model.editing != nil)
+            Button("Edit by hand") { viewModel.startEditing() }
+                .keyboardShortcut(.return, modifiers: [])
+                .disabled(viewModel.isEditing)
+            Button("Undo", action: viewModel.undo)
+                .keyboardShortcut("z", modifiers: .command)
+                .disabled(!viewModel.canUndo)
+            Button("Redo", action: viewModel.redo)
+                .keyboardShortcut("z", modifiers: [.shift, .command])
+                .disabled(!viewModel.canRedo)
         }
         .frame(width: 0, height: 0)
         .opacity(0)
         .accessibilityHidden(true)
     }
 
-    private var invalidMessage: String {
-        if case .doesNotParse(let line) = model.status.merged {
-            return "\(model.header.fileName) does not parse as \(model.status.language ?? "code") near line \(line)."
-        }
-        return ""
-    }
-
-    private func markResolved() {
-        if model.mergedDoesNotParse {
-            confirmInvalidWrite = true
-        } else {
-            model.save()
-        }
-    }
 }
 
 /// Column widths: ours 1fr, connector, result 1.25fr, connector, theirs 1fr.
@@ -256,28 +254,20 @@ struct PaneWidths {
 }
 
 struct PaneHeaders: View {
-    let model: EditorModel
+    let ours: MergeEditorViewModel.PaneHeader
+    let result: MergeEditorViewModel.PaneHeader
+    let theirs: MergeEditorViewModel.PaneHeader
     let widths: PaneWidths
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            header(
-                color: Theme.Sides.ours, symbol: "circle.fill",
-                label: model.header.ours.label, detail: model.header.ours.detail
-            )
+            header(ours, color: Theme.Sides.ours, symbol: "circle.fill")
             .frame(width: widths.side)
             Color.clear.frame(width: widths.connector)
-            header(
-                color: Theme.Sides.result, symbol: "diamond.fill",
-                label: "Result · \(model.header.fileName)",
-                detail: "\(model.status.resolved) of \(model.status.total) conflicts resolved · written on Mark as Resolved"
-            )
+            header(result, color: Theme.Sides.result, symbol: "diamond.fill")
             .frame(width: widths.result)
             Color.clear.frame(width: widths.connector)
-            header(
-                color: Theme.Sides.theirs, symbol: "square.fill",
-                label: model.header.theirs.label, detail: model.header.theirs.detail
-            )
+            header(theirs, color: Theme.Sides.theirs, symbol: "square.fill")
             .frame(width: widths.side)
         }
         // The spacer columns would otherwise stretch the row to the whole
@@ -286,18 +276,18 @@ struct PaneHeaders: View {
         .background(Theme.Surfaces.window)
     }
 
-    private func header(color: Color, symbol: String, label: String, detail: String) -> some View {
+    private func header(_ header: MergeEditorViewModel.PaneHeader, color: Color, symbol: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Rectangle().fill(color).frame(height: Metrics.paneHeaderRule)
             VStack(alignment: .leading, spacing: 2) {
                 Label {
-                    Text(label).font(Font.system(size: 12, weight: .semibold))
+                    Text(header.label).font(Font.system(size: 12, weight: .semibold))
                 } icon: {
                     Image(systemName: symbol).font(.system(size: 8))
                 }
                 .foregroundStyle(color)
                 .lineLimit(2)
-                Text(detail)
+                Text(header.detail)
                     .font(Metrics.caption)
                     .foregroundStyle(Theme.Surfaces.textSecondary)
                     .lineLimit(1)
@@ -311,18 +301,21 @@ struct PaneHeaders: View {
 }
 
 struct StatusBar: View {
-    let model: EditorModel
+    let resolved: String
+    let verification: MergeEditorViewModel.Verification
+    let written: Bool
+    let language: String?
 
     var body: some View {
         HStack(spacing: 16) {
-            Text("\(model.status.resolved) of \(model.status.total) conflicts resolved")
-            verification
+            Text(resolved)
+            verificationLabel
             Spacer()
-            if model.written {
+            if written {
                 Label("Written to disk", systemImage: "checkmark.circle")
                     .foregroundStyle(Theme.States.resolved)
             }
-            if let language = model.status.language {
+            if let language {
                 Text(language)
             }
         }
@@ -337,10 +330,10 @@ struct StatusBar: View {
     }
 
     @ViewBuilder
-    private var verification: some View {
-        switch model.status.merged {
-        case .parses:
-            Label("Parses as \(model.status.language ?? "code")", systemImage: "checkmark")
+    private var verificationLabel: some View {
+        switch verification {
+        case .parses(let language):
+            Label("Parses as \(language)", systemImage: "checkmark")
                 .foregroundStyle(Theme.States.resolved)
         case .doesNotParse(let line):
             Label("Does not parse · line \(line)", systemImage: "xmark")

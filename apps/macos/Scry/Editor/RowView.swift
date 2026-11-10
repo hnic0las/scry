@@ -3,46 +3,40 @@ import SwiftUI
 /// One row of the editor: a lens row above a conflict, or a code row with a
 /// cell per pane. The core decides the rows; this only draws them.
 struct RowView: View {
-    let row: Row
+    let row: MergeEditorViewModel.RowState
     let widths: PaneWidths
-    let model: EditorModel
     /// The panes' shared sideways scroll.
     let scrollX: CGFloat
+    /// Focuses a conflict.
+    let focus: (Int) -> Void
 
     var body: some View {
         switch row {
-        case .lens(let conflict):
-            LensRow(conflict: Int(conflict), widths: widths, model: model)
-        case .code(let ours, let result, let theirs, let conflict):
-            let index = conflict.map { Int($0) }
+        case .lens(let lens):
+            LensRow(state: lens, widths: widths) { focus(lens.conflict) }
+        case .code(let code):
             HStack(spacing: 0) {
-                CellView(cell: ours, pane: .ours, invalid: false, scrollX: scrollX, codeWidth: widths.code(widths.side))
+                CellView(cell: code.ours, pane: .ours, invalid: false, scrollX: scrollX, codeWidth: widths.code(widths.side))
                     .frame(width: widths.side)
-                Connector(color: Theme.Sides.ours, active: index != nil)
+                Connector(color: Theme.Sides.ours, active: code.conflict != nil)
                     .frame(width: widths.connector)
                 CellView(
-                    cell: result, pane: .result, invalid: isInvalid(index),
+                    cell: code.result, pane: .result, invalid: code.resultInvalid,
                     scrollX: scrollX, codeWidth: widths.code(widths.result),
-                    provenance: index.flatMap { model.chosenCandidate(of: $0)?.provenance.color } ?? Theme.Provenance.git
+                    provenance: code.resultProvenance.color
                 )
                     .frame(width: widths.result)
-                Connector(color: Theme.Sides.theirs, active: index != nil)
+                Connector(color: Theme.Sides.theirs, active: code.conflict != nil)
                     .frame(width: widths.connector)
-                CellView(cell: theirs, pane: .theirs, invalid: false, scrollX: scrollX, codeWidth: widths.code(widths.side))
+                CellView(cell: code.theirs, pane: .theirs, invalid: false, scrollX: scrollX, codeWidth: widths.code(widths.side))
                     .frame(width: widths.side)
             }
             .frame(height: Metrics.rowHeight)
             .contentShape(Rectangle())
             .onTapGesture {
-                if let index { model.current = index }
+                if let conflict = code.conflict { focus(conflict) }
             }
         }
-    }
-
-    private func isInvalid(_ conflict: Int?) -> Bool {
-        guard let conflict, let chosen = model.chosenCandidate(of: conflict) else { return false }
-        if case .doesNotParse = chosen.parse { return true }
-        return false
     }
 }
 
@@ -250,32 +244,34 @@ struct Connector: View {
 
 /// Above each conflict: its number and the state of its resolution.
 struct LensRow: View {
-    let conflict: Int
+    let state: MergeEditorViewModel.LensRowState
     let widths: PaneWidths
-    let model: EditorModel
+    let focus: () -> Void
 
     var body: some View {
         HStack(spacing: 0) {
-            LensCommitView(commit: info?.oursCommit)
+            LensCommitView(commit: state.oursCommit)
                 .frame(width: widths.side)
             Color.clear.frame(width: widths.connector)
             HStack(spacing: 6) {
-                Button("Conflict \(conflict + 1)") { model.current = conflict }
+                Button(state.title, action: focus)
                     .buttonStyle(.plain)
                     .font(Metrics.captionBold)
                     .padding(.horizontal, 6)
                     .frame(height: Metrics.badgeHeight)
                     .background(
                         RoundedRectangle(cornerRadius: 4)
-                            .fill(focused ? Theme.Interaction.focus.opacity(0.2) : Theme.Surfaces.hairline)
+                            .fill(state.focused ? Theme.Interaction.focus.opacity(0.2) : Theme.Surfaces.hairline)
                     )
-                badges
+                ForEach(Array(state.badges.enumerated()), id: \.offset) { _, badge in
+                    Badge(badge)
+                }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 10)
             .frame(width: widths.result)
             Color.clear.frame(width: widths.connector)
-            LensCommitView(commit: info?.theirsCommit)
+            LensCommitView(commit: state.theirsCommit)
                 .frame(width: widths.side)
         }
         .frame(height: Metrics.lensHeight)
@@ -283,30 +279,34 @@ struct LensRow: View {
         .overlay(alignment: .top) { Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1) }
     }
 
-    private var focused: Bool { model.current == conflict }
-
-    private var info: ConflictInfo? {
-        model.conflicts.indices.contains(conflict) ? model.conflicts[conflict] : nil
-    }
-
-    @ViewBuilder
-    private var badges: some View {
-        if let chosen = model.chosenCandidate(of: conflict) {
-            let provenance = chosen.provenance
-            Badge(text: chosen.title, symbol: provenance.symbol, color: provenance.color)
-            if case .doesNotParse = chosen.parse {
-                Badge(text: "Does not parse", symbol: "xmark", color: Theme.Severity.error)
-            }
-        } else {
-            Badge(text: "Unresolved", symbol: "exclamationmark.triangle", color: Theme.States.unresolved)
-        }
-    }
 }
 
 struct Badge: View {
     let text: String
     let symbol: String
     let color: Color
+
+    init(text: String, symbol: String, color: Color) {
+        self.text = text
+        self.symbol = symbol
+        self.color = color
+    }
+
+    /// A lens row's badge, in its state's symbol and colour.
+    init(_ badge: MergeEditorViewModel.BadgeState) {
+        text = badge.text
+        switch badge.kind {
+        case .resolved(let provenance):
+            symbol = provenance.symbol
+            color = provenance.color
+        case .doesNotParse:
+            symbol = "xmark"
+            color = Theme.Severity.error
+        case .unresolved:
+            symbol = "exclamationmark.triangle"
+            color = Theme.States.unresolved
+        }
+    }
 
     var body: some View {
         Label(text, systemImage: symbol)

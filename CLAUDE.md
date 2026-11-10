@@ -20,6 +20,13 @@ Layout and commands: `README.md`. Add `crates/scry-mcp`, `crates/scry-ffi` and `
 - Work in small increments that can be shown, each with what to run or look at to validate it.
 - Every test starts with a `///` comment stating its intent: the behaviour it protects and why it matters.
 
+## SwiftUI app: MVVM
+
+- `MergeModel` (`apps/macos/Scry/Model`) is the app's model: it wraps the core's `MergeDocument` and holds the state shared across screens (focused conflict, conflict being edited). Views never use it directly.
+- Each screen has its view model, `<ViewName>ViewModel` beside its view: `@MainActor @Observable final class`, importing `Foundation` and `Observation` only, never SwiftUI or AppKit. It exposes display-ready values and intent methods; colours stay in views, which map roles such as `Provenance` to the theme.
+- Components (rows, cells, badges, cards, headers) take plain values and closures, without a view model.
+- View models are unit-tested in `apps/macos/ScryTests` with Swift Testing, on conflicted files written to a temporary directory.
+
 ## Design prototype
 
 The UI design lives in its own repository, `~/workspace/scry-ui` (images in Git LFS), so this one keeps only code. Its `prototype/` folder is exported by Claude Design; never edit it. Start from `prototype/README.md` and `prototype/SPEC.md`. Raise design problems with Nicolas, who passes them to Claude Design; each new export lands as a commit there, and the app follows its diff.

@@ -53,7 +53,12 @@ scripts/build-ffi.sh        # once before opening Xcode: builds the core and the
 open apps/macos/Scry.xcodeproj
 ```
 
-Xcode runs `scripts/build-ffi.sh` before each build. On a fresh checkout without `scripts/build-ffi.sh` run first, the first build fails on missing types (`Cell`, `Row`…) because Xcode lists the sources before the script writes the bindings; build again. Pass a conflicted file as the launch argument (scheme › Run › Arguments), or use Open Conflicted File… (⌘O). Colours come from the design tokens: after a new export in `~/workspace/scry-ui`, run `scripts/generate-theme.py`.
+Xcode runs `scripts/build-ffi.sh` before each build. On a fresh checkout without `scripts/build-ffi.sh` run first, the first build fails on missing types (`Cell`, `Row`…) because Xcode lists the sources before the script writes the bindings; build again. Pass a conflicted file as the launch argument (scheme › Run › Arguments), or use Open Conflicted File… (⌘O). The view models' unit tests (`apps/macos/ScryTests`, Swift Testing) run with ⌘U, or:
+
+```sh
+xcodebuild test -project apps/macos/Scry.xcodeproj -scheme Scry -destination 'platform=macOS'
+```
+ Colours come from the design tokens: after a new export in `~/workspace/scry-ui`, run `scripts/generate-theme.py`.
 
 ## Layout
 

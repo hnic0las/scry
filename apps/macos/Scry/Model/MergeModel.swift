@@ -1,0 +1,136 @@
+import Foundation
+import Observation
+
+/// The open merge: the model every view model shares. Every fact comes from
+/// the Rust core (`MergeDocument`); this keeps the latest snapshot, the
+/// state shared across screens (the focused conflict, the one being edited)
+/// and forwards actions. Views never use it directly: they go through their
+/// view model.
+@MainActor
+@Observable
+final class MergeModel {
+    let header: Header
+    private(set) var rows: [Row] = []
+    /// The longest line of any pane, in characters: how far the panes can
+    /// scroll sideways.
+    private(set) var longestLine = 0
+    private(set) var conflicts: [ConflictInfo] = []
+    private(set) var status: Status
+    /// The focused conflict, from 0.
+    private(set) var current = 0
+    /// The conflict open for editing by hand.
+    private(set) var editing: Int?
+    /// The result was written to disk and has not changed since.
+    private(set) var written = false
+    /// The last action the core refused, until it is shown.
+    var failure: String?
+
+    @ObservationIgnored private let document: MergeDocument
+
+    init(path: String) throws {
+        document = try MergeDocument.open(path: path)
+        header = document.header()
+        status = document.status()
+        refresh()
+    }
+
+    func conflict(_ index: Int) -> ConflictInfo? {
+        conflicts.indices.contains(index) ? conflicts[index] : nil
+    }
+
+    // MARK: Focus
+
+    func focus(_ index: Int) {
+        guard conflicts.indices.contains(index) else { return }
+        current = index
+    }
+
+    // MARK: Resolution
+
+    func choose(_ candidate: String, conflict index: Int) {
+        run { try document.choose(conflict: UInt32(index), candidate: candidate) }
+    }
+
+    func undo() {
+        if document.undo() { changed() }
+    }
+
+    func redo() {
+        if document.redo() { changed() }
+    }
+
+    func save() {
+        do {
+            try document.save()
+            written = true
+        } catch {
+            failure = "\(error)"
+        }
+    }
+
+    // MARK: Editing by hand
+
+    /// Opens a conflict for editing; one at a time.
+    func startEditing(_ index: Int) {
+        guard conflicts.indices.contains(index) else { return }
+        current = index
+        editing = index
+    }
+
+    func stopEditing() {
+        editing = nil
+    }
+
+    /// Resolves a conflict with text typed by hand; the core checks it.
+    /// Tells whether the core took it.
+    @discardableResult
+    func edit(_ index: Int, text: String) -> Bool {
+        run { try document.edit(conflict: UInt32(index), text: text) }
+    }
+
+    /// Spans per line of a draft, coloured in place in the file.
+    func highlightDraft(_ index: Int, text: String) -> [[Span]] {
+        document.highlightDraft(conflict: UInt32(index), text: text)
+    }
+
+    /// What Return inserts in a draft: the text replacing the current line
+    /// up to the cursor.
+    func newline(_ index: Int, before: String, after: String) -> Newline {
+        document.newline(conflict: UInt32(index), before: before, after: after)
+    }
+
+    /// The indentation for the draft's current line once `typed` is typed;
+    /// `nil` to type it as it is.
+    func typedIndent(_ index: Int, before: String, typed: String) -> String? {
+        document.typedIndent(conflict: UInt32(index), before: before, typed: typed)
+    }
+
+    // MARK: Private
+
+    @discardableResult
+    private func run(_ action: () throws -> Void) -> Bool {
+        do {
+            try action()
+            changed()
+            return true
+        } catch {
+            failure = "\(error)"
+            return false
+        }
+    }
+
+    private func changed() {
+        written = false
+        refresh()
+    }
+
+    private func refresh() {
+        rows = document.rows()
+        longestLine = rows.reduce(0) { longest, row in
+            guard case .code(let ours, let result, let theirs, _) = row else { return longest }
+            return max(longest, ours.text.count, result.text.count, theirs.text.count)
+        }
+        conflicts = document.conflicts()
+        status = document.status()
+    }
+}

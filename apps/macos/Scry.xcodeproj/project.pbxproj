@@ -6,8 +6,19 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		5C0000000000000000000016 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5C000000000000000000000A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5C0000000000000000000006;
+			remoteInfo = Scry;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		5C0000000000000000000001 /* Scry.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Scry.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		5C0000000000000000000011 /* ScryTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ScryTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -16,10 +27,22 @@
 			path = Scry;
 			sourceTree = "<group>";
 		};
+		5C0000000000000000000012 /* ScryTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ScryTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		5C0000000000000000000003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5C0000000000000000000013 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -33,6 +56,7 @@
 			isa = PBXGroup;
 			children = (
 				5C0000000000000000000002 /* Scry */,
+				5C0000000000000000000012 /* ScryTests */,
 				5C0000000000000000000005 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,6 +65,7 @@
 			isa = PBXGroup;
 			children = (
 				5C0000000000000000000001 /* Scry.app */,
+				5C0000000000000000000011 /* ScryTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -71,6 +96,29 @@
 			productReference = 5C0000000000000000000001 /* Scry.app */;
 			productType = "com.apple.product-type.application";
 		};
+		5C0000000000000000000018 /* ScryTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5C0000000000000000000019 /* Build configuration list for PBXNativeTarget "ScryTests" */;
+			buildPhases = (
+				5C0000000000000000000014 /* Sources */,
+				5C0000000000000000000013 /* Frameworks */,
+				5C0000000000000000000015 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5C0000000000000000000017 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				5C0000000000000000000012 /* ScryTests */,
+			);
+			name = ScryTests;
+			packageProductDependencies = (
+			);
+			productName = ScryTests;
+			productReference = 5C0000000000000000000011 /* ScryTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -83,6 +131,10 @@
 				TargetAttributes = {
 					5C0000000000000000000006 = {
 						CreatedOnToolsVersion = 27.0;
+					};
+					5C0000000000000000000018 = {
+						CreatedOnToolsVersion = 27.0;
+						TestTargetID = 5C0000000000000000000006;
 					};
 				};
 			};
@@ -101,12 +153,20 @@
 			projectRoot = "";
 			targets = (
 				5C0000000000000000000006 /* Scry */,
+				5C0000000000000000000018 /* ScryTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		5C0000000000000000000009 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5C0000000000000000000015 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -145,7 +205,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		5C0000000000000000000014 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		5C0000000000000000000017 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5C0000000000000000000006 /* Scry */;
+			targetProxy = 5C0000000000000000000016 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		5C000000000000000000000D /* Debug */ = {
@@ -234,6 +309,42 @@
 			};
 			name = Release;
 		};
+		5C000000000000000000001A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.bigsool.scry.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Generated/include";
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Scry.app/Contents/MacOS/Scry";
+			};
+			name = Debug;
+		};
+		5C000000000000000000001B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.bigsool.scry.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Generated/include";
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Scry.app/Contents/MacOS/Scry";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -251,6 +362,15 @@
 			buildConfigurations = (
 				5C000000000000000000000D /* Debug */,
 				5C000000000000000000000E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5C0000000000000000000019 /* Build configuration list for PBXNativeTarget "ScryTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5C000000000000000000001A /* Debug */,
+				5C000000000000000000001B /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

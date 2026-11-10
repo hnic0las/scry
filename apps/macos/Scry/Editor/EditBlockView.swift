@@ -5,7 +5,7 @@ import SwiftUI
 /// in the result column, with Cancel and Apply. The core checks the text
 /// once applied, like a candidate.
 struct EditBlockView: View {
-    @Bindable var model: EditorModel
+    @Bindable var viewModel: EditBlockViewModel
     let widths: PaneWidths
 
     var body: some View {
@@ -13,10 +13,10 @@ struct EditBlockView: View {
             Color.clear.frame(width: widths.side + widths.connector)
             VStack(alignment: .leading, spacing: 6) {
                 CodeTextView(
-                    text: $model.draft,
-                    highlight: model.highlightDraft,
-                    newline: model.newline,
-                    typedIndent: model.typedIndent
+                    text: $viewModel.draft,
+                    highlight: viewModel.highlight,
+                    newline: viewModel.newline,
+                    typedIndent: viewModel.typedIndent
                 )
                     .frame(height: editorHeight)
                     .overlay(
@@ -28,10 +28,10 @@ struct EditBlockView: View {
                         .font(Metrics.captionBold)
                         .foregroundStyle(Theme.Provenance.human)
                     Spacer()
-                    Button("Cancel", action: model.cancelEdit)
+                    Button("Cancel", action: viewModel.cancel)
                         .keyboardShortcut(.cancelAction)
                         .help("Discard this edit (Esc)")
-                    Button("Apply", action: model.applyEdit)
+                    Button("Apply", action: viewModel.apply)
                         .keyboardShortcut(.return, modifiers: .command)
                         .buttonStyle(.borderedProminent)
                         .help("Resolve the conflict with this text (⌘↩)")
@@ -44,10 +44,8 @@ struct EditBlockView: View {
         }
     }
 
-    /// One row per line, plus one to type into, between 3 and 20 rows.
     private var editorHeight: CGFloat {
-        let lines = model.draft.split(separator: "\n", omittingEmptySubsequences: false).count
-        return CGFloat(min(max(lines + 1, 3), 20)) * Metrics.rowHeight + 8
+        CGFloat(viewModel.visibleLines) * Metrics.rowHeight + 8
     }
 }
 

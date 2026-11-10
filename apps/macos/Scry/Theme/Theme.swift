@@ -58,7 +58,6 @@ enum Metrics {
     static let changedWordOpacity = 0.24
     static let badgeHeight: CGFloat = 18
     static let cardCornerRadius: CGFloat = 8
-    static let previewLines = 3
 
     static let code = Font.system(size: 12, design: .monospaced)
     /// The width of one character of `code`, to measure lines without

@@ -18,7 +18,7 @@ enum PreviewFiles {
 /// A demo editor, set up before the first render: a static preview is
 /// captured before `onAppear` runs.
 private struct DemoEditor: View {
-    @State private var model: EditorModel?
+    @State private var viewModel: MergeEditorViewModel?
     private let scrollX: CGFloat
 
     /// `choose`: candidates by conflict; `edited`: a conflict resolved by
@@ -31,26 +31,25 @@ private struct DemoEditor: View {
         editing: Int? = nil
     ) {
         self.scrollX = scrollX
-        let model = try? EditorModel(path: PreviewFiles.demo(operation))
-        if let model {
+        var viewModel: MergeEditorViewModel?
+        if let model = try? MergeModel(path: PreviewFiles.demo(operation)) {
             for (conflict, candidate) in choose {
                 model.choose(candidate, conflict: conflict)
             }
             if let (conflict, text) = edited {
-                model.startEditing(conflict: conflict)
-                model.draft = text
-                model.applyEdit()
+                model.edit(conflict, text: text)
             }
+            viewModel = MergeEditorViewModel(model: model)
             if let editing {
-                model.startEditing(conflict: editing)
+                viewModel?.startEditing(editing)
             }
         }
-        _model = State(initialValue: model)
+        _viewModel = State(initialValue: viewModel)
     }
 
     var body: some View {
-        if let model {
-            MergeEditorView(model: model, scrollX: scrollX)
+        if let viewModel {
+            MergeEditorView(viewModel: viewModel, scrollX: scrollX)
         } else {
             EmptyStateView(error: "Run scripts/make-conflicts.sh first.", open: {})
         }
