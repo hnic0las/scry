@@ -434,9 +434,13 @@ fn first_word(trimmed: &str) -> &str {
 }
 
 fn last_word(trimmed: &str) -> &str {
+    // Starts after the last character that is not part of a word, which can
+    // take more than one byte (`…`, `’`).
     let start = trimmed
-        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .map_or(0, |index| index + 1);
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| !(c.is_alphanumeric() || c == '_'))
+        .map_or(0, |(index, c)| index + c.len_utf8());
     &trimmed[start..]
 }
 
@@ -638,6 +642,29 @@ mod tests {
             Some("    ")
         );
         assert_eq!(typed_indent("    a", 'x', UNIT, None), None);
+    }
+
+    /// Lines ending in a character of more than one byte (`…`, `’`, an
+    /// emoji), in the current line or above it, must not crash: Return in
+    /// a Ruby or Bash file with accented comments once panicked and closed
+    /// the app.
+    #[test]
+    fn non_ascii_text_does_not_break_indentation() {
+        assert_eq!(enter("# Loading…", "", Language::Ruby), "# Loading…\n|");
+        let before = "# it’s ok\ndef a\n  b\n  end";
+        assert_eq!(enter(before, "", Language::Ruby), "end\n|");
+        assert_eq!(
+            enter("if x; then # ok…", "", Language::Bash),
+            "if x; then # ok…\n|"
+        );
+        assert_eq!(
+            enter("café = 1 # 🎉", "", Language::Python),
+            "café = 1 # 🎉\n|"
+        );
+        assert_eq!(
+            typed_indent("def a\n  # é…\n  end", 'd', UNIT, Some(Language::Ruby)),
+            None
+        );
     }
 
     /// Keywords alone are not moved while typed, only on Return, so a word

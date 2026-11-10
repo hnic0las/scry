@@ -215,8 +215,10 @@ fn parse_marker(line: &str, size: usize) -> Option<(Marker, String)> {
         _ => return None,
     };
     let marker_char = content.chars().next()?;
-    // Marker characters are ASCII, so byte offsets equal character counts here.
-    if content.len() < size || !content[..size].chars().all(|c| c == marker_char) {
+    // `get` gives nothing when `size` falls inside a character of more than
+    // one byte (`> é…`): such a line is text, not a marker.
+    let prefix = content.get(..size)?;
+    if !prefix.chars().all(|c| c == marker_char) {
         return None;
     }
 
@@ -245,6 +247,18 @@ mod tests {
     #[test]
     fn file_without_conflict_is_one_common_segment() {
         let text = "a\nb\n";
+        assert_eq!(
+            parse(text).unwrap(),
+            vec![Segment::Common(text.to_string())]
+        );
+    }
+
+    /// Lines that start like a marker and go on with accented characters
+    /// (a Markdown quote in French, a table) are plain text; they once made
+    /// the parser panic.
+    #[test]
+    fn non_ascii_lines_that_start_like_markers_are_text() {
+        let text = "> ééé\n======é\n<<ééé\n| ééé |\n>>>>>>> é\n";
         assert_eq!(
             parse(text).unwrap(),
             vec![Segment::Common(text.to_string())]
