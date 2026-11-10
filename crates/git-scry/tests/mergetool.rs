@@ -117,3 +117,19 @@ fn invalid_choice_fails_without_writing() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown candidate"));
     assert_eq!(repo.file(), before);
 }
+
+/// Through the real `git mergetool`, with git's default `merge` style: a
+/// line the user fixed in the conflicted file before launching the tool is
+/// still there once the conflict is resolved, instead of being lost to a
+/// rebuild from git's three versions.
+#[test]
+fn edits_made_before_launching_are_kept() {
+    let repo = Repo::stopped_rebase("merge", "--take 1=theirs");
+    let edited = repo.file().replace("end\n", "end, edited\n");
+    fs::write(repo.path().join("file.txt"), &edited).unwrap();
+
+    let output = repo.git(&["mergetool"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(repo.file(), "feature line\nend, edited\n");
+    assert_eq!(repo.unmerged(), "");
+}

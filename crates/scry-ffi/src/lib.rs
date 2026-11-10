@@ -22,13 +22,22 @@ uniffi::setup_scaffolding!();
 
 #[derive(Debug, uniffi::Error)]
 pub enum ScryError {
-    Failed { message: String },
+    Failed {
+        message: String,
+    },
+    /// The file changed on disk since it was opened; saving again with
+    /// `overwrite` writes over it.
+    ChangedOnDisk {
+        message: String,
+    },
 }
 
 impl fmt::Display for ScryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ScryError::Failed { message } => write!(f, "{message}"),
+            ScryError::Failed { message } | ScryError::ChangedOnDisk { message } => {
+                write!(f, "{message}")
+            }
         }
     }
 }
@@ -336,14 +345,17 @@ impl MergeDocument {
         }
     }
 
-    /// Writes the merged file in place. Fails while a conflict is left; the
-    /// app asks first when the result does not parse.
-    pub fn save(&self) -> Result<(), ScryError> {
-        let session = self.lock();
-        let text = session
-            .merged_text()
-            .ok_or_else(|| failed(format!("{} conflict(s) left", session.unresolved())))?;
-        session::write_atomically(&self.path, &text).map_err(failed)
+    /// Writes the merged file in place. Fails while a conflict is left, and
+    /// with `ChangedOnDisk` when the file changed since it was opened,
+    /// unless `overwrite`; the app asks first in both cases where it can.
+    pub fn save(&self, overwrite: bool) -> Result<(), ScryError> {
+        match self.lock().save(&self.path, overwrite) {
+            Ok(()) => Ok(()),
+            Err(error @ session::SaveError::ChangedOnDisk(_)) => Err(ScryError::ChangedOnDisk {
+                message: error.to_string(),
+            }),
+            Err(error) => Err(failed(error)),
+        }
     }
 }
 
@@ -599,7 +611,10 @@ mod tests {
         assert_eq!(document.header().file_name, "a.swift");
         assert_eq!(document.header().ours.label, "HEAD");
         assert_eq!(document.status().total, 1);
-        assert!(document.save().is_err());
+        assert!(matches!(
+            document.save(false),
+            Err(ScryError::Failed { .. })
+        ));
 
         let conflicts = document.conflicts();
         assert_eq!(conflicts[0].candidates[1].id, "theirs");
@@ -610,8 +625,10 @@ mod tests {
         document.choose(0, String::from("theirs")).unwrap();
         assert_eq!(document.status().resolved, 1);
         assert!(document.choose(0, String::from("nonsense")).is_err());
-        document.save().unwrap();
+        document.save(false).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "let a = 2\n");
+        // Saving again is fine: the file is what Scry wrote.
+        document.save(false).unwrap();
 
         // By hand, then undone back to "theirs".
         document.edit(0, String::from("let a = 3")).unwrap();
@@ -623,5 +640,32 @@ mod tests {
         assert!(document.undo());
         assert_eq!(document.conflicts()[0].chosen.as_deref(), Some("theirs"));
         assert!(document.status().can_redo);
+    }
+
+    /// A file changed on disk after it was opened (resolved in another
+    /// editor, an aborted rebase) is not written over without the user's
+    /// say: `save` reports it apart, so the app can ask, and `overwrite`
+    /// writes anyway.
+    #[test]
+    fn save_refuses_a_file_changed_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.swift");
+        std::fs::write(
+            &path,
+            "<<<<<<< HEAD\nlet a = 1\n=======\nlet a = 2\n>>>>>>> other\n",
+        )
+        .unwrap();
+        let document = MergeDocument::open(path.display().to_string()).unwrap();
+        document.choose(0, String::from("theirs")).unwrap();
+
+        std::fs::write(&path, "let a = 42\n").unwrap();
+        assert!(matches!(
+            document.save(false),
+            Err(ScryError::ChangedOnDisk { .. })
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "let a = 42\n");
+
+        document.save(true).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "let a = 2\n");
     }
 }

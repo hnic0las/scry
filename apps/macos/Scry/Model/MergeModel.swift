@@ -59,12 +59,29 @@ final class MergeModel {
         if document.redo() { changed() }
     }
 
-    func save() {
+    /// How a save ended.
+    enum SaveOutcome {
+        case written
+        /// The file changed on disk since it was opened; nothing written.
+        case changedOnDisk
+        case failed
+    }
+
+    /// Writes the result. Refuses a file changed on disk since it was
+    /// opened, unless `overwrite`.
+    @discardableResult
+    func save(overwrite: Bool = false) -> SaveOutcome {
         do {
-            try document.save()
+            try document.save(overwrite: overwrite)
             written = true
+            return .written
+        } catch let error as ScryError {
+            if case .ChangedOnDisk = error { return .changedOnDisk }
+            failure = "\(error)"
+            return .failed
         } catch {
             failure = "\(error)"
+            return .failed
         }
     }
 

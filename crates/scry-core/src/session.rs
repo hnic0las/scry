@@ -55,6 +55,19 @@ pub struct Edit {
 /// it had before.
 type Change = Vec<(usize, Option<Choice>)>;
 
+/// Where a session's conflicts come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// The file as it is on disk.
+    File,
+    /// Rebuilt from git's three versions to show the base, since the file
+    /// had none in its markers and was still as git wrote it.
+    Rebuilt,
+    /// The file as it is on disk, without the base: it was edited since git
+    /// wrote it, and rebuilding the conflicts would drop those edits.
+    EditedFile,
+}
+
 pub struct MergeSession {
     segments: Vec<Segment>,
     conflicts: Vec<Conflict>,
@@ -64,7 +77,10 @@ pub struct MergeSession {
     /// redone. A new change clears the redo history, as in any editor.
     undo_history: Vec<Change>,
     redo_history: Vec<Change>,
-    rebuilt: bool,
+    origin: Origin,
+    /// The file's text as last read or written, to tell whether something
+    /// else changed it before writing over it.
+    on_disk: String,
     language: Option<Language>,
     /// Whether a reference version of the file parses. Grammars reject some
     /// valid code; without such a reference, a parse failure says nothing
@@ -80,19 +96,22 @@ pub struct MergeSession {
 }
 
 impl MergeSession {
-    /// A session on a text with conflict markers. With a language, every
-    /// candidate is checked by parsing.
+    /// A session on a text with conflict markers, read from the file it
+    /// will be saved to. With a language, every candidate is checked by
+    /// parsing.
     pub fn from_text(text: &str, language: Option<Language>) -> Result<MergeSession, ParseError> {
         Ok(MergeSession::from_segments(
             conflict::parse(text)?,
-            false,
+            Origin::File,
+            text.to_string(),
             language,
         ))
     }
 
     fn from_segments(
         segments: Vec<Segment>,
-        rebuilt: bool,
+        origin: Origin,
+        on_disk: String,
         language: Option<Language>,
     ) -> MergeSession {
         let conflicts: Vec<Conflict> = conflict::conflicts(&segments).cloned().collect();
@@ -110,7 +129,8 @@ impl MergeSession {
             choices,
             undo_history: Vec::new(),
             redo_history: Vec::new(),
-            rebuilt,
+            origin,
+            on_disk,
             language,
             checkable,
             highlighter,
@@ -225,7 +245,34 @@ impl MergeSession {
     /// Whether the conflicts were rebuilt from the three versions because
     /// the file had no base in its markers.
     pub fn rebuilt(&self) -> bool {
-        self.rebuilt
+        self.origin == Origin::Rebuilt
+    }
+
+    pub fn origin(&self) -> Origin {
+        self.origin
+    }
+
+    /// Writes the merged text to `path`, the file the session was read
+    /// from. Refuses while a conflict is left, and when the file changed on
+    /// disk since it was read (resolved in another editor, `git checkout`,
+    /// an aborted rebase) unless `overwrite` says to write over it anyway.
+    pub fn save(&mut self, path: &Path, overwrite: bool) -> Result<(), SaveError> {
+        let text = self
+            .merged_text()
+            .ok_or(SaveError::Unresolved(self.unresolved()))?;
+        if !overwrite {
+            match fs::read(path) {
+                Ok(bytes) if bytes == self.on_disk.as_bytes() => {}
+                Ok(_) => return Err(SaveError::ChangedOnDisk(path.to_path_buf())),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Err(SaveError::ChangedOnDisk(path.to_path_buf()));
+                }
+                Err(error) => return Err(SaveError::Io(path.to_path_buf(), error)),
+            }
+        }
+        write_atomically(path, &text).map_err(|error| SaveError::Io(path.to_path_buf(), error))?;
+        self.on_disk = text;
+        Ok(())
     }
 
     pub fn conflict_count(&self) -> usize {
@@ -621,10 +668,13 @@ fn parses(language: Language, text: &str) -> bool {
 
 /// Loads the session for the files `git mergetool` passed.
 ///
-/// Uses the merged file as it is when every conflict in it shows the base
-/// (`diff3` or `zdiff3` style), so edits made before launching are kept.
-/// Otherwise rebuilds the conflicts from the three versions with
-/// `git merge-file --zdiff3`, labelled `ours` and `theirs`.
+/// Uses the merged file as it is when it has no conflict left, or when
+/// every conflict shows the base (`diff3` or `zdiff3` style), so edits made
+/// before launching are kept. A file in the `merge` style has no base: its
+/// conflicts are rebuilt from the three versions with
+/// `git merge-file --zdiff3`, labelled `ours` and `theirs`, but only while
+/// the file is still what git wrote. Once edited, it is used as it is,
+/// without the base, rather than losing the edits.
 pub fn load(
     git: &dyn Git,
     files: &MergetoolFiles,
@@ -633,46 +683,72 @@ pub fn load(
 ) -> Result<MergeSession, LoadError> {
     let language = Language::from_path(&files.merged);
     let merged = read_text(&files.merged)?;
-    if let Ok(segments) = conflict::parse(&merged) {
-        // Computed first: the borrow of `segments` ends before it moves into
-        // the session.
-        let all_with_base = {
-            let mut conflicts = conflict::conflicts(&segments).peekable();
-            conflicts.peek().is_some() && conflicts.all(|conflict| conflict.base.is_some())
-        };
-        if all_with_base {
-            return Ok(MergeSession::from_segments(segments, false, language));
-        }
+    // Markers git did not write are refused, rather than rebuilt over
+    // whatever the user did to the file.
+    let segments = conflict::parse(&merged)
+        .map_err(|error| LoadError::Malformed(files.merged.clone(), error))?;
+    let has_base = {
+        let mut conflicts = conflict::conflicts(&segments).peekable();
+        conflicts.peek().is_none() || conflicts.all(|conflict| conflict.base.is_some())
+    };
+    if has_base {
+        return Ok(MergeSession::from_segments(
+            segments,
+            Origin::File,
+            merged,
+            language,
+        ));
     }
 
-    let text = merge_file(git, files, ours, theirs)?;
-    let segments = conflict::parse(&text).map_err(LoadError::Parse)?;
-    Ok(MergeSession::from_segments(segments, true, language))
+    let as_git_wrote = merge_file(git, files, ours, theirs, None)?;
+    let unchanged = conflict::parse(&as_git_wrote)
+        .is_ok_and(|written| same_ignoring_labels(&segments, &written));
+    if !unchanged {
+        return Ok(MergeSession::from_segments(
+            segments,
+            Origin::EditedFile,
+            merged,
+            language,
+        ));
+    }
+    let text = merge_file(git, files, ours, theirs, Some("--zdiff3"))?;
+    let rebuilt = conflict::parse(&text).map_err(LoadError::Parse)?;
+    Ok(MergeSession::from_segments(
+        rebuilt,
+        Origin::Rebuilt,
+        merged,
+        language,
+    ))
 }
 
+/// Whether two parsed files have the same text and the same conflict
+/// sides, whatever their markers' labels.
+fn same_ignoring_labels(a: &[Segment], b: &[Segment]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|pair| match pair {
+            (Segment::Common(a), Segment::Common(b)) => a == b,
+            (Segment::Conflict(a), Segment::Conflict(b)) => {
+                a.ours.text == b.ours.text && a.theirs.text == b.theirs.text
+            }
+            _ => false,
+        })
+}
+
+/// The three versions merged by `git merge-file`, in the `merge` style
+/// unless `style` says otherwise (`--zdiff3`).
 fn merge_file(
     git: &dyn Git,
     files: &MergetoolFiles,
     ours: &str,
     theirs: &str,
+    style: Option<&str>,
 ) -> Result<String, LoadError> {
     let local = path_text(&files.local)?;
     let base = path_text(&files.base)?;
     let remote = path_text(&files.remote)?;
-    let args = [
-        "merge-file",
-        "--stdout",
-        "--zdiff3",
-        "-L",
-        ours,
-        "-L",
-        "base",
-        "-L",
-        theirs,
-        local,
-        base,
-        remote,
-    ];
+    let mut args = vec!["merge-file", "--stdout"];
+    args.extend(style);
+    args.extend(["-L", ours, "-L", "base", "-L", theirs, local, base, remote]);
     let output = git.output(&args)?;
     // merge-file exits with the number of conflicts (at most 127), or with a
     // negative value on error, such as for binary files.
@@ -761,6 +837,9 @@ pub enum LoadError {
     /// Not UTF-8: Scry does not merge such files yet, rather than corrupt them.
     NotText(PathBuf),
     Parse(ParseError),
+    /// The merged file's markers are not ones git writes, usually after a
+    /// partial edit.
+    Malformed(PathBuf, ParseError),
     Git(GitError),
 }
 
@@ -782,12 +861,42 @@ impl fmt::Display for LoadError {
                 )
             }
             LoadError::Parse(error) => write!(f, "{error}"),
+            LoadError::Malformed(path, error) => write!(
+                f,
+                "{}: {error}; fix the markers, or run `git checkout --merge {}` to recreate the conflicts (this drops edits made to the file)",
+                path.display(),
+                path.display()
+            ),
             LoadError::Git(error) => write!(f, "{error}"),
         }
     }
 }
 
 impl std::error::Error for LoadError {}
+
+/// Why a session could not be saved.
+#[derive(Debug)]
+pub enum SaveError {
+    /// Conflicts still without a resolution.
+    Unresolved(usize),
+    /// The file changed on disk since it was read.
+    ChangedOnDisk(PathBuf),
+    Io(PathBuf, io::Error),
+}
+
+impl fmt::Display for SaveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SaveError::Unresolved(count) => write!(f, "{count} conflict(s) left"),
+            SaveError::ChangedOnDisk(path) => {
+                write!(f, "{} changed on disk since Scry read it", path.display())
+            }
+            SaveError::Io(path, error) => write!(f, "cannot write {}: {error}", path.display()),
+        }
+    }
+}
+
+impl std::error::Error for SaveError {}
 
 #[cfg(test)]
 mod tests {

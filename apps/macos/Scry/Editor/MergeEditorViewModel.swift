@@ -13,6 +13,9 @@ final class MergeEditorViewModel {
     private(set) var editBlock: EditBlockViewModel?
     /// Asking before writing a result that does not parse.
     var confirmingInvalidWrite = false
+    /// Asking before writing over a file changed on disk since it was
+    /// opened.
+    var confirmingOverwrite = false
 
     @ObservationIgnored private let model: MergeModel
 
@@ -193,6 +196,10 @@ final class MergeEditorViewModel {
 
     // MARK: Alerts
 
+    var overwriteMessage: String {
+        "\(model.header.fileName) changed on disk since Scry opened it, in another editor or through git. Writing this result replaces those changes."
+    }
+
     var invalidWriteMessage: String {
         guard case .doesNotParse(let line) = model.status.merged else { return "" }
         return "\(model.header.fileName) does not parse as \(languageName) near line \(line)."
@@ -261,17 +268,29 @@ final class MergeEditorViewModel {
         if case .doesNotParse = model.status.merged {
             confirmingInvalidWrite = true
         } else {
-            model.save()
+            write()
         }
     }
 
+    /// Writes a result that does not parse, once the user confirmed.
     func writeAnyway() {
-        model.save()
+        write()
+    }
+
+    /// Writes over a file changed on disk, once the user confirmed.
+    func overwrite() {
+        model.save(overwrite: true)
     }
 
     // MARK: Private
 
     private var languageName: String { model.status.language ?? "code" }
+
+    private func write() {
+        if model.save() == .changedOnDisk {
+            confirmingOverwrite = true
+        }
+    }
 
     private func stopEditing() {
         model.stopEditing()

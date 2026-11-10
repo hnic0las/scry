@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use scry_core::git::GitCli;
 use scry_core::operation;
 use scry_core::resolution::{Candidate, CandidateKind};
-use scry_core::session::{self, MergeSession, MergetoolFiles};
+use scry_core::session::{self, MergeSession, MergetoolFiles, Origin, SaveError};
 use scry_core::syntax::ParseCheck;
 
 pub struct Options {
@@ -63,8 +63,14 @@ pub fn run(options: Options) -> ExitCode {
         if let Some(summary) = &summary {
             println!("{summary}");
         }
-        if session.rebuilt() {
-            println!("(conflicts rebuilt from the three versions, to show the base)");
+        match session.origin() {
+            Origin::Rebuilt => {
+                println!("(conflicts rebuilt from the three versions, to show the base)")
+            }
+            Origin::EditedFile => println!(
+                "(the file was edited since git wrote it: its conflicts are used as they are, without the base)"
+            ),
+            Origin::File => {}
         }
         if !ask_each_conflict(&mut session, &ours, &theirs) {
             println!("Nothing written; {name} stays conflicted.");
@@ -77,9 +83,6 @@ pub fn run(options: Options) -> ExitCode {
         println!("{left} conflict(s) left in {name}; nothing written.");
         return ExitCode::from(1);
     }
-    let Some(text) = session.merged_text() else {
-        return ExitCode::from(1);
-    };
     if let ParseCheck::DoesNotParse { line } = session.merged_check() {
         let language = session.language().map_or("", |language| language.name());
         let problem = format!("{name} does not parse as {language} near line {line}");
@@ -96,9 +99,23 @@ pub fn run(options: Options) -> ExitCode {
         println!("Nothing written; {name} stays conflicted.");
         return ExitCode::from(1);
     }
-    if let Err(error) = session::write_atomically(&files.merged, &text) {
-        eprintln!("git-scry: cannot write {name}: {error}");
-        return ExitCode::from(2);
+    match session.save(&files.merged, false) {
+        Ok(()) => {}
+        Err(SaveError::ChangedOnDisk(_)) => {
+            let problem = format!("{name} changed on disk since Scry read it");
+            if !(interactive && ask_yes_no(&format!("{problem}. Overwrite it?"), false)) {
+                println!("{problem}; nothing written.");
+                return ExitCode::from(1);
+            }
+            if let Err(error) = session.save(&files.merged, true) {
+                eprintln!("git-scry: {error}");
+                return ExitCode::from(2);
+            }
+        }
+        Err(error) => {
+            eprintln!("git-scry: {error}");
+            return ExitCode::from(2);
+        }
     }
     println!("{name} resolved.");
     ExitCode::SUCCESS

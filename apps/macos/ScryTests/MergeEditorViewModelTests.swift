@@ -164,4 +164,25 @@ struct MergeEditorViewModelTests {
         #expect(editor.written)
         #expect(file.contents == "let a = 2\nlet b = 0\nfunc f( {\n")
     }
+
+    /// A file changed on disk after it was opened (resolved in another
+    /// editor, an aborted rebase) is not written over silently: Mark as
+    /// Resolved asks, and only Overwrite replaces it.
+    @Test func changedFileAsksBeforeOverwriting() throws {
+        let file = try ConflictFile()
+        let editor = try file.editor()
+        editor.take("theirs")
+        editor.next()
+        editor.take("ours")
+        try "resolved elsewhere\n".write(to: file.url, atomically: true, encoding: .utf8)
+
+        editor.markResolved()
+        #expect(editor.confirmingOverwrite)
+        #expect(!editor.written)
+        #expect(file.contents == "resolved elsewhere\n")
+
+        editor.overwrite()
+        #expect(editor.written)
+        #expect(file.contents == "let a = 2\nlet b = 0\nlet c = 1\n")
+    }
 }

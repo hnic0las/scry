@@ -56,6 +56,12 @@ struct MergeEditorView: View {
         } message: {
             Text(viewModel.invalidWriteMessage)
         }
+        .alert("The file changed on disk", isPresented: $viewModel.confirmingOverwrite) {
+            Button("Overwrite", role: .destructive) { viewModel.overwrite() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(viewModel.overwriteMessage)
+        }
         .alert(
             "Something went wrong",
             isPresented: Binding(
