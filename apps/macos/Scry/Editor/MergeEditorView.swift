@@ -360,3 +360,20 @@ enum SideShape {
             .accessibilityHidden(true)
     }
 }
+
+#Preview("Editor, unresolved", traits: .fixedLayout(width: 1440, height: 600)) {
+    if let editor = PreviewSample.editor() {
+        MergeEditorView(viewModel: editor)
+    }
+}
+
+#Preview("Editor, resolved and written", traits: .fixedLayout(width: 1440, height: 600)) {
+    if let editor = PreviewSample.editor({ editor in
+        editor.take("ours-then-theirs")
+        editor.next()
+        editor.take("theirs")
+        editor.markResolved()
+    }) {
+        MergeEditorView(viewModel: editor)
+    }
+}

@@ -65,3 +65,11 @@ struct EmptyStateView: View {
         .background(Theme.Surfaces.window)
     }
 }
+
+#Preview("Empty state", traits: .fixedLayout(width: 900, height: 600)) {
+    EmptyStateView(error: nil, open: {})
+}
+
+#Preview("Empty state, file not opened", traits: .fixedLayout(width: 900, height: 600)) {
+    EmptyStateView(error: "Uploader.swift has no conflict markers.", open: {})
+}

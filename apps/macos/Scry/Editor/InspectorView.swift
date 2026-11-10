@@ -192,3 +192,32 @@ extension Provenance {
         }
     }
 }
+
+#Preview("Inspector, unresolved", traits: .fixedLayout(width: 320, height: 760)) {
+    if let editor = PreviewSample.editor() {
+        InspectorView(viewModel: editor.inspector)
+    }
+}
+
+#Preview("Inspector, resolved by a side", traits: .fixedLayout(width: 320, height: 760)) {
+    if let editor = PreviewSample.editor({ $0.take("theirs") }) {
+        InspectorView(viewModel: editor.inspector)
+    }
+}
+
+#Preview("Inspector, edited by hand", traits: .fixedLayout(width: 320, height: 1150)) {
+    if let editor = PreviewSample.editor({ editor in
+        editor.startEditing(1)
+        editor.editBlock?.draft = "    queue.cancelAll()\n    queue.suspend()\n"
+        editor.editBlock?.apply()
+    }) {
+        InspectorView(viewModel: editor.inspector)
+    }
+}
+
+#Preview("Inspector, dark", traits: .fixedLayout(width: 320, height: 760)) {
+    if let editor = PreviewSample.editor({ $0.take("ours") }) {
+        InspectorView(viewModel: editor.inspector)
+            .preferredColorScheme(.dark)
+    }
+}

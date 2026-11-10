@@ -26,6 +26,7 @@ Layout and commands: `README.md`. Add `crates/scry-mcp`, `crates/scry-ffi` and `
 - Each screen has its view model, `<ViewName>ViewModel` beside its view: `@MainActor @Observable final class`, importing `Foundation` and `Observation` only, never SwiftUI or AppKit. It exposes display-ready values and intent methods; colours stay in views, which map roles such as `Provenance` to the theme.
 - Components (rows, cells, badges, cards, headers) take plain values and closures, without a view model.
 - View models are unit-tested in `apps/macos/ScryTests` with Swift Testing, on conflicted files written to a temporary directory.
+- Every screen has previews in its own file, for its meaningful states, built on `PreviewSample` (a conflicted file written to a temporary directory, no script needed). In views, wrap view-model methods in closures (`{ viewModel.cancel() }`) rather than passing them (`action: viewModel.cancel`): the preview compiler rejects their `@MainActor @Sendable` types.
 
 ## Design prototype
 

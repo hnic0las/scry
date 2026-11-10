@@ -12,35 +12,43 @@ struct EditBlockView: View {
         HStack(spacing: 0) {
             Color.clear.frame(width: widths.side + widths.connector)
             VStack(alignment: .leading, spacing: 6) {
-                CodeTextView(
-                    text: $viewModel.draft,
-                    highlight: viewModel.highlight,
-                    newline: viewModel.newline,
-                    typedIndent: viewModel.typedIndent
-                )
-                    .frame(height: editorHeight)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(Theme.Provenance.human, lineWidth: 1.5)
-                    )
-                HStack(spacing: 8) {
-                    Label("Editing by hand", systemImage: "person.fill")
-                        .font(Metrics.captionBold)
-                        .foregroundStyle(Theme.Provenance.human)
-                    Spacer()
-                    Button("Cancel", action: viewModel.cancel)
-                        .keyboardShortcut(.cancelAction)
-                        .help("Discard this edit (Esc)")
-                    Button("Apply", action: viewModel.apply)
-                        .keyboardShortcut(.return, modifiers: .command)
-                        .buttonStyle(.borderedProminent)
-                        .help("Resolve the conflict with this text (⌘↩)")
-                }
+                editor
+                actions
             }
             .padding(8)
             .frame(width: widths.result)
             .background(Theme.Provenance.human.opacity(Metrics.blockTintOpacity))
             Color.clear.frame(width: widths.connector + widths.side)
+        }
+    }
+
+    private var editor: some View {
+        CodeTextView(
+            text: $viewModel.draft,
+            highlight: { viewModel.highlight($0) },
+            newline: { viewModel.newline(before: $0, after: $1) },
+            typedIndent: { viewModel.typedIndent(before: $0, typed: $1) }
+        )
+        .frame(height: editorHeight)
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(Theme.Provenance.human, lineWidth: 1.5)
+        )
+    }
+
+    private var actions: some View {
+        HStack(spacing: 8) {
+            Label("Editing by hand", systemImage: "person.fill")
+                .font(Metrics.captionBold)
+                .foregroundStyle(Theme.Provenance.human)
+            Spacer()
+            Button("Cancel") { viewModel.cancel() }
+                .keyboardShortcut(.cancelAction)
+                .help("Discard this edit (Esc)")
+            Button("Apply") { viewModel.apply() }
+                .keyboardShortcut(.return, modifiers: .command)
+                .buttonStyle(.borderedProminent)
+                .help("Resolve the conflict with this text (⌘↩)")
         }
     }
 
@@ -232,6 +240,24 @@ struct CodeTextView: NSViewRepresentable {
             let length = line.utf16.distance(from: from, to: to)
             return NSRange(location: location, length: length)
         }
+    }
+}
+
+#Preview("Edit block", traits: .fixedLayout(width: 1100, height: 200)) {
+    if let editor = PreviewSample.editor({ $0.startEditing(1) }), let block = editor.editBlock {
+        EditBlockView(viewModel: block, widths: PaneWidths(total: 1100))
+    }
+}
+
+#Preview("Edit block, longer draft", traits: .fixedLayout(width: 1100, height: 300)) {
+    if let editor = PreviewSample.editor({ editor in
+        editor.startEditing(1)
+        editor.editBlock?.draft = "    // Stop every upload, then keep the queue for later.\n    queue.cancelAll()\n    queue.suspend()\n    log(\"cancelled\")\n"
+    }), let block = editor.editBlock {
+        EditBlockView(viewModel: block, widths: PaneWidths(total: 1100))
+            .preferredColorScheme(.dark)
+    } else {
+        Text("No edit block")
     }
 }
 
