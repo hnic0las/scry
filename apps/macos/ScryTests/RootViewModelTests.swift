@@ -15,15 +15,17 @@ struct RootViewModelTests {
 
     /// Opening a file shows the editor; a file that cannot be opened keeps
     /// the empty state with the reason.
-    @Test func opensAFileOrSaysWhy() throws {
+    @Test func opensAFileOrSaysWhy() async throws {
         let root = RootViewModel()
 
-        root.open("/no/such/file.swift")
+        await root.open("/no/such/file.swift")
         #expect(root.editor == nil)
         #expect(root.openError != nil)
+        #expect(root.opening == nil)
 
-        root.open(try ConflictFile().url.path)
+        await root.open(try ConflictFile().url.path)
         #expect(root.editor != nil)
         #expect(root.openError == nil)
+        #expect(root.opening == nil)
     }
 }

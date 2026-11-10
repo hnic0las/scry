@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::conflict::{self, Conflict, ParseError, Segment};
@@ -15,13 +16,13 @@ use crate::git::{Git, GitError};
 use crate::highlight::{Highlighter, Span};
 use crate::indent::{self, Newline};
 use crate::resolution::{self, Analysis, Candidate, CandidateKind};
-use crate::syntax::{self, Language, ParseCheck};
+use crate::syntax::{Language, ParseCheck, ParsedFile};
 
-/// The three panes of the merge editor.
+/// The side panes of the merge editor; the result pane has its own
+/// methods, since it depends on the choices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pane {
     Ours,
-    Result,
     Theirs,
 }
 
@@ -86,6 +87,11 @@ pub struct MergeSession {
     /// valid code; without such a reference, a parse failure says nothing
     /// about the merge, so nothing is checked.
     checkable: bool,
+    /// The file with every conflict taken from ours, parsed, and each
+    /// conflict's byte range in it. Every other version of the file
+    /// (candidates, the result, a draft) is parsed from it incrementally.
+    reference: Option<ParsedFile>,
+    ranges: Vec<Range<usize>>,
     highlighter: Option<Highlighter>,
     /// Highlight spans of the ours and theirs versions of the file, by line;
     /// they never change during the session.
@@ -116,8 +122,10 @@ impl MergeSession {
     ) -> MergeSession {
         let conflicts: Vec<Conflict> = conflict::conflicts(&segments).cloned().collect();
         let mut analyses = resolution::analyze(&segments);
-        let checkable = match language {
-            Some(language) => verify(&segments, &conflicts, &mut analyses, language),
+        let (ours_text, ranges) = ours_file(&segments);
+        let reference = language.and_then(|language| ParsedFile::new(language, ours_text));
+        let checkable = match &reference {
+            Some(reference) => verify(&segments, &conflicts, &mut analyses, reference, &ranges),
             None => false,
         };
         let choices = vec![None; conflicts.len()];
@@ -133,46 +141,74 @@ impl MergeSession {
             on_disk,
             language,
             checkable,
+            reference,
+            ranges,
             highlighter,
             ours_spans: Vec::new(),
             theirs_spans: Vec::new(),
             indent_unit: String::new(),
         };
         session.indent_unit = indent::indent_unit(&session.side_text(Pane::Ours));
-        session.ours_spans = session.highlight(&session.side_text(Pane::Ours));
-        session.theirs_spans = session.highlight(&session.side_text(Pane::Theirs));
+        let ours: Vec<&str> = session
+            .conflicts
+            .iter()
+            .map(|c| c.ours.text.as_str())
+            .collect();
+        let theirs: Vec<&str> = session
+            .conflicts
+            .iter()
+            .map(|c| c.theirs.text.as_str())
+            .collect();
+        session.ours_spans = session.highlight_variant(&ours);
+        session.theirs_spans = session.highlight_variant(&theirs);
         session
     }
 
     /// Spans per line of `text`; none without a highlighter.
-    pub(crate) fn highlight(&self, text: &str) -> Vec<Vec<Span>> {
-        match &self.highlighter {
-            Some(highlighter) => highlighter.lines(text),
-            None => Vec::new(),
-        }
+    /// The reference file with conflict `i` replaced by `texts[i]`, parsed
+    /// incrementally.
+    fn variant(&self, texts: &[&str]) -> Option<ParsedFile> {
+        let replacements: Vec<(Range<usize>, &str)> = self
+            .ranges
+            .iter()
+            .zip(texts)
+            .zip(&self.conflicts)
+            // Conflicts left as ours need no edit.
+            .filter(|((_, text), conflict)| **text != conflict.ours.text)
+            .map(|((range, text), _)| (range.clone(), *text))
+            .collect();
+        self.reference.as_ref()?.with(&replacements)
     }
 
-    /// The text a pane shows, as one file: the common text with each
-    /// conflict's ours side, theirs side, or chosen candidate (an
-    /// unresolved conflict adds nothing to the result).
+    /// The spans of every line of the file with conflict `i` replaced by
+    /// `texts[i]`.
+    fn highlight_variant(&self, texts: &[&str]) -> Vec<Vec<Span>> {
+        let (Some(highlighter), Some(parsed)) = (&self.highlighter, self.variant(texts)) else {
+            return Vec::new();
+        };
+        highlighter.lines_in(&parsed, 0..parsed.text().len())
+    }
+
+    /// The spans of the result pane: chosen candidates, nothing for
+    /// unresolved conflicts.
+    pub(crate) fn result_spans(&self) -> Vec<Vec<Span>> {
+        let texts: Vec<&str> = (0..self.conflicts.len())
+            .map(|index| self.chosen_text(index).unwrap_or(""))
+            .collect();
+        self.highlight_variant(&texts)
+    }
+
+    /// The text a side pane shows, as one file: the common text with each
+    /// conflict's side.
     pub(crate) fn side_text(&self, pane: Pane) -> String {
         let mut text = String::new();
-        let mut index = 0;
         for segment in &self.segments {
             match segment {
                 Segment::Common(common) => text.push_str(common),
-                Segment::Conflict(conflict) => {
-                    match pane {
-                        Pane::Ours => text.push_str(&conflict.ours.text),
-                        Pane::Theirs => text.push_str(&conflict.theirs.text),
-                        Pane::Result => {
-                            if let Some(chosen) = self.chosen_text(index) {
-                                text.push_str(chosen);
-                            }
-                        }
-                    }
-                    index += 1;
-                }
+                Segment::Conflict(conflict) => match pane {
+                    Pane::Ours => text.push_str(&conflict.ours.text),
+                    Pane::Theirs => text.push_str(&conflict.theirs.text),
+                },
             }
         }
         text
@@ -188,8 +224,8 @@ impl MergeSession {
                 Segment::Common(common) => line += common.lines().count(),
                 Segment::Conflict(found) => {
                     let side = match pane {
+                        Pane::Ours => &found.ours.text,
                         Pane::Theirs => &found.theirs.text,
-                        _ => &found.ours.text,
                     };
                     let count = side.lines().count();
                     if conflict == index {
@@ -236,9 +272,15 @@ impl MergeSession {
     /// when no reference version of the file parses, or while a conflict has
     /// no choice.
     pub fn merged_check(&self) -> ParseCheck {
-        match (self.language, self.merged_text()) {
-            (Some(language), Some(text)) if self.checkable => syntax::check(language, &text),
-            _ => ParseCheck::NotChecked,
+        if !self.checkable {
+            return ParseCheck::NotChecked;
+        }
+        let texts: Option<Vec<&str>> = (0..self.conflicts.len())
+            .map(|index| self.chosen_text(index))
+            .collect();
+        match texts.and_then(|texts| self.variant(&texts)) {
+            Some(parsed) => parsed.check(),
+            None => ParseCheck::NotChecked,
         }
     }
 
@@ -404,35 +446,23 @@ impl MergeSession {
             })
             .collect();
         texts[index] = &draft;
-        // The draft's first line in the assembled file.
-        let mut first = 0;
-        let mut conflict = 0;
-        for segment in &self.segments {
-            match segment {
-                Segment::Common(common) => first += common.lines().count(),
-                Segment::Conflict(_) => {
-                    if conflict == index {
-                        break;
-                    }
-                    first += texts[conflict].lines().count();
-                    conflict += 1;
-                }
-            }
-        }
-        let count = draft.lines().count();
-        self.highlight(&assemble(&self.segments, &texts))
-            .into_iter()
-            .skip(first)
-            .take(count)
-            .collect()
+        let (Some(highlighter), Some(parsed)) = (&self.highlighter, self.variant(&texts)) else {
+            return Vec::new();
+        };
+        // Only the draft's lines are painted: where it starts once the
+        // conflicts before it have their own length.
+        let shift: isize = (0..index)
+            .map(|other| {
+                texts[other].len() as isize - self.conflicts[other].ours.text.len() as isize
+            })
+            .sum();
+        let start = self.ranges[index].start.saturating_add_signed(shift);
+        highlighter.lines_in(&parsed, start..start + draft.len())
     }
 
     /// Whether the file parses with `text` resolving conflict `index` and
     /// the other conflicts filled with ours, as candidates are checked.
     fn check_in_place(&self, index: usize, text: &str) -> ParseCheck {
-        let Some(language) = self.language else {
-            return ParseCheck::NotChecked;
-        };
         if !self.checkable {
             return ParseCheck::NotChecked;
         }
@@ -442,7 +472,10 @@ impl MergeSession {
             .map(|c| c.ours.text.as_str())
             .collect();
         texts[index] = text;
-        syntax::check(language, &assemble(&self.segments, &texts))
+        match self.variant(&texts) {
+            Some(parsed) => parsed.check(),
+            None => ParseCheck::NotChecked,
+        }
     }
 
     /// Chooses the rule suggestion for every conflict that has one and no
@@ -546,36 +579,69 @@ fn verify(
     segments: &[Segment],
     conflicts: &[Conflict],
     analyses: &mut [Analysis],
-    language: Language,
+    reference: &ParsedFile,
+    ranges: &[Range<usize>],
 ) -> bool {
-    let ours: Vec<&str> = conflicts.iter().map(|c| c.ours.text.as_str()).collect();
-    let theirs: Vec<&str> = conflicts.iter().map(|c| c.theirs.text.as_str()).collect();
-    if !parses(language, &assemble(segments, &ours))
-        || !parses(language, &assemble(segments, &theirs))
-    {
+    let theirs: Vec<(Range<usize>, &str)> = ranges
+        .iter()
+        .cloned()
+        .zip(conflicts.iter().map(|c| c.theirs.text.as_str()))
+        .collect();
+    let theirs_parses = reference
+        .with(&theirs)
+        .is_some_and(|parsed| parsed.check() == ParseCheck::Parses);
+    if reference.check() != ParseCheck::Parses || !theirs_parses {
         return false;
     }
-    let reference = ours;
 
-    for (index, analysis) in analyses.iter_mut().enumerate() {
-        add_closed_candidates(
-            segments,
-            &conflicts[index],
-            &reference,
-            index,
-            analysis,
-            language,
-        );
+    // The other conflicts stay as ours while one is checked.
+    let check = |index: usize, text: &str| match reference.with(&[(ranges[index].clone(), text)]) {
+        Some(parsed) => parsed.check(),
+        None => ParseCheck::NotChecked,
+    };
+    let verify_conflict = |index: usize, analysis: &mut Analysis| {
+        add_closed_candidates(segments, &conflicts[index], index, analysis, &|text| {
+            check(index, text) == ParseCheck::Parses
+        });
         for candidate in &mut analysis.candidates {
-            let check = {
-                let mut texts = reference.clone();
-                texts[index] = candidate.text.as_str();
-                syntax::check(language, &assemble(segments, &texts))
-            };
-            candidate.parse = check;
+            candidate.parse = check(index, &candidate.text);
+        }
+    };
+
+    // Each conflict is checked on its own, so they are shared between the
+    // processor's cores: a large file with many conflicts (a string
+    // catalog) opens several times faster.
+    let threads = std::thread::available_parallelism().map_or(1, |count| count.get());
+    let per_thread = analyses.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        for (chunk_index, chunk) in analyses.chunks_mut(per_thread).enumerate() {
+            let verify_conflict = &verify_conflict;
+            scope.spawn(move || {
+                for (offset, analysis) in chunk.iter_mut().enumerate() {
+                    verify_conflict(chunk_index * per_thread + offset, analysis);
+                }
+            });
+        }
+    });
+    true
+}
+
+/// The file with every conflict taken from ours, and each conflict's byte
+/// range in it.
+fn ours_file(segments: &[Segment]) -> (String, Vec<Range<usize>>) {
+    let mut text = String::new();
+    let mut ranges = Vec::new();
+    for segment in segments {
+        match segment {
+            Segment::Common(common) => text.push_str(common),
+            Segment::Conflict(conflict) => {
+                let start = text.len();
+                text.push_str(&conflict.ours.text);
+                ranges.push(start..text.len());
+            }
         }
     }
-    true
+    (text, ranges)
 }
 
 /// Adds "both, closed" when plain "both" does not parse: each side followed
@@ -584,10 +650,9 @@ fn verify(
 fn add_closed_candidates(
     segments: &[Segment],
     conflict: &Conflict,
-    reference: &[&str],
     index: usize,
     analysis: &mut Analysis,
-    language: Language,
+    parses_with: &dyn Fn(&str) -> bool,
 ) {
     let ours = conflict.ours.text.as_str();
     let theirs = conflict.theirs.text.as_str();
@@ -602,12 +667,6 @@ fn add_closed_candidates(
         (CandidateKind::OursThenTheirsClosed, ours, theirs),
         (CandidateKind::TheirsThenOursClosed, theirs, ours),
     ];
-    let parses_with = |text: &str| {
-        let mut texts = reference.to_vec();
-        texts[index] = text;
-        parses(language, &assemble(segments, &texts))
-    };
-
     for (kind, first, second) in orders {
         if parses_with(&format!("{first}{second}")) {
             continue;
@@ -644,26 +703,6 @@ fn text_after_conflict(segments: &[Segment], index: usize) -> Option<&str> {
         Segment::Common(text) => Some(text.as_str()),
         Segment::Conflict(_) => None,
     }
-}
-
-/// The file with conflict `i` replaced by `texts[i]`.
-fn assemble(segments: &[Segment], texts: &[&str]) -> String {
-    let mut result = String::new();
-    let mut index = 0;
-    for segment in segments {
-        match segment {
-            Segment::Common(text) => result.push_str(text),
-            Segment::Conflict(_) => {
-                result.push_str(texts[index]);
-                index += 1;
-            }
-        }
-    }
-    result
-}
-
-fn parses(language: Language, text: &str) -> bool {
-    syntax::check(language, text) == ParseCheck::Parses
 }
 
 /// Loads the session for the files `git mergetool` passed.

@@ -4,9 +4,11 @@
 //! colours code the same way. The core names roles; each UI maps them to
 //! colours (portability rule 5).
 
-use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
+use std::ops::Range;
 
-use crate::syntax::Language;
+use tree_sitter::{Query, QueryCursor, StreamingIterator};
+
+use crate::syntax::{Language, ParsedFile};
 
 /// The syntax roles of the design tokens (`syntax` group). Text without a
 /// span is plain.
@@ -76,7 +78,18 @@ impl Highlighter {
     /// The spans of every line of `text`, one list per line as
     /// `str::lines` splits them. Plain text has no span.
     pub fn lines(&self, text: &str) -> Vec<Vec<Span>> {
-        let painted = self.paint(text);
+        match ParsedFile::new(self.language, text.to_string()) {
+            Some(parsed) => self.lines_in(&parsed, 0..text.len()),
+            None => text.lines().map(|_| Vec::new()).collect(),
+        }
+    }
+
+    /// The spans of the lines in `range` of a parsed file, which starts
+    /// and ends on line boundaries: only that part is painted, so a few
+    /// lines of a large file cost little.
+    pub(crate) fn lines_in(&self, parsed: &ParsedFile, range: Range<usize>) -> Vec<Vec<Span>> {
+        let text = &parsed.text()[range.clone()];
+        let painted = self.paint(parsed, range);
         let mut lines = Vec::new();
         let mut start = 0;
         for line in text.lines() {
@@ -94,22 +107,17 @@ impl Highlighter {
         lines
     }
 
-    /// The role of every byte of `text`.
-    fn paint(&self, text: &str) -> Vec<Option<SyntaxRole>> {
-        let mut painted = vec![None; text.len()];
-        let mut parser = Parser::new();
-        if parser.set_language(&self.language.grammar()).is_err() {
-            return painted;
-        }
-        let Some(tree) = parser.parse(text, None) else {
-            return painted;
-        };
+    /// The role of every byte in `range` of the file, from its start.
+    fn paint(&self, parsed: &ParsedFile, range: Range<usize>) -> Vec<Option<SyntaxRole>> {
+        let mut painted = vec![None; range.len()];
+        let text = parsed.text();
 
         // Collect every capture first: which one wins depends on all of
         // them, not on the order the cursor finds them.
         let mut captures = Vec::new();
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&self.query, tree.root_node(), text.as_bytes());
+        cursor.set_byte_range(range.clone());
+        let mut matches = cursor.matches(&self.query, parsed.tree().root_node(), text.as_bytes());
         while let Some(found) = matches.next() {
             for capture in found.captures() {
                 let Some(mut role) = self.roles[capture.index as usize] else {
@@ -120,10 +128,17 @@ impl Highlighter {
                 if role == SyntaxRole::Keyword && capture.node.kind().starts_with('#') {
                     role = SyntaxRole::Attribute;
                 }
-                let range = capture.node.byte_range();
+                // Captures cross the range's edges; only their part inside
+                // it is painted, from the range's start.
+                let node = capture.node.byte_range();
+                let (start, end) = (node.start.max(range.start), node.end.min(range.end));
+                if start >= end {
+                    continue;
+                }
                 captures.push(Capture {
-                    start: range.start,
-                    end: range.end,
+                    start: start - range.start,
+                    end: end - range.start,
+                    size: node.end - node.start,
                     pattern: found.pattern_index,
                     specificity: self.depths[found.pattern_index],
                     role,
@@ -140,7 +155,7 @@ impl Highlighter {
         // then the later pattern, as in Neovim.
         captures.sort_by_key(|capture| {
             (
-                std::cmp::Reverse(capture.end - capture.start),
+                std::cmp::Reverse(capture.size),
                 capture.specificity,
                 capture.pattern,
             )
@@ -196,8 +211,12 @@ fn depth(pattern: &str) -> usize {
 }
 
 struct Capture {
+    /// The painted part, from the range's start.
     start: usize,
     end: usize,
+    /// The whole node's length: inner nodes win over the nodes around
+    /// them, even where the range cuts them.
+    size: usize,
     pattern: usize,
     specificity: usize,
     role: SyntaxRole,
@@ -298,6 +317,26 @@ fn role(capture: &str) -> Option<SyntaxRole> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Painting a few lines of a parsed file gives the same spans as
+    /// painting the whole file, even where the lines cut a comment or a
+    /// string that starts before them: a draft is coloured this way.
+    #[test]
+    fn a_range_is_painted_like_the_whole_file() {
+        let text = "/* a comment\n   over lines */\nlet s = \"\"\"\n  text\n  \"\"\"\nfunc f() {\n    g(1)\n}\n";
+        let highlighter = Highlighter::new(Language::Swift).unwrap();
+        let whole = highlighter.lines(text);
+        let parsed = ParsedFile::new(Language::Swift, text.to_string()).unwrap();
+        let starts: Vec<usize> = std::iter::once(0)
+            .chain(text.match_indices('\n').map(|(index, _)| index + 1))
+            .collect();
+        for first in 0..starts.len() - 1 {
+            for last in first + 1..starts.len() {
+                let lines = highlighter.lines_in(&parsed, starts[first]..starts[last]);
+                assert_eq!(lines, whole[first..last], "lines {first}..{last}");
+            }
+        }
+    }
 
     const ALL: [Language; 19] = [
         Language::Swift,

@@ -6,7 +6,7 @@
 
 use crate::conflict::Segment;
 use crate::highlight::Span;
-use crate::session::{MergeSession, Pane};
+use crate::session::MergeSession;
 use crate::words::{self, LineChange};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +101,7 @@ impl MergeSession {
             result: 1,
             theirs: 1,
         };
-        let result_spans = self.highlight(&self.side_text(Pane::Result));
+        let result_spans = self.result_spans();
         let highlights = Highlights {
             ours: self.ours_spans(),
             result: &result_spans,

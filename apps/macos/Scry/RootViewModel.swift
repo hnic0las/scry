@@ -8,16 +8,20 @@ final class RootViewModel {
     private(set) var editor: MergeEditorViewModel?
     /// Why the last file could not be opened.
     private(set) var openError: String?
+    /// The name of the file being opened, while it is.
+    private(set) var opening: String?
 
     /// Opens the file given on the command line, if any.
-    func openLaunchFile(arguments: [String] = CommandLine.arguments) {
+    func openLaunchFile(arguments: [String] = CommandLine.arguments) async {
         guard editor == nil, let path = Self.launchPath(in: arguments) else { return }
-        open(path)
+        await open(path)
     }
 
-    func open(_ path: String) {
+    func open(_ path: String) async {
+        opening = URL(fileURLWithPath: path).lastPathComponent
+        defer { opening = nil }
         do {
-            editor = MergeEditorViewModel(model: try MergeModel(path: path))
+            editor = MergeEditorViewModel(model: try await MergeModel.open(path: path))
             openError = nil
         } catch {
             openError = "\(error)"

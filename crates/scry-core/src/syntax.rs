@@ -2,9 +2,11 @@
 //!
 //! The same grammars will drive syntax highlighting (decision 0003).
 
+use std::ops::Range;
 use std::path::Path;
+use std::sync::OnceLock;
 
-use tree_sitter::{Node, Parser};
+use tree_sitter::{InputEdit, Node, Parser, Point, Tree};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Language {
@@ -135,17 +137,121 @@ pub enum ParseCheck {
 
 /// Parses `text` as `language`.
 pub fn check(language: Language, text: &str) -> ParseCheck {
-    let mut parser = Parser::new();
-    if parser.set_language(&language.grammar()).is_err() {
-        return ParseCheck::NotChecked;
+    match ParsedFile::new(language, text.to_string()) {
+        Some(parsed) => parsed.check(),
+        None => ParseCheck::NotChecked,
     }
-    let Some(tree) = parser.parse(text, None) else {
-        return ParseCheck::NotChecked;
-    };
-    match first_error(tree.root_node()) {
-        None => ParseCheck::Parses,
-        Some(node) => ParseCheck::DoesNotParse {
-            line: error_row(node) + 1,
+}
+
+/// A text and its syntax tree. Variants of it, with some byte ranges
+/// replaced, are parsed incrementally: tree-sitter reuses the tree and
+/// reparses only around the replaced text, so checking each candidate of a
+/// large file costs little more than the candidate itself.
+#[derive(Clone)]
+pub(crate) struct ParsedFile {
+    language: Language,
+    text: String,
+    tree: Tree,
+    /// Where each line starts, to find an edit's row without scanning the
+    /// text before it; computed the first time this file is edited, since
+    /// most variants are only checked.
+    line_starts: OnceLock<Vec<usize>>,
+}
+
+impl ParsedFile {
+    pub(crate) fn new(language: Language, text: String) -> Option<ParsedFile> {
+        let tree = parser(language)?.parse(&text, None)?;
+        Some(ParsedFile::from_parts(language, text, tree))
+    }
+
+    fn from_parts(language: Language, text: String, tree: Tree) -> ParsedFile {
+        ParsedFile {
+            language,
+            text,
+            tree,
+            line_starts: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(crate) fn tree(&self) -> &Tree {
+        &self.tree
+    }
+
+    pub(crate) fn check(&self) -> ParseCheck {
+        match first_error(self.tree.root_node()) {
+            None => ParseCheck::Parses,
+            Some(node) => ParseCheck::DoesNotParse {
+                line: error_row(node) + 1,
+            },
+        }
+    }
+
+    /// This file with each range replaced by its text. The ranges are byte
+    /// ranges of this file, in order and not overlapping.
+    pub(crate) fn with(&self, replacements: &[(Range<usize>, &str)]) -> Option<ParsedFile> {
+        let mut text = String::with_capacity(self.text.len());
+        let mut copied = 0;
+        for (range, replacement) in replacements {
+            text.push_str(&self.text[copied..range.start]);
+            text.push_str(replacement);
+            copied = range.end;
+        }
+        text.push_str(&self.text[copied..]);
+
+        // Edits are described from the last to the first, so the text
+        // before each one is still this file's.
+        let mut tree = self.tree.clone();
+        for (range, replacement) in replacements.iter().rev() {
+            let start = self.point(range.start);
+            tree.edit(&InputEdit {
+                start_byte: range.start,
+                old_end_byte: range.end,
+                new_end_byte: range.start + replacement.len(),
+                start_position: start,
+                old_end_position: advance(start, &self.text[range.clone()]),
+                new_end_position: advance(start, replacement),
+            });
+        }
+        let tree = parser(self.language)?.parse(&text, Some(&tree))?;
+        Some(ParsedFile::from_parts(self.language, text, tree))
+    }
+
+    /// The row and byte column of `offset`.
+    fn point(&self, offset: usize) -> Point {
+        let line_starts = self.line_starts.get_or_init(|| {
+            std::iter::once(0)
+                .chain(self.text.match_indices('\n').map(|(index, _)| index + 1))
+                .collect()
+        });
+        // The last line starting at or before `offset`.
+        let row = line_starts.partition_point(|&start| start <= offset) - 1;
+        Point {
+            row,
+            column: offset - line_starts[row],
+        }
+    }
+}
+
+fn parser(language: Language) -> Option<Parser> {
+    let mut parser = Parser::new();
+    parser.set_language(&language.grammar()).ok()?;
+    Some(parser)
+}
+
+/// Where `start` ends up after `text`.
+fn advance(start: Point, text: &str) -> Point {
+    match text.rfind('\n') {
+        Some(last) => Point {
+            row: start.row + text.matches('\n').count(),
+            column: text.len() - last - 1,
+        },
+        None => Point {
+            row: start.row,
+            column: start.column + text.len(),
         },
     }
 }
@@ -186,6 +292,64 @@ fn first_error(node: Node<'_>) -> Option<Node<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file reparsed incrementally after edits must give the same tree,
+    /// and so the same verdict, as parsing the edited text from scratch:
+    /// every candidate check and the result check rely on it.
+    #[test]
+    fn incremental_parse_matches_a_fresh_parse() {
+        // Functions after the edits, which tree-sitter reuses as they are:
+        // an edit described wrongly would shift them.
+        let functions: String = (0..100)
+            .map(|index| format!("func f{index}() {{\n    g({index})\n}}\n"))
+            .collect();
+        let text = format!(
+            "struct A {{\n    let a = 1\n}}\n\nfunc b() {{\n    print(\"b\")\n}}\n\nlet c = [1, 2]\n{functions}"
+        );
+        let base = ParsedFile::new(Language::Swift, text.clone()).unwrap();
+        let a = text.find("let a = 1").unwrap();
+        let print = text.find("print").unwrap();
+        let c = text.find("[1, 2]").unwrap();
+        let cases: [Vec<(Range<usize>, &str)>; 4] = [
+            // One line changed, still valid.
+            vec![(a..a + 9, "let a = 2")],
+            // An unclosed brace, invalid.
+            vec![(print..print + 10, "if x {")],
+            // Lines added and removed in several places, with non-ASCII text.
+            vec![
+                (a..a + 9, "let é = \"…\"\n    let b = 2"),
+                (print..print + 10, ""),
+                (c..c + 6, "[\n  1,\n  2,\n]"),
+            ],
+            // Nothing replaced.
+            vec![],
+        ];
+        for replacements in cases {
+            let edited = base.with(&replacements).unwrap();
+            let fresh = ParsedFile::new(Language::Swift, edited.text().to_string()).unwrap();
+            assert_eq!(nodes(&edited), nodes(&fresh), "{:?}", edited.text());
+            assert_eq!(edited.check(), fresh.check());
+        }
+    }
+
+    /// Every node of a file with its kind and where it starts and ends, in
+    /// bytes and in rows and columns: an edit described wrongly shifts
+    /// the nodes tree-sitter reuses.
+    fn nodes(parsed: &ParsedFile) -> Vec<(String, Range<usize>, Point, Point)> {
+        let mut nodes = Vec::new();
+        let mut pending = vec![parsed.tree().root_node()];
+        while let Some(node) = pending.pop() {
+            nodes.push((
+                node.kind().to_string(),
+                node.byte_range(),
+                node.start_position(),
+                node.end_position(),
+            ));
+            let mut cursor = node.walk();
+            pending.extend(node.children(&mut cursor));
+        }
+        nodes
+    }
 
     /// The language comes from the file extension, and unknown files get none.
     #[test]

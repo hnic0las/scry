@@ -14,3 +14,9 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# The Debug app links the debug core: without optimising the dependencies
+# (tree-sitter and its grammars, in C), opening a large file is five times
+# slower than in release. Scry's own crates stay unoptimised for debugging.
+[profile.dev.package."*"]
+opt-level = 3

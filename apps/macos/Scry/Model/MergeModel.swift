@@ -27,8 +27,23 @@ final class MergeModel {
 
     @ObservationIgnored private let document: MergeDocument
 
-    init(path: String) throws {
-        document = try MergeDocument.open(path: path)
+    /// Opens a file off the main thread: checking every candidate and
+    /// asking git for the lens commits takes a moment on a large file, and
+    /// the window must stay responsive meanwhile.
+    static func open(path: String) async throws -> MergeModel {
+        let document = try await Task.detached {
+            try MergeDocument.open(path: path)
+        }.value
+        return MergeModel(document: document)
+    }
+
+    /// Opens a file on the calling thread, for tests and previews.
+    convenience init(path: String) throws {
+        self.init(document: try MergeDocument.open(path: path))
+    }
+
+    init(document: MergeDocument) {
+        self.document = document
         header = document.header()
         status = document.status()
         refresh()
