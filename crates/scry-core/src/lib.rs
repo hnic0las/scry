@@ -16,4 +16,5 @@ pub mod presentation;
 pub mod resolution;
 pub mod session;
 pub mod syntax;
+pub mod theme;
 pub mod words;

@@ -173,6 +173,9 @@ extension Provenance {
         switch self {
         case .git: "git"
         case .rule: "rule"
+        case .structural: "structure"
+        case .analyzer: "analyzer"
+        case .agent: "agent"
         case .human: "you"
         }
     }
@@ -181,6 +184,9 @@ extension Provenance {
         switch self {
         case .git: "arrow.triangle.branch"
         case .rule: "ruler"
+        case .structural: "square.stack.3d.up"
+        case .analyzer: "magnifyingglass"
+        case .agent: "sparkles"
         case .human: "person.fill"
         }
     }
@@ -189,6 +195,9 @@ extension Provenance {
         switch self {
         case .git: Theme.Provenance.git
         case .rule: Theme.Provenance.rule
+        case .structural: Theme.Provenance.structural
+        case .analyzer: Theme.Provenance.analyzer
+        case .agent: Theme.Provenance.agent
         case .human: Theme.Provenance.human
         }
     }

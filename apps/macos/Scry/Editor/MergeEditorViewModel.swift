@@ -69,7 +69,8 @@ final class MergeEditorViewModel {
         let focused: Bool
         let oursCommit: LensCommit?
         let theirsCommit: LensCommit?
-        let badges: [BadgeState]
+        /// From the core, each with its theme role.
+        let badges: [LensBadge]
         /// The conflict is open for editing under this row.
         let editing: Bool
     }
@@ -83,18 +84,6 @@ final class MergeEditorViewModel {
         /// The chosen resolution does not parse.
         let resultInvalid: Bool
         let resultProvenance: Provenance
-    }
-
-    /// A lens row's label for a conflict's state.
-    struct BadgeState: Equatable {
-        enum Kind: Equatable {
-            case resolved(Provenance)
-            case doesNotParse
-            case unresolved
-        }
-
-        let text: String
-        let kind: Kind
     }
 
     /// The rows, built again only when the model changes: SwiftUI reads
@@ -118,7 +107,7 @@ final class MergeEditorViewModel {
         return model.rows.map { row in
             switch row {
             case .lens(let conflict):
-                return .lens(lensRow(Int(conflict), chosen: chosen[Int(conflict)]))
+                return .lens(lensRow(Int(conflict)))
             case .code(let ours, let result, let theirs, let conflict):
                 let candidate = conflict.flatMap { chosen[Int($0)] }
                 return .code(CodeRowState(
@@ -148,7 +137,7 @@ final class MergeEditorViewModel {
         }
     }
 
-    private func lensRow(_ conflict: Int, chosen: CandidateInfo?) -> LensRowState {
+    private func lensRow(_ conflict: Int) -> LensRowState {
         let info = model.conflict(conflict)
         return LensRowState(
             conflict: conflict,
@@ -156,18 +145,9 @@ final class MergeEditorViewModel {
             focused: model.current == conflict,
             oursCommit: info?.oursCommit,
             theirsCommit: info?.theirsCommit,
-            badges: badges(chosen),
+            badges: info?.badges ?? [],
             editing: model.editing == conflict
         )
-    }
-
-    private func badges(_ chosen: CandidateInfo?) -> [BadgeState] {
-        guard let chosen else { return [BadgeState(text: "Unresolved", kind: .unresolved)] }
-        var badges = [BadgeState(text: chosen.title, kind: .resolved(chosen.provenance))]
-        if chosen.doesNotParse {
-            badges.append(BadgeState(text: "Does not parse", kind: .doesNotParse))
-        }
-        return badges
     }
 
     // MARK: Toolbar

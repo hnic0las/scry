@@ -292,20 +292,11 @@ struct Badge: View {
         self.color = color
     }
 
-    /// A lens row's badge, in its state's symbol and colour.
-    init(_ badge: MergeEditorViewModel.BadgeState) {
+    /// A lens row's badge, in its role's symbol and colour.
+    init(_ badge: LensBadge) {
         text = badge.text
-        switch badge.kind {
-        case .resolved(let provenance):
-            symbol = provenance.symbol
-            color = provenance.color
-        case .doesNotParse:
-            symbol = "xmark"
-            color = Theme.Severity.error
-        case .unresolved:
-            symbol = "exclamationmark.triangle"
-            color = Theme.States.unresolved
-        }
+        symbol = badge.role.symbol
+        color = badge.role.color
     }
 
     var body: some View {
@@ -366,4 +357,61 @@ struct LensCommitView: View {
             .frame(height: Metrics.lensHeight)
     }
     .background(Theme.Surfaces.sidebar)
+}
+
+/// The core's theme roles as symbols and colours (portability rule 5).
+extension ThemeRole {
+    var symbol: String {
+        switch self {
+        case .provenance(let provenance): provenance.symbol
+        case .state(let state): state.symbol
+        case .severity(let severity): severity.symbol
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .provenance(let provenance): provenance.color
+        case .state(let state): state.color
+        case .severity(let severity): severity.color
+        }
+    }
+}
+
+extension ConflictState {
+    var symbol: String {
+        switch self {
+        case .unresolved: "exclamationmark.triangle"
+        case .needsReview: "eye"
+        case .resolved: "checkmark"
+        case .staged: "tray.full"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .unresolved: Theme.States.unresolved
+        case .needsReview: Theme.States.needsReview
+        case .resolved: Theme.States.resolved
+        case .staged: Theme.States.staged
+        }
+    }
+}
+
+extension Severity {
+    var symbol: String {
+        switch self {
+        case .error: "xmark"
+        case .warning: "exclamationmark.triangle"
+        case .info: "info.circle"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .error: Theme.Severity.error
+        case .warning: Theme.Severity.warning
+        case .info: Theme.Severity.info
+        }
+    }
 }

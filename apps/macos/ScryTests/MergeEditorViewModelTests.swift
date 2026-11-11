@@ -13,7 +13,7 @@ struct MergeEditorViewModelTests {
         #expect(editor.title == "Sample.swift")
         #expect(editor.counter == "Conflict 1 of 2")
         #expect(editor.lensRows.map(\.badges) == Array(
-            repeating: [.init(text: "Unresolved", kind: .unresolved)],
+            repeating: [LensBadge(text: "Unresolved", role: .state(state: .unresolved))],
             count: 2
         ))
         #expect(editor.lensRows.map(\.focused) == [true, false])
@@ -46,8 +46,8 @@ struct MergeEditorViewModelTests {
 
         editor.take("theirs")
 
-        let badges = editor.lensRows.map { $0.badges.map(\.kind) }
-        #expect(badges == [[.resolved(.git)], [.unresolved]])
+        let badges = editor.lensRows.map { $0.badges.map(\.role) }
+        #expect(badges == [[.provenance(provenance: .git)], [.state(state: .unresolved)]])
         #expect(editor.resultHeader.detail.hasPrefix("1 of 2 conflicts resolved"))
         #expect(editor.canUndo)
     }
@@ -133,7 +133,7 @@ struct MergeEditorViewModelTests {
         editor.editBlock?.apply()
 
         #expect(editor.editBlock == nil)
-        #expect(editor.lensRows[0].badges == [.init(text: "Edited by you", kind: .resolved(.human))])
+        #expect(editor.lensRows[0].badges == [LensBadge(text: "Edited by you", role: .provenance(provenance: .human))])
         #expect(editor.chosen(0) == "edited")
     }
 
@@ -167,7 +167,7 @@ struct MergeEditorViewModelTests {
             Issue.record("expected the result not to parse")
             return
         }
-        #expect(editor.lensRows[1].badges.map(\.kind) == [.resolved(.human), .doesNotParse])
+        #expect(editor.lensRows[1].badges.map(\.role) == [.provenance(provenance: .human), .severity(severity: .error)])
         editor.markResolved()
         #expect(editor.confirmingInvalidWrite)
         #expect(!editor.written)
@@ -207,10 +207,10 @@ struct MergeEditorViewModelTests {
         #expect(editor.lensRows.map(\.focused) == [true, false])
 
         editor.inspector.choose("theirs")
-        #expect(editor.lensRows[0].badges.map(\.kind) == [.resolved(.git)])
+        #expect(editor.lensRows[0].badges.map(\.role) == [.provenance(provenance: .git)])
 
         editor.undo()
-        #expect(editor.lensRows[0].badges.map(\.kind) == [.unresolved])
+        #expect(editor.lensRows[0].badges.map(\.role) == [.state(state: .unresolved)])
 
         editor.next()
         #expect(editor.lensRows.map(\.focused) == [false, true])

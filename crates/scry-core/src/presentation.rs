@@ -10,18 +10,7 @@ use crate::operation::{Operation, Side, SideRole};
 use crate::resolution::CandidateKind;
 use crate::session::{Choice, MergeSession};
 use crate::syntax::ParseCheck;
-
-/// Where a resolution comes from, as a role each UI shows its own way
-/// (a name, a symbol, a colour).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Provenance {
-    /// A side as git produced it.
-    Git,
-    /// Made by a format rule.
-    Rule,
-    /// Written by the user.
-    Human,
-}
+use crate::theme::{Badge, Provenance, Role, Severity, State};
 
 /// The ID of a conflict's text written by hand, beside the candidates'.
 pub const EDITED_ID: &str = "edited";
@@ -100,6 +89,11 @@ pub struct ConflictView {
     pub candidates: Vec<CandidateView>,
     /// The resolution: one of the candidates, or the text written by hand.
     pub chosen: Option<CandidateView>,
+    pub state: State,
+    /// What the lens row says about the resolution: its title in its
+    /// provenance's role, and an error when the file does not parse with
+    /// it.
+    pub badges: Vec<Badge>,
     /// The text editing by hand starts from: the current resolution, or
     /// ours while unresolved.
     pub edit_text: String,
@@ -159,6 +153,25 @@ impl MergeSession {
                 })
             }
         };
+        let (state, badges) = match &chosen {
+            None => (
+                State::Unresolved,
+                vec![Badge::new("Unresolved", Role::State(State::Unresolved))],
+            ),
+            Some(chosen) => {
+                let mut badges = vec![Badge::new(
+                    chosen.title.clone(),
+                    Role::Provenance(chosen.provenance),
+                )];
+                if let ParseCheck::DoesNotParse { .. } = chosen.parse {
+                    badges.push(Badge::new(
+                        "Does not parse",
+                        Role::Severity(Severity::Error),
+                    ));
+                }
+                (State::Resolved, badges)
+            }
+        };
         ConflictView {
             id: analysis.id.clone(),
             number: analysis.number,
@@ -166,6 +179,8 @@ impl MergeSession {
             classification: analysis.kind.describe(ours, theirs),
             candidates,
             chosen,
+            state,
+            badges,
             edit_text: self
                 .chosen_text(index)
                 .unwrap_or(&self.conflict(index).ours.text)
@@ -287,6 +302,11 @@ mod tests {
         assert_eq!(theirs.preview, vec!["let a = 2"]);
         assert_eq!(theirs.provenance, Provenance::Git);
         assert_eq!(view.chosen, None);
+        assert_eq!(view.state, State::Unresolved);
+        assert_eq!(
+            view.badges,
+            vec![Badge::new("Unresolved", Role::State(State::Unresolved))]
+        );
         assert_eq!(view.edit_text, "let a = 1\n");
         assert_eq!(
             CandidateKind::TheirsThenOursClosed.provenance(),
@@ -296,7 +316,8 @@ mod tests {
 
     /// The resolution is shown like a candidate, including text written
     /// by hand, which is the user's, with its own check and a preview
-    /// that ignores Windows line endings.
+    /// that ignores Windows line endings; its badges say where it comes
+    /// from and whether the file still parses.
     #[test]
     fn the_chosen_resolution_says_where_it_comes_from() {
         let mut session = MergeSession::from_text(TEXT, Some(Language::Swift)).unwrap();
@@ -322,6 +343,24 @@ mod tests {
         assert_eq!(chosen.id, EDITED_ID);
         assert_eq!(chosen.provenance, Provenance::Human);
         assert_eq!(chosen.parse, ParseCheck::Parses);
+
+        session
+            .apply(Command::Edit {
+                conflict: 0,
+                text: String::from("func f( {\n"),
+            })
+            .unwrap();
+        let view = session.conflict_view(0, "main", "topic");
+        assert_eq!(view.state, State::Resolved);
+        assert_eq!(
+            view.badges,
+            vec![
+                Badge::new("Edited by you", Role::Provenance(Provenance::Human)),
+                Badge::new("Does not parse", Role::Severity(Severity::Error)),
+            ]
+        );
+        session.apply(Command::Undo).unwrap();
+        let chosen = session.conflict_view(0, "main", "topic").chosen.unwrap();
         assert_eq!(chosen.preview, vec!["let a = 3", "let b = 4", "let c = 5"]);
         assert!(chosen.truncated);
     }

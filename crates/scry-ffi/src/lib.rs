@@ -18,6 +18,7 @@ use scry_core::presentation;
 use scry_core::resolution::CandidateKind;
 use scry_core::session::{self, MergeSession};
 use scry_core::syntax::{Language, ParseCheck};
+use scry_core::theme;
 use scry_core::words;
 
 uniffi::setup_scaffolding!();
@@ -180,16 +181,46 @@ pub struct CandidateInfo {
     pub suggested: bool,
 }
 
-/// Where a resolution comes from, as a role the app maps to a name, a
-/// symbol and a colour.
+/// The theme's roles, from the core (portability rule 5): the app maps
+/// each to a colour and a symbol. See `scry_core::theme`.
 #[derive(Debug, Clone, Copy, uniffi::Enum)]
 pub enum Provenance {
-    /// A side as git produced it.
     Git,
-    /// Made by a format rule.
     Rule,
-    /// Written by the user.
+    Structural,
+    Analyzer,
+    Agent,
     Human,
+}
+
+/// The core's `theme::State`; renamed, since SwiftUI has its own `State`.
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum ConflictState {
+    Unresolved,
+    NeedsReview,
+    Resolved,
+    Staged,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum Severity {
+    Error,
+    Warning,
+    Info,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum ThemeRole {
+    Provenance { provenance: Provenance },
+    State { state: ConflictState },
+    Severity { severity: Severity },
+}
+
+/// A lens row's label, coloured by its role.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct LensBadge {
+    pub text: String,
+    pub role: ThemeRole,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -202,6 +233,8 @@ pub struct ConflictInfo {
     /// The resolution: one of `candidates`, or the text written by hand
     /// (ID "edited", provenance `Human`).
     pub chosen: Option<CandidateInfo>,
+    pub state: ConflictState,
+    pub badges: Vec<LensBadge>,
     /// The text editing by hand starts from: the current resolution, or
     /// ours while unresolved.
     pub edit_text: String,
@@ -416,6 +449,8 @@ impl MergeDocument {
             classification: view.classification,
             candidates: view.candidates.into_iter().map(candidate_info).collect(),
             chosen: view.chosen.map(candidate_info),
+            state: conflict_state(view.state),
+            badges: view.badges.into_iter().map(lens_badge).collect(),
             edit_text: view.edit_text,
             ours_commit: self.lens_commit(index, true),
             theirs_commit: self.lens_commit(index, false),
@@ -461,12 +496,50 @@ fn candidate_info(candidate: presentation::CandidateView) -> CandidateInfo {
         preview: candidate.preview,
         truncated: candidate.truncated,
         parse: parse_status(candidate.parse),
-        provenance: match candidate.provenance {
-            presentation::Provenance::Git => Provenance::Git,
-            presentation::Provenance::Rule => Provenance::Rule,
-            presentation::Provenance::Human => Provenance::Human,
-        },
+        provenance: provenance(candidate.provenance),
         suggested: candidate.suggested,
+    }
+}
+
+fn provenance(provenance: theme::Provenance) -> Provenance {
+    match provenance {
+        theme::Provenance::Git => Provenance::Git,
+        theme::Provenance::Rule => Provenance::Rule,
+        theme::Provenance::Structural => Provenance::Structural,
+        theme::Provenance::Analyzer => Provenance::Analyzer,
+        theme::Provenance::Agent => Provenance::Agent,
+        theme::Provenance::Human => Provenance::Human,
+    }
+}
+
+fn conflict_state(state: theme::State) -> ConflictState {
+    match state {
+        theme::State::Unresolved => ConflictState::Unresolved,
+        theme::State::NeedsReview => ConflictState::NeedsReview,
+        theme::State::Resolved => ConflictState::Resolved,
+        theme::State::Staged => ConflictState::Staged,
+    }
+}
+
+fn lens_badge(badge: theme::Badge) -> LensBadge {
+    let role = match badge.role {
+        theme::Role::Provenance(role) => ThemeRole::Provenance {
+            provenance: provenance(role),
+        },
+        theme::Role::State(state) => ThemeRole::State {
+            state: conflict_state(state),
+        },
+        theme::Role::Severity(severity) => ThemeRole::Severity {
+            severity: match severity {
+                theme::Severity::Error => Severity::Error,
+                theme::Severity::Warning => Severity::Warning,
+                theme::Severity::Info => Severity::Info,
+            },
+        },
+    };
+    LensBadge {
+        text: badge.text,
+        role,
     }
 }
 
