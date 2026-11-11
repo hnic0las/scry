@@ -134,7 +134,7 @@ struct MergeEditorViewModelTests {
 
         #expect(editor.editBlock == nil)
         #expect(editor.lensRows[0].badges == [.init(text: "Edited by you", kind: .resolved(.human))])
-        #expect(editor.chosen(0) == CandidateInfo.editedID)
+        #expect(editor.chosen(0) == "edited")
     }
 
     /// Mark as Resolved writes the merged file once every conflict is

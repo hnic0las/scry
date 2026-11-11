@@ -5,7 +5,7 @@
 //! core's, so the core stays free of UniFFI.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use scry_core::blame;
@@ -13,9 +13,10 @@ use scry_core::command::{self as core, CommandError};
 use scry_core::git::GitCli;
 use scry_core::highlight;
 use scry_core::layout;
-use scry_core::operation::{self, SideRole};
+use scry_core::operation;
+use scry_core::presentation;
 use scry_core::resolution::CandidateKind;
-use scry_core::session::{self, Choice, MergeSession};
+use scry_core::session::{self, MergeSession};
 use scry_core::syntax::{Language, ParseCheck};
 use scry_core::words;
 
@@ -174,8 +175,21 @@ pub struct CandidateInfo {
     /// Whether the candidate has more lines than the preview.
     pub truncated: bool,
     pub parse: ParseStatus,
+    pub provenance: Provenance,
     /// Picked by a rule because no judgement is needed.
     pub suggested: bool,
+}
+
+/// Where a resolution comes from, as a role the app maps to a name, a
+/// symbol and a colour.
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum Provenance {
+    /// A side as git produced it.
+    Git,
+    /// Made by a format rule.
+    Rule,
+    /// Written by the user.
+    Human,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -185,10 +199,9 @@ pub struct ConflictInfo {
     pub start_line: u32,
     pub classification: String,
     pub candidates: Vec<CandidateInfo>,
-    /// The chosen candidate's ID, or "edited" for text written by hand.
-    pub chosen: Option<String>,
-    /// The check of the text written by hand, when `chosen` is "edited".
-    pub edited_parse: Option<ParseStatus>,
+    /// The resolution: one of `candidates`, or the text written by hand
+    /// (ID "edited", provenance `Human`).
+    pub chosen: Option<CandidateInfo>,
     /// The text editing by hand starts from: the current resolution, or
     /// ours while unresolved.
     pub edit_text: String,
@@ -293,7 +306,7 @@ impl MergeDocument {
         };
         let git = GitCli::new(directory);
         let operation = operation::current(&git).ok().flatten();
-        let header = header(&path, &session, language, operation.as_ref());
+        let header = header(presentation::header(&path, &session, operation.as_ref()));
         let commits = match (&operation, path.file_name()) {
             (Some(operation), Some(name)) => {
                 blame::conflict_commits(&git, operation, &name.to_string_lossy(), &session)
@@ -395,44 +408,15 @@ impl MergeDocument {
     }
 
     fn conflict_info(&self, session: &MergeSession, index: usize) -> ConflictInfo {
-        let analysis = session.analysis(index);
-        let ours = &self.header.ours.label;
-        let theirs = &self.header.theirs.label;
-        let candidates = analysis
-            .candidates
-            .iter()
-            .map(|candidate| {
-                let (title, subtitle) = describe(candidate.kind, ours, theirs);
-                let lines: Vec<String> = candidate.text.lines().map(String::from).collect();
-                CandidateInfo {
-                    id: candidate.kind.id().to_string(),
-                    title,
-                    subtitle,
-                    preview: lines.iter().take(3).cloned().collect(),
-                    truncated: lines.len() > 3,
-                    parse: parse_status(candidate.parse),
-                    suggested: analysis.suggestion == Some(candidate.kind),
-                }
-            })
-            .collect();
+        let view = session.conflict_view(index, &self.header.ours.label, &self.header.theirs.label);
         ConflictInfo {
-            id: analysis.id.clone(),
-            number: analysis.number as u32,
-            start_line: analysis.start_line as u32,
-            classification: analysis.kind.describe(ours, theirs),
-            candidates,
-            chosen: session.choice(index).map(|choice| match choice {
-                Choice::Candidate(kind) => kind.id().to_string(),
-                Choice::Edited(_) => String::from("edited"),
-            }),
-            edited_parse: match session.choice(index) {
-                Some(Choice::Edited(edit)) => Some(parse_status(edit.parse)),
-                _ => None,
-            },
-            edit_text: session
-                .chosen_text(index)
-                .unwrap_or(&session.conflict(index).ours.text)
-                .to_string(),
+            id: view.id,
+            number: view.number as u32,
+            start_line: view.start_line as u32,
+            classification: view.classification,
+            candidates: view.candidates.into_iter().map(candidate_info).collect(),
+            chosen: view.chosen.map(candidate_info),
+            edit_text: view.edit_text,
             ours_commit: self.lens_commit(index, true),
             theirs_commit: self.lens_commit(index, false),
         }
@@ -442,105 +426,48 @@ impl MergeDocument {
         let commits = self.commits.get(index)?;
         let commit = if ours { &commits.ours } else { &commits.theirs };
         let commit = commit.as_ref()?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs() as i64)
-            .unwrap_or(commit.time);
         Some(LensCommit {
             short_id: commit.short_id.clone(),
             subject: commit.subject.clone(),
             author: commit.author.clone(),
-            age: blame::age(commit.time, now),
+            age: blame::age_from_now(commit.time),
         })
     }
 }
 
-fn header(
-    path: &Path,
-    session: &MergeSession,
-    language: Option<Language>,
-    operation: Option<&operation::Operation>,
-) -> Header {
-    let (summary, ours, theirs) = match operation {
-        Some(operation) => {
-            let ours = pane_side(&operation.ours, "ours");
-            let theirs = match &operation.theirs {
-                Some(side) => pane_side(side, "theirs"),
-                None => marker_side(session, false),
-            };
-            (Some(operation.summary()), ours, theirs)
-        }
-        _ => (
-            None,
-            marker_side(session, true),
-            marker_side(session, false),
-        ),
-    };
+fn header(header: presentation::Header) -> Header {
     Header {
-        file_name: path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        path: path.display().to_string(),
-        summary,
-        ours,
-        theirs,
-        language: language.map(|language| language.name().to_string()),
+        file_name: header.file_name,
+        path: header.path,
+        summary: header.summary,
+        ours: pane_side(header.ours),
+        theirs: pane_side(header.theirs),
+        language: header.language,
     }
 }
 
-fn pane_side(side: &operation::Side, git_name: &str) -> PaneSide {
-    let git_term = format!("git calls this side \u{201c}{git_name}\u{201d}");
-    let detail = match side.role {
-        SideRole::CommitBeingRebased | SideRole::CherryPickedCommit | SideRole::RevertedCommit => {
-            git_term
-        }
-        _ => format!("{} · {git_term}", side.commit.short_id),
-    };
+fn pane_side(side: presentation::PaneSide) -> PaneSide {
     PaneSide {
-        label: side.label(),
-        detail,
+        label: side.label,
+        detail: side.detail,
     }
 }
 
-/// Without an operation: the labels git wrote on the first conflict's
-/// markers.
-fn marker_side(session: &MergeSession, ours: bool) -> PaneSide {
-    let (label, git_name) = if session.conflict_count() == 0 {
-        (String::new(), if ours { "ours" } else { "theirs" })
-    } else if ours {
-        (session.conflict(0).ours.label.clone(), "ours")
-    } else {
-        (session.conflict(0).theirs.label.clone(), "theirs")
-    };
-    PaneSide {
-        label: if label.is_empty() {
-            git_name.to_string()
-        } else {
-            label
+fn candidate_info(candidate: presentation::CandidateView) -> CandidateInfo {
+    CandidateInfo {
+        id: candidate.id,
+        title: candidate.title,
+        subtitle: candidate.subtitle,
+        preview: candidate.preview,
+        truncated: candidate.truncated,
+        parse: parse_status(candidate.parse),
+        provenance: match candidate.provenance {
+            presentation::Provenance::Git => Provenance::Git,
+            presentation::Provenance::Rule => Provenance::Rule,
+            presentation::Provenance::Human => Provenance::Human,
         },
-        detail: format!("git calls this side \u{201c}{git_name}\u{201d}"),
+        suggested: candidate.suggested,
     }
-}
-
-fn describe(kind: CandidateKind, ours: &str, theirs: &str) -> (String, String) {
-    let (title, subtitle) = match kind {
-        CandidateKind::Ours => ("Ours", ours),
-        CandidateKind::Theirs => ("Theirs", theirs),
-        CandidateKind::OursThenTheirs => ("Both · ours first", "Ours, then theirs"),
-        CandidateKind::TheirsThenOurs => ("Both · theirs first", "Theirs, then ours"),
-        CandidateKind::Neither => ("None", "Remove the block"),
-        CandidateKind::Base => ("Base", "As before both changes"),
-        CandidateKind::OursThenTheirsClosed => (
-            "Both · ours first, each closed",
-            "Repeats the lines git moved below the conflict",
-        ),
-        CandidateKind::TheirsThenOursClosed => (
-            "Both · theirs first, each closed",
-            "Repeats the lines git moved below the conflict",
-        ),
-    };
-    (title.to_string(), subtitle.to_string())
 }
 
 fn core_command(command: Command) -> Result<core::Command, ScryError> {
@@ -735,8 +662,10 @@ mod tests {
             })
             .unwrap();
         let conflict = &document.conflicts()[0];
-        assert_eq!(conflict.chosen.as_deref(), Some("edited"));
-        assert!(matches!(conflict.edited_parse, Some(ParseStatus::Parses)));
+        let edited = conflict.chosen.as_ref().unwrap();
+        assert_eq!(edited.id, "edited");
+        assert!(matches!(edited.provenance, Provenance::Human));
+        assert!(matches!(edited.parse, ParseStatus::Parses));
         assert_eq!(conflict.edit_text, "let a = 3\n");
         assert!(document.status().can_undo);
         let undone = document.apply(Command::Undo).unwrap();
@@ -746,7 +675,9 @@ mod tests {
                 command: Command::Edit { .. }
             }
         ));
-        assert_eq!(document.conflicts()[0].chosen.as_deref(), Some("theirs"));
+        let chosen = document.conflicts()[0].chosen.clone().unwrap();
+        assert_eq!(chosen.id, "theirs");
+        assert!(matches!(chosen.provenance, Provenance::Git));
         assert!(document.status().can_redo);
     }
 

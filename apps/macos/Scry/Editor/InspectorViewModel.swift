@@ -36,12 +36,12 @@ final class InspectorViewModel {
 
     var cards: [Card] {
         guard let conflict else { return [] }
-        return conflict.candidates.map { Card(candidate: $0, selected: conflict.chosen == $0.id) }
+        return conflict.candidates.map { Card(candidate: $0, selected: conflict.chosen?.id == $0.id) }
     }
 
     /// The text written by hand, when it resolves the conflict.
     var editedCard: Card? {
-        guard let chosen = conflict?.chosenCandidate, chosen.id == CandidateInfo.editedID else { return nil }
+        guard let chosen = conflict?.chosen, chosen.provenance == .human else { return nil }
         return Card(candidate: chosen, selected: true)
     }
 

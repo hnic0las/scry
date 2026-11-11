@@ -161,19 +161,6 @@ fn key(kind: CandidateKind) -> &'static str {
     }
 }
 
-fn title(kind: CandidateKind) -> &'static str {
-    match kind {
-        CandidateKind::Ours => "ours",
-        CandidateKind::Theirs => "theirs",
-        CandidateKind::OursThenTheirs => "both, ours first",
-        CandidateKind::TheirsThenOurs => "both, theirs first",
-        CandidateKind::Neither => "neither",
-        CandidateKind::Base => "base",
-        CandidateKind::OursThenTheirsClosed => "both, ours first, each closed",
-        CandidateKind::TheirsThenOursClosed => "both, theirs first, each closed",
-    }
-}
-
 /// Asks for a candidate for each conflict without a choice. Returns false
 /// when the user quits.
 fn ask_each_conflict(session: &mut MergeSession, ours: &str, theirs: &str) -> bool {
@@ -209,7 +196,7 @@ fn ask_each_conflict(session: &mut MergeSession, ours: &str, theirs: &str) -> bo
         }
         let suggestion = analysis.suggestion;
         let hint = match suggestion {
-            Some(kind) => format!(" · Enter: suggested by rule, {}", title(kind)),
+            Some(kind) => format!(" · Enter: suggested by rule, {}", kind.title()),
             None => String::new(),
         };
         println!("[s] skip  [q] quit without writing{hint}");
@@ -288,14 +275,14 @@ fn ask_yes_no(question: &str, default: bool) -> bool {
     }
 }
 
-/// "[3] both, ours first ✗": the key, the title, and a mark when the file
+/// "[3] Both · ours first ✗": the key, the title, and a mark when the file
 /// would not parse with this candidate.
 fn choice_label(candidate: &Candidate) -> String {
     let mark = match candidate.parse {
         ParseCheck::DoesNotParse { .. } => " ✗",
         ParseCheck::Parses | ParseCheck::NotChecked => "",
     };
-    format!("[{}] {}{mark}", key(candidate.kind), title(candidate.kind))
+    format!("[{}] {}{mark}", key(candidate.kind), candidate.kind.title())
 }
 
 /// The four paths in the order git passes them.

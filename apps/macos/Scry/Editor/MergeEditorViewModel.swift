@@ -114,7 +114,7 @@ final class MergeEditorViewModel {
 
     private func buildRows() -> [RowState] {
         // Once per conflict, not once per line.
-        let chosen = model.conflicts.map(\.chosenCandidate)
+        let chosen = model.conflicts.map(\.chosen)
         return model.rows.map { row in
             switch row {
             case .lens(let conflict):
@@ -259,7 +259,7 @@ final class MergeEditorViewModel {
 
     /// Both sides, ours first; pressed again, theirs first.
     func takeBoth() {
-        let both = model.conflict(model.current)?.chosen == "ours-then-theirs"
+        let both = model.conflict(model.current)?.chosen?.id == "ours-then-theirs"
             ? "theirs-then-ours" : "ours-then-theirs"
         take(both)
     }

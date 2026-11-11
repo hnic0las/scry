@@ -12,6 +12,7 @@ pub mod highlight;
 pub mod indent;
 pub mod layout;
 pub mod operation;
+pub mod presentation;
 pub mod resolution;
 pub mod session;
 pub mod syntax;

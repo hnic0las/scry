@@ -145,6 +145,15 @@ fn read_commit(git: &dyn Git, id: &str) -> Result<LineCommit, GitError> {
     }
 }
 
+/// How long ago `time` was, from the clock: the same words as `age`.
+pub fn age_from_now(time: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(time);
+    age(time, now)
+}
+
 /// How long ago `time` was, as the lens row says it: "today", "yesterday",
 /// "3 days ago", "2 weeks ago", "5 months ago", "2 years ago".
 pub fn age(time: i64, now: i64) -> String {
