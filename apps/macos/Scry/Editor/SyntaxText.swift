@@ -40,7 +40,9 @@ extension Cell {
             cuts.insert(Int(word.start))
             cuts.insert(Int(word.end))
         }
-        let bounds = cuts.sorted()
+        // The core's offsets are within the text; one past it (a stale
+        // span) is dropped rather than crash the app.
+        let bounds = cuts.filter { $0 <= utf8.count }.sorted()
 
         var result = AttributedString()
         for (start, end) in zip(bounds, bounds.dropFirst()) where start < end {

@@ -9,8 +9,20 @@ import Observation
 final class MergeEditorViewModel {
     /// The inspector beside the editor.
     @ObservationIgnored let inspector: InspectorViewModel
-    /// The editor open under a conflict's lens row, while editing by hand.
-    private(set) var editBlock: EditBlockViewModel?
+    /// The editor under the conflict being edited by hand. Which conflict
+    /// is the model's (`MergeModel.editing`), the one source of truth;
+    /// the editor and its draft are kept here until the edit ends.
+    var editBlock: EditBlockViewModel? {
+        guard let editing = model.editing else { return nil }
+        if let block = editBlockCache, block.conflict == editing { return block }
+        let block = EditBlockViewModel(model: model, conflict: editing) { [weak self] in
+            self?.stopEditing()
+        }
+        editBlockCache = block
+        return block
+    }
+
+    @ObservationIgnored private var editBlockCache: EditBlockViewModel?
     /// Asking before writing a result that does not parse.
     var confirmingInvalidWrite = false
     /// Asking before writing over a file changed on disk since it was
@@ -158,7 +170,7 @@ final class MergeEditorViewModel {
 
     var canGoToPrevious: Bool { model.current > 0 }
     var canGoToNext: Bool { model.current + 1 < model.conflicts.count }
-    var isEditing: Bool { editBlock != nil }
+    var isEditing: Bool { model.editing != nil }
     var canUndo: Bool { model.status.canUndo && !isEditing }
     var canRedo: Bool { model.status.canRedo && !isEditing }
 
@@ -250,9 +262,6 @@ final class MergeEditorViewModel {
         let conflict = conflict ?? model.current
         guard !isEditing, model.conflict(conflict) != nil else { return }
         model.startEditing(conflict)
-        editBlock = EditBlockViewModel(model: model, conflict: conflict) { [weak self] in
-            self?.stopEditing()
-        }
     }
 
     func undo() {
@@ -297,6 +306,6 @@ final class MergeEditorViewModel {
 
     private func stopEditing() {
         model.stopEditing()
-        editBlock = nil
+        editBlockCache = nil
     }
 }

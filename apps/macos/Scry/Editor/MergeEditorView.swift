@@ -51,7 +51,7 @@ struct MergeEditorView: View {
         .toolbar { toolbar }
         .background { hiddenShortcuts }
         .alert("The result does not parse", isPresented: $viewModel.confirmingInvalidWrite) {
-            Button("Write Anyway", role: .destructive, action: viewModel.writeAnyway)
+            Button("Write Anyway", role: .destructive, action: { viewModel.writeAnyway() })
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(viewModel.invalidWriteMessage)
@@ -120,14 +120,14 @@ struct MergeEditorView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
-            Button(action: viewModel.previous) {
+            Button(action: { viewModel.previous() }) {
                 Image(systemName: "chevron.up")
             }
             .keyboardShortcut(.upArrow, modifiers: [.option, .command])
             .help("Previous conflict (⌥⌘↑)")
             .disabled(!viewModel.canGoToPrevious)
 
-            Button(action: viewModel.next) {
+            Button(action: { viewModel.next() }) {
                 Image(systemName: "chevron.down")
             }
             .keyboardShortcut(.downArrow, modifiers: [.option, .command])
@@ -156,7 +156,7 @@ struct MergeEditorView: View {
                     }
                 }
                 .help("Take ours (⌥⌘1)")
-                Button(action: viewModel.takeBoth) {
+                Button(action: { viewModel.takeBoth() }) {
                     HStack(spacing: 5) {
                         HStack(spacing: 2) {
                             SideShape.ours
@@ -185,7 +185,7 @@ struct MergeEditorView: View {
         }
 
         ToolbarItem(placement: .primaryAction) {
-            Button(action: viewModel.markResolved) {
+            Button(action: { viewModel.markResolved() }) {
                 HStack(spacing: 4) {
                     Image(systemName: "checkmark")
                     Text("Mark as Resolved")
@@ -215,7 +215,7 @@ struct MergeEditorView: View {
                 .keyboardShortcut("1", modifiers: [.option, .command])
             Button("Take theirs") { viewModel.take("theirs") }
                 .keyboardShortcut("2", modifiers: [.option, .command])
-            Button("Take both", action: viewModel.takeBoth)
+            Button("Take both", action: { viewModel.takeBoth() })
                 .keyboardShortcut("3", modifiers: [.option, .command])
             Button("Take base") { viewModel.take("base") }
                 .keyboardShortcut("0", modifiers: [.option, .command])
@@ -226,10 +226,10 @@ struct MergeEditorView: View {
             Button("Edit by hand") { viewModel.startEditing() }
                 .keyboardShortcut(.return, modifiers: [])
                 .disabled(viewModel.isEditing)
-            Button("Undo", action: viewModel.undo)
+            Button("Undo", action: { viewModel.undo() })
                 .keyboardShortcut("z", modifiers: .command)
                 .disabled(!viewModel.canUndo)
-            Button("Redo", action: viewModel.redo)
+            Button("Redo", action: { viewModel.redo() })
                 .keyboardShortcut("z", modifiers: [.shift, .command])
                 .disabled(!viewModel.canRedo)
         }

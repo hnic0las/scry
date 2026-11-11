@@ -119,6 +119,24 @@ struct MergeEditorViewModelTests {
         #expect(editor.chosen(1) == "ours")
     }
 
+    /// The edit block follows the model's conflict being edited, the one
+    /// source of truth, and keeps its draft while the edit lasts.
+    @Test func editBlockFollowsTheModel() throws {
+        let editor = try ConflictFile().editor()
+        #expect(editor.editBlock == nil)
+
+        editor.startEditing(1)
+        editor.editBlock?.draft = "let c = 9\n"
+        #expect(editor.editBlock?.conflict == 1)
+        #expect(editor.editBlock?.draft == "let c = 9\n")
+        #expect(editor.inspector.canEditByHand == false)
+
+        editor.editBlock?.cancel()
+        #expect(editor.editBlock == nil)
+        #expect(!editor.isEditing)
+        #expect(editor.inspector.canEditByHand)
+    }
+
     /// Cancelling an edit closes the editor and leaves the resolution as
     /// it was.
     @Test func cancellingAnEditKeepsTheResolution() throws {
