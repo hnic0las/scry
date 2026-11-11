@@ -11,6 +11,8 @@ protocol OverviewSource {
     func binary(path: String) throws -> BinaryInfo
     func project(path: String) throws -> ProjectInfo
     func catalog(path: String) throws -> CatalogInfo
+    func packages(path: String) throws -> PackagesInfo
+    func lockfile(path: String) throws -> LockfileInfo
 }
 
 extension RepositoryOverview: OverviewSource {}

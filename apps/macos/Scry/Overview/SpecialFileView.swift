@@ -32,23 +32,23 @@ struct SpecialFileView: View {
         switch viewModel.kind {
         case .deletedOnOneSide:
             VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                ChoiceCard(
-                    symbol: "doc.badge.plus",
-                    title: "Keep the file",
-                    detail: "As the side that changed it left it.",
-                    color: Theme.States.resolved
-                ) { viewModel.keepFile() }
-                ChoiceCard(
-                    symbol: "trash",
-                    title: "Delete the file",
-                    detail: "As the side that deleted it wanted.",
-                    color: Theme.Severity.error
-                ) { viewModel.deleteFile() }
-            }
-            if !viewModel.changeLines.isEmpty {
-                ChangesList(title: viewModel.changesTitle, lines: viewModel.changeLines)
-            }
+                HStack(spacing: 12) {
+                    ChoiceCard(
+                        symbol: "doc.badge.plus",
+                        title: "Keep the file",
+                        detail: "As the side that changed it left it.",
+                        color: Theme.States.resolved
+                    ) { viewModel.keepFile() }
+                    ChoiceCard(
+                        symbol: "trash",
+                        title: "Delete the file",
+                        detail: "As the side that deleted it wanted.",
+                        color: Theme.Severity.error
+                    ) { viewModel.deleteFile() }
+                }
+                if !viewModel.changeLines.isEmpty {
+                    ChangesList(title: viewModel.changesTitle, lines: viewModel.changeLines)
+                }
             }
         case .binary:
             HStack(alignment: .top, spacing: 12) {
@@ -78,24 +78,63 @@ struct SpecialFileView: View {
                 }
             }
         case .stringCatalog:
-            VStack(alignment: .leading, spacing: 10) {
-                if !viewModel.catalogRows.isEmpty {
-                    HStack {
-                        Text("Take for every value:")
-                            .font(Metrics.callout)
-                            .foregroundStyle(Theme.Surfaces.textSecondary)
-                        Button("Yours") { viewModel.chooseAll(.ours) }
-                        Button("Theirs") { viewModel.chooseAll(.theirs) }
-                    }
-                    .controlSize(.small)
+            choices(viewModel.catalogRows, every: "value")
+        case .packageResolved:
+            VStack(alignment: .leading, spacing: 12) {
+                if let note = viewModel.originHashNote {
+                    NoteBanner(text: note, symbol: "info.circle.fill", color: Theme.Interaction.accent)
                 }
-                ForEach(viewModel.catalogRows) { row in
-                    CatalogConflictRow(
-                        row: row,
-                        ours: viewModel.oursLabel,
-                        theirs: viewModel.theirsLabel
-                    ) { version in viewModel.choose(version, for: row.id) }
+                if !viewModel.pinRows.isEmpty {
+                    PinChangesList(rows: viewModel.pinRows, ours: viewModel.oursLabel, theirs: viewModel.theirsLabel)
                 }
+                choices(viewModel.packageRows, every: "package")
+            }
+        case .lockfile:
+            VStack(alignment: .leading, spacing: 12) {
+                if let warning = viewModel.manifestWarning {
+                    NoteBanner(text: warning, symbol: "exclamationmark.triangle.fill", color: Theme.Severity.warning)
+                }
+                HStack(spacing: 12) {
+                    ChoiceCard(
+                        symbol: viewModel.taken == .ours ? "checkmark.circle.fill" : "arrow.down.doc",
+                        title: "Take Yours",
+                        detail: viewModel.oursLabel,
+                        color: Theme.Sides.ours
+                    ) { viewModel.takeLockfile(.ours) }
+                    ChoiceCard(
+                        symbol: viewModel.taken == .theirs ? "checkmark.circle.fill" : "arrow.down.doc",
+                        title: "Take Theirs",
+                        detail: viewModel.theirsLabel,
+                        color: Theme.Sides.theirs
+                    ) { viewModel.takeLockfile(.theirs) }
+                }
+                CommandBox(command: viewModel.command, highlighted: viewModel.taken != nil)
+                if !viewModel.lockfileRows.isEmpty {
+                    PackageTable(rows: viewModel.lockfileRows, ours: viewModel.oursLabel, theirs: viewModel.theirsLabel)
+                }
+            }
+        }
+    }
+
+    /// Values both sides changed, one pick each, with a pick for all.
+    private func choices(_ rows: [SpecialFileViewModel.CatalogRow], every noun: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !rows.isEmpty {
+                HStack {
+                    Text("Take for every \(noun):")
+                        .font(Metrics.callout)
+                        .foregroundStyle(Theme.Surfaces.textSecondary)
+                    Button("Yours") { viewModel.chooseAll(.ours) }
+                    Button("Theirs") { viewModel.chooseAll(.theirs) }
+                }
+                .controlSize(.small)
+            }
+            ForEach(rows) { row in
+                CatalogConflictRow(
+                    row: row,
+                    ours: viewModel.oursLabel,
+                    theirs: viewModel.theirsLabel
+                ) { version in viewModel.choose(version, for: row.id) }
             }
         }
     }
@@ -120,11 +159,20 @@ struct SpecialFileView: View {
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(!viewModel.canKeepBoth)
-            case .stringCatalog:
-                Button("Write Catalog") { viewModel.writeCatalog() }
+            case .stringCatalog, .packageResolved:
+                Button(viewModel.writeTitle) { viewModel.writeChoices() }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!viewModel.canWriteCatalog)
+                    .disabled(!viewModel.canWriteChoices)
+            case .lockfile:
+                if viewModel.canMergeLines && viewModel.taken == nil {
+                    Button("Keep Both Sides' Lines") { viewModel.mergeLines() }
+                }
+                if viewModel.taken != nil {
+                    Button("Done") { viewModel.finish() }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                }
             case .deletedOnOneSide, .binary:
                 EmptyView()
             }
@@ -143,6 +191,8 @@ extension SpecialKind {
         case .binary: "photo.on.rectangle"
         case .projectFile: "hammer"
         case .stringCatalog: "character.bubble"
+        case .packageResolved: "shippingbox"
+        case .lockfile: "lock.doc"
         }
     }
 
@@ -153,6 +203,8 @@ extension SpecialKind {
         case .binary: "Take one version"
         case .projectFile: "Keep both sides' additions"
         case .stringCatalog: "Merge it key by key"
+        case .packageResolved: "Merge it package by package"
+        case .lockfile: "Take a side, then write it again"
         }
     }
 }
@@ -441,6 +493,138 @@ struct CatalogConflictRow: View {
     }
 }
 
+/// A note above a sheet's content.
+struct NoteBanner: View {
+    let text: String
+    let symbol: String
+    let color: Color
+
+    var body: some View {
+        Label(text, systemImage: symbol)
+            .font(Metrics.callout)
+            .foregroundStyle(color)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: Metrics.cardCornerRadius).fill(color.opacity(0.10)))
+    }
+}
+
+/// The command that writes a lockfile again, to copy into a terminal.
+struct CommandBox: View {
+    let command: String
+    /// The side is taken: the command is the next step.
+    let highlighted: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "terminal")
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+            Text(command)
+                .font(Metrics.code)
+                .textSelection(.enabled)
+            Spacer()
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(command, forType: .string)
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+            .controlSize(.small)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: Metrics.cardCornerRadius).fill(Theme.Surfaces.pane))
+        .overlay(
+            RoundedRectangle(cornerRadius: Metrics.cardCornerRadius)
+                .strokeBorder(highlighted ? Theme.Interaction.accent : Theme.Surfaces.hairline, lineWidth: highlighted ? 2 : 1)
+        )
+    }
+}
+
+/// The packages each side changed in a lockfile, by version.
+struct PackageTable: View {
+    let rows: [SpecialFileViewModel.PackageRow]
+    let ours: String
+    let theirs: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("What each side changed")
+                .font(Metrics.captionBold)
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 4) {
+                GridRow {
+                    Text("Package")
+                    Text("Base")
+                    Text(ours).foregroundStyle(Theme.Sides.ours).lineLimit(1)
+                    Text(theirs).foregroundStyle(Theme.Sides.theirs).lineLimit(1)
+                }
+                .font(Metrics.caption)
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+                Divider()
+                ForEach(rows) { row in
+                    GridRow {
+                        HStack(spacing: 4) {
+                            Text(row.name)
+                            if row.bothChanged {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(Theme.Severity.warning)
+                                    .help("Both sides moved it: the side you take keeps its version, unless the merged manifest rules it out")
+                            }
+                        }
+                        Text(row.base).foregroundStyle(Theme.Surfaces.textTertiary)
+                        version(row.ours, changed: row.ours != row.base, color: Theme.Sides.ours)
+                        version(row.theirs, changed: row.theirs != row.base, color: Theme.Sides.theirs)
+                    }
+                    .font(Metrics.code)
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: Metrics.cardCornerRadius).fill(Theme.Surfaces.chrome))
+        }
+    }
+
+    private func version(_ text: String, changed: Bool, color: Color) -> some View {
+        Text(text)
+            .fontWeight(changed ? .semibold : .regular)
+            .foregroundStyle(changed ? color : Theme.Surfaces.textTertiary)
+    }
+}
+
+/// The Swift packages one side alone moved, merged by themselves.
+struct PinChangesList: View {
+    let rows: [SpecialFileViewModel.PinRow]
+    let ours: String
+    let theirs: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Merged by themselves")
+                .font(Metrics.captionBold)
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(rows) { row in
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(Theme.States.resolved)
+                        Text(row.identity).font(Metrics.code.weight(.semibold))
+                        Text(row.change).font(Metrics.code)
+                        Spacer()
+                        Text(row.side == .ours ? ours : theirs)
+                            .font(Metrics.caption)
+                            .foregroundStyle(row.side == .ours ? Theme.Sides.ours : Theme.Sides.theirs)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: Metrics.cardCornerRadius).fill(Theme.Surfaces.chrome))
+        }
+    }
+}
+
 /// Sample answers for previews, without a repository.
 struct SpecialSamples: OverviewSource {
     func snapshot() throws -> OverviewSnapshot {
@@ -503,6 +687,36 @@ struct SpecialSamples: OverviewSource {
         ])
     }
 
+    func packages(path: String) throws -> PackagesInfo {
+        PackagesInfo(
+            oursLabel: "feature/sync-v2 · current branch", theirsLabel: "main · being merged",
+            automatic: [
+                PinChangeInfo(identity: "kingfisher", base: "7.9.0", ours: "7.9.0", theirs: "7.10.0"),
+                PinChangeInfo(identity: "lottie-ios", base: nil, ours: "4.4.1", theirs: nil),
+                PinChangeInfo(identity: "swift-collections", base: "1.0.6", ours: "1.0.6", theirs: nil),
+            ],
+            conflicts: [
+                PinChangeInfo(identity: "alamofire", base: "5.8.0", ours: "5.8.1", theirs: "5.9.0"),
+                PinChangeInfo(identity: "swift-snapshot-testing", base: "1.15.0", ours: "main @ 3f2a9c1", theirs: "1.16.0"),
+            ],
+            originHashStale: true
+        )
+    }
+
+    func lockfile(path: String) throws -> LockfileInfo {
+        LockfileInfo(
+            oursLabel: "feature/sync-v2 · current branch", theirsLabel: "main · being merged",
+            tool: "CocoaPods", manifest: "ios/Podfile", manifestConflicted: true, command: "cd ios && pod install",
+            mergesByLines: false,
+            changes: [
+                PackageChangeInfo(name: "Alamofire", base: "5.8.0", ours: "5.8.1", theirs: "5.9.0", bothChanged: true),
+                PackageChangeInfo(name: "Firebase/Analytics", base: "10.20.0", ours: "10.20.0", theirs: "10.22.0", bothChanged: false),
+                PackageChangeInfo(name: "Lottie", base: nil, ours: "4.4.1", theirs: nil, bothChanged: false),
+                PackageChangeInfo(name: "SVProgressHUD", base: "2.3.1", ours: "2.3.1", theirs: nil, bothChanged: false),
+            ]
+        )
+    }
+
     static func file(_ path: String, _ kind: SpecialKind) -> OverviewFile {
         OverviewFile(
             path: path,
@@ -512,7 +726,7 @@ struct SpecialSamples: OverviewSource {
             kind: "",
             state: .unresolved,
             conflicts: nil,
-            openable: kind == .projectFile || kind == .stringCatalog,
+            openable: kind != .deletedOnOneSide && kind != .binary,
             special: kind
         )
     }
@@ -540,4 +754,21 @@ struct SpecialSamples: OverviewSource {
     let viewModel = SpecialSamples.viewModel("ios/Resources/Localizable.xcstrings", .stringCatalog)
     viewModel.choose(.theirs, for: 0)
     return SpecialFileView(viewModel: viewModel) {}
+}
+
+#Preview("Package.resolved") {
+    let viewModel = SpecialSamples.viewModel("ios/Atlas.xcworkspace/xcshareddata/swiftpm/Package.resolved", .packageResolved)
+    viewModel.choose(.theirs, for: 0)
+    return SpecialFileView(viewModel: viewModel) {}
+}
+
+#Preview("Lockfile") {
+    SpecialFileView(viewModel: SpecialSamples.viewModel("ios/Podfile.lock", .lockfile)) {}
+}
+
+#Preview("Lockfile taken") {
+    let viewModel = SpecialSamples.viewModel("ios/Podfile.lock", .lockfile)
+    viewModel.takeLockfile(.theirs)
+    return SpecialFileView(viewModel: viewModel) {}
+        .preferredColorScheme(.dark)
 }

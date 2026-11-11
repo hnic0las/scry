@@ -610,6 +610,8 @@ pub enum SpecialKind {
     Binary,
     ProjectFile,
     StringCatalog,
+    PackageResolved,
+    Lockfile,
 }
 
 /// One of the two versions of a conflicted file.
@@ -696,6 +698,56 @@ pub struct CatalogInfo {
     /// Values taken from the one side that changed them.
     pub automatic: u32,
     pub conflicts: Vec<CatalogConflictInfo>,
+}
+
+/// A Swift package one side or both changed: "5.8.1", "main @ 3f2a9c1".
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PinChangeInfo {
+    pub identity: String,
+    pub base: Option<String>,
+    pub ours: Option<String>,
+    pub theirs: Option<String>,
+}
+
+/// A `Package.resolved` merged package by package.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PackagesInfo {
+    pub ours_label: String,
+    pub theirs_label: String,
+    /// Pins taken from the one side that changed them.
+    pub automatic: Vec<PinChangeInfo>,
+    /// Pins both sides changed differently: one pick each.
+    pub conflicts: Vec<PinChangeInfo>,
+    /// Both sides changed `originHash`; Xcode computes it again.
+    pub origin_hash_stale: bool,
+}
+
+/// A package a lockfile's sides changed.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PackageChangeInfo {
+    pub name: String,
+    pub base: Option<String>,
+    pub ours: Option<String>,
+    pub theirs: Option<String>,
+    /// Both sides moved it, differently.
+    pub both_changed: bool,
+}
+
+/// A lockfile's two sides, and how to write it again.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct LockfileInfo {
+    pub ours_label: String,
+    pub theirs_label: String,
+    /// "npm", "CocoaPods"…
+    pub tool: String,
+    /// "ios/Podfile".
+    pub manifest: String,
+    pub manifest_conflicted: bool,
+    /// "cd ios && pod install".
+    pub command: String,
+    /// Both sides' lines can be kept (`go.sum`).
+    pub merges_by_lines: bool,
+    pub changes: Vec<PackageChangeInfo>,
 }
 
 /// The operation in progress and its files.
@@ -806,6 +858,19 @@ pub enum OverviewAction {
         remove_missing: bool,
     },
     ResolveCatalog {
+        path: String,
+        picks: Vec<FileVersion>,
+    },
+    /// Writes one side of a lockfile, unstaged.
+    TakeLockfile {
+        path: String,
+        version: FileVersion,
+    },
+    /// Keeps both sides' lines of a `go.sum`.
+    MergeLockfileLines {
+        path: String,
+    },
+    ResolvePackages {
         path: String,
         picks: Vec<FileVersion>,
     },
@@ -920,6 +985,8 @@ impl RepositoryOverview {
                         overview::Special::Binary => SpecialKind::Binary,
                         overview::Special::ProjectFile => SpecialKind::ProjectFile,
                         overview::Special::StringCatalog => SpecialKind::StringCatalog,
+                        overview::Special::PackageResolved => SpecialKind::PackageResolved,
+                        overview::Special::Lockfile => SpecialKind::Lockfile,
                     }),
                 })
                 .collect(),
@@ -950,6 +1017,21 @@ impl RepositoryOverview {
             },
             OverviewAction::ResolveCatalog { path, picks } => {
                 overview::OverviewCommand::ResolveCatalog {
+                    path,
+                    picks: picks.into_iter().map(core_version).collect(),
+                }
+            }
+            OverviewAction::TakeLockfile { path, version } => {
+                overview::OverviewCommand::TakeLockfile {
+                    path,
+                    version: core_version(version),
+                }
+            }
+            OverviewAction::MergeLockfileLines { path } => {
+                overview::OverviewCommand::MergeLockfileLines { path }
+            }
+            OverviewAction::ResolvePackages { path, picks } => {
+                overview::OverviewCommand::ResolvePackages {
                     path,
                     picks: picks.into_iter().map(core_version).collect(),
                 }
@@ -1031,6 +1113,59 @@ impl RepositoryOverview {
                     base: conflict.base,
                     ours: conflict.ours,
                     theirs: conflict.theirs,
+                })
+                .collect(),
+        })
+    }
+}
+
+#[uniffi::export]
+impl RepositoryOverview {
+    /// A `Package.resolved` merged package by package.
+    pub fn packages(&self, path: String) -> Result<PackagesInfo, ScryError> {
+        let merge = self.lock().packages(&self.git, &path).map_err(failed)?;
+        let (ours_label, theirs_label) = overview::side_labels(&self.git).map_err(failed)?;
+        let pins = |changes: Vec<scry_core::resolved::PinChange>| {
+            changes
+                .into_iter()
+                .map(|change| PinChangeInfo {
+                    identity: change.identity,
+                    base: change.base,
+                    ours: change.ours,
+                    theirs: change.theirs,
+                })
+                .collect()
+        };
+        Ok(PackagesInfo {
+            ours_label,
+            theirs_label,
+            origin_hash_stale: merge.origin_hash_stale,
+            automatic: pins(merge.automatic),
+            conflicts: pins(merge.conflicts),
+        })
+    }
+
+    /// What each side changed in a lockfile, and how to write it again.
+    pub fn lockfile(&self, path: String) -> Result<LockfileInfo, ScryError> {
+        let review = self.lock().lockfile(&self.git, &path).map_err(failed)?;
+        let (ours_label, theirs_label) = overview::side_labels(&self.git).map_err(failed)?;
+        Ok(LockfileInfo {
+            ours_label,
+            theirs_label,
+            tool: review.tool,
+            manifest: review.manifest,
+            manifest_conflicted: review.manifest_conflicted,
+            command: review.command,
+            merges_by_lines: review.merges_by_lines,
+            changes: review
+                .changes
+                .into_iter()
+                .map(|change| PackageChangeInfo {
+                    both_changed: change.both_changed(),
+                    name: change.name,
+                    base: change.base,
+                    ours: change.ours,
+                    theirs: change.theirs,
                 })
                 .collect(),
         })

@@ -3,9 +3,10 @@ import Observation
 
 /// S4: settles a conflicted file the merge editor cannot, or one a view
 /// settles better: a file deleted on one side (keep or delete), a binary
-/// file (take a version), an Xcode project (keep both sides' additions)
-/// or a string catalog (merged key by key, a choice per value both sides
-/// changed).
+/// file (take a version), an Xcode project (keep both sides' additions),
+/// a string catalog or a `Package.resolved` (merged key by key or package
+/// by package, a choice per value both sides changed), or a lockfile
+/// (take a side, then let the package manager write it again).
 @MainActor
 @Observable
 final class SpecialFileViewModel {
@@ -53,7 +54,28 @@ final class SpecialFileViewModel {
         let reason: String?
     }
 
-    /// A string catalog value both sides changed.
+    /// A Swift package one side alone moved: "kingfisher 7.9.0 → 7.10.0".
+    struct PinRow: Identifiable, Equatable {
+        let id: Int
+        let identity: String
+        let change: String
+        /// The side it was taken from.
+        let side: FileVersion
+    }
+
+    /// A package of a lockfile: its version in each.
+    struct PackageRow: Identifiable, Equatable {
+        let id: Int
+        let name: String
+        let base: String
+        let ours: String
+        let theirs: String
+        /// Both sides moved it, differently: the side taken keeps its
+        /// version, unless the merged manifest rules it out.
+        let bothChanged: Bool
+    }
+
+    /// A string catalog value, or a Swift package, both sides changed.
     struct CatalogRow: Identifiable, Equatable {
         let id: Int
         /// "sync.done", or the path when it is not a string.
@@ -73,6 +95,10 @@ final class SpecialFileViewModel {
     private(set) var binary: BinaryInfo?
     private(set) var project: ProjectInfo?
     private(set) var catalog: CatalogInfo?
+    private(set) var packages: PackagesInfo?
+    private(set) var lockfile: LockfileInfo?
+    /// The side of the lockfile written, waiting for the command.
+    private(set) var taken: FileVersion?
     private(set) var picks: [FileVersion?] = []
     /// Also remove the list entries of objects no longer defined, which
     /// git kept without a conflict.
@@ -109,6 +135,8 @@ final class SpecialFileViewModel {
         case .binary: "Binary file: no text to merge"
         case .projectFile: "Xcode project file"
         case .stringCatalog: "String catalog"
+        case .packageResolved: "Swift package pins"
+        case .lockfile: lockfile.map { "\($0.tool) lockfile, written by \($0.tool) from \($0.manifest)" } ?? "Lockfile"
         }
     }
 
@@ -139,6 +167,22 @@ final class SpecialFileViewModel {
             return left == 0
                 ? "\(automatic); nothing left to choose."
                 : "\(automatic). \(left) \(left == 1 ? "value was" : "values were") changed on both sides: choose each one."
+        case .packageResolved:
+            guard let packages else { return "" }
+            let count = packages.automatic.count
+            let automatic = count == 1 ? "1 package taken from the side that moved it" : "\(count) packages taken from the side that moved them"
+            let left = packages.conflicts.count
+            return left == 0
+                ? "\(automatic); nothing left to choose."
+                : "\(automatic). \(left) \(left == 1 ? "package was" : "packages were") moved on both sides: choose each version."
+        case .lockfile:
+            guard let lockfile else { return "" }
+            if let taken {
+                let side = taken == .ours ? lockfile.oursLabel : lockfile.theirsLabel
+                return "The lockfile of \(side) is written. Run the command below, so \(lockfile.tool) adds the other side's changes from \(lockfile.manifest), then stage it from the overview."
+            }
+            let lines = lockfile.mergesByLines ? ", or keep both sides' lines" : ""
+            return "\(lockfile.tool) writes this file: don't merge it by hand. Take one side\(lines), then run the command below to bring in the other side's changes."
         }
     }
 
@@ -235,14 +279,89 @@ final class SpecialFileViewModel {
         }
     }
 
-    var oursLabel: String { project?.oursLabel ?? catalog?.oursLabel ?? binary?.ours.label ?? "Yours" }
-    var theirsLabel: String { project?.theirsLabel ?? catalog?.theirsLabel ?? binary?.theirs.label ?? "Theirs" }
+    // MARK: Package.resolved
 
-    /// Every value both sides changed has a pick.
-    var canWriteCatalog: Bool { catalog != nil && picks.allSatisfy { $0 != nil } }
+    /// The packages one side alone moved, taken from it.
+    var pinRows: [PinRow] {
+        guard let packages else { return [] }
+        return packages.automatic.enumerated().map { index, pin in
+            let side: FileVersion = pin.ours != pin.base ? .ours : .theirs
+            let now = (side == .ours ? pin.ours : pin.theirs) ?? "removed"
+            let change = pin.base.map { "\($0) → \(now)" } ?? "added \(now)"
+            return PinRow(id: index, identity: pin.identity, change: change, side: side)
+        }
+    }
 
-    /// A project file or catalog can also go to the merge editor.
-    var canOpenInEditor: Bool { file.openable }
+    /// The packages both sides moved, one pick each.
+    var packageRows: [CatalogRow] {
+        guard let packages else { return [] }
+        return packages.conflicts.enumerated().map { index, pin in
+            CatalogRow(
+                id: index,
+                key: pin.identity,
+                detail: "",
+                base: pin.base ?? "—",
+                ours: pin.ours ?? "(removed)",
+                theirs: pin.theirs ?? "(removed)",
+                pick: picks.indices.contains(index) ? picks[index] : nil
+            )
+        }
+    }
+
+    var originHashNote: String? {
+        packages?.originHashStale == true
+            ? "Both sides changed originHash, the fingerprint of the package dependencies: yours is kept, and Xcode updates it at the next package resolution."
+            : nil
+    }
+
+    // MARK: Lockfile
+
+    var lockfileRows: [PackageRow] {
+        guard let lockfile else { return [] }
+        return lockfile.changes.enumerated().map { index, change in
+            PackageRow(
+                id: index,
+                name: change.name,
+                base: change.base ?? "—",
+                ours: change.ours ?? "—",
+                theirs: change.theirs ?? "—",
+                bothChanged: change.bothChanged
+            )
+        }
+    }
+
+    /// The manifest has conflicts too: the command writes the lockfile
+    /// from it, so it comes first.
+    var manifestWarning: String? {
+        guard let lockfile, lockfile.manifestConflicted else { return nil }
+        return "\(lockfile.manifest) has conflicts too: resolve it first, since \(lockfile.tool) writes the lockfile from it."
+    }
+
+    /// "cd ios && pod install".
+    var command: String { lockfile?.command ?? "" }
+
+    var canMergeLines: Bool { lockfile?.mergesByLines ?? false }
+
+    // MARK: Labels
+
+    var oursLabel: String {
+        project?.oursLabel ?? catalog?.oursLabel ?? packages?.oursLabel ?? lockfile?.oursLabel ?? binary?.ours.label ?? "Yours"
+    }
+
+    var theirsLabel: String {
+        project?.theirsLabel ?? catalog?.theirsLabel ?? packages?.theirsLabel ?? lockfile?.theirsLabel ?? binary?.theirs.label ?? "Theirs"
+    }
+
+    /// A catalog or `Package.resolved` with a pick for every value both
+    /// sides changed.
+    var canWriteChoices: Bool { (catalog != nil || packages != nil) && picks.allSatisfy { $0 != nil } }
+
+    /// "Write Catalog" or "Write Package.resolved".
+    var writeTitle: String { kind == .packageResolved ? "Write Package.resolved" : "Write Catalog" }
+
+    /// A project file, catalog or `Package.resolved` can also go to the
+    /// merge editor; a lockfile is not edited by hand.
+    var canOpenInEditor: Bool { file.openable && kind != .lockfile }
 
     // MARK: Intents
 
@@ -279,9 +398,33 @@ final class SpecialFileViewModel {
         picks = picks.map { _ in version }
     }
 
-    func writeCatalog() {
-        guard canWriteCatalog else { return }
-        run(.resolveCatalog(path: file.path, picks: picks.compactMap { $0 }))
+    /// Writes the catalog or `Package.resolved` with the picks.
+    func writeChoices() {
+        guard canWriteChoices else { return }
+        let chosen = picks.compactMap { $0 }
+        run(kind == .packageResolved
+            ? .resolvePackages(path: file.path, picks: chosen)
+            : .resolveCatalog(path: file.path, picks: chosen))
+    }
+
+    /// Writes one side of the lockfile, unstaged; the sheet stays open on
+    /// the command to run.
+    func takeLockfile(_ version: FileVersion) {
+        guard lockfile != nil else { return }
+        run(.takeLockfile(path: file.path, version: version)) { [weak self] in
+            self?.taken = version
+        }
+    }
+
+    /// Keeps both sides' lines (`go.sum`).
+    func mergeLines() {
+        guard canMergeLines else { return }
+        run(.mergeLockfileLines(path: file.path))
+    }
+
+    /// Closes the sheet once the lockfile is taken.
+    func finish() {
+        done()
     }
 
     func openEditor() {
@@ -301,6 +444,11 @@ final class SpecialFileViewModel {
                 let catalog = try source.catalog(path: file.path)
                 self.catalog = catalog
                 picks = Array(repeating: nil, count: catalog.conflicts.count)
+            case .packageResolved:
+                let packages = try source.packages(path: file.path)
+                self.packages = packages
+                picks = Array(repeating: nil, count: packages.conflicts.count)
+            case .lockfile: lockfile = try source.lockfile(path: file.path)
             }
         } catch {
             self.error = "\(error)"

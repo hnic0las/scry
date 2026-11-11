@@ -292,6 +292,8 @@ private struct PreviewOverview: OverviewSource {
     func binary(path: String) throws -> BinaryInfo { try SpecialSamples().binary(path: path) }
     func project(path: String) throws -> ProjectInfo { try SpecialSamples().project(path: path) }
     func catalog(path: String) throws -> CatalogInfo { try SpecialSamples().catalog(path: path) }
+    func packages(path: String) throws -> PackagesInfo { try SpecialSamples().packages(path: path) }
+    func lockfile(path: String) throws -> LockfileInfo { try SpecialSamples().lockfile(path: path) }
 
     /// The same files, in a merge of main into the branch.
     struct Merge: OverviewSource {
@@ -332,6 +334,8 @@ private struct PreviewOverview: OverviewSource {
         func binary(path: String) throws -> BinaryInfo { try SpecialSamples().binary(path: path) }
         func project(path: String) throws -> ProjectInfo { try SpecialSamples().project(path: path) }
         func catalog(path: String) throws -> CatalogInfo { try SpecialSamples().catalog(path: path) }
+        func packages(path: String) throws -> PackagesInfo { try SpecialSamples().packages(path: path) }
+        func lockfile(path: String) throws -> LockfileInfo { try SpecialSamples().lockfile(path: path) }
     }
 
     static func file(_ path: String, _ kind: String, _ state: ConflictState, _ conflicts: UInt32?) -> OverviewFile {

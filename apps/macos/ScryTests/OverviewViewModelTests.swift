@@ -64,6 +64,26 @@ final class FakeOverview: OverviewSource {
         ])
     }
 
+    func packages(path: String) throws -> PackagesInfo {
+        PackagesInfo(
+            oursLabel: "main", theirsLabel: "feature",
+            automatic: [
+                PinChangeInfo(identity: "kingfisher", base: "7.9.0", ours: "7.9.0", theirs: "7.10.0"),
+                PinChangeInfo(identity: "lottie-ios", base: nil, ours: "4.4.1", theirs: nil),
+            ],
+            conflicts: [PinChangeInfo(identity: "alamofire", base: "5.8.0", ours: "5.8.1", theirs: "5.9.0")],
+            originHashStale: true
+        )
+    }
+
+    var lockfileInfo = LockfileInfo(
+        oursLabel: "main", theirsLabel: "feature", tool: "npm", manifest: "web/package.json", manifestConflicted: false,
+        command: "cd web && npm install", mergesByLines: false,
+        changes: [PackageChangeInfo(name: "lodash", base: "4.17.20", ours: "4.17.21", theirs: nil, bothChanged: false)]
+    )
+
+    func lockfile(path: String) throws -> LockfileInfo { lockfileInfo }
+
     func apply(action: OverviewAction) throws {
         actions.append(action)
         switch action {
@@ -76,7 +96,8 @@ final class FakeOverview: OverviewSource {
             files = []
         case .keepFile(let path), .deleteFile(let path), .takeVersion(let path, _):
             files = files.map { $0.path == path ? file(path, .staged) : $0 }
-        case .keepBothAdditions(let path, _), .resolveCatalog(let path, _):
+        case .keepBothAdditions(let path, _), .resolveCatalog(let path, _), .resolvePackages(let path, _),
+             .takeLockfile(let path, _), .mergeLockfileLines(let path):
             files = files.map { $0.path == path ? file(path, .resolved) : $0 }
         }
     }

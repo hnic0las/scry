@@ -15,7 +15,8 @@
 #   4. fixup   fixup! Show the user's full name (applies cleanly)
 #   5. pick    Upgrade dependencies and CI     Ruby, JSON, TOML, YAML, Bash,
 #                                              Objective-C deleted on one side,
-#                                              a binary icon
+#                                              a binary icon, lockfiles and
+#                                              Swift package pins
 #   6. drop    WIP debug logging
 #   7. pick    Translate the sync messages     String catalog, Go
 #
@@ -52,6 +53,223 @@ icon() {
 
 commit() {
   git add -A && git commit --quiet -m "$1"
+}
+
+# locks <base|feature|main>: each side's lockfiles and Swift package pins,
+# written as their tools write them. The cases they show:
+#
+# - ios/Package.resolved: a package added (lottie-spm) and one bumped
+#   (swift-log) on the branch, one removed on main (swift-algorithms):
+#   merged by themselves; swift-collections bumped on both sides, and
+#   swift-snapshot-testing pinned to a branch on one side and a release on
+#   the other: one choice each; originHash changed on both sides.
+# - ios/Podfile.lock: both sides upgrade Alamofire and add a pod, and the
+#   Podfile itself conflicts: resolve it first.
+# - core/Cargo.lock: two versions of syn held at once, tokio-macros added
+#   on main, and Cargo.toml conflicting too.
+# - web/package-lock.json: package.json merges cleanly (React on the
+#   branch, Vite and TypeScript on main), but its lockfile does not, and
+#   a transitive package (csstype) moved on both sides.
+# - backend/server/go.sum: checksums, which keep both sides' lines.
+# - ios/Gemfile.lock (fastlane and CocoaPods through Bundler): the Gemfile
+#   merges cleanly (fastlane on the branch, cocoapods on main), the lock
+#   does not: both sides ran a different Bundler (BUNDLED WITH) on a
+#   different Mac (PLATFORMS), and a shared dependency moved on both.
+# - backend/uv.lock (the Python API, with uv): pillow added on the branch,
+#   FastAPI and Starlette bumped on main, pydantic and pydantic-core moved
+#   on both sides; pyproject.toml merges cleanly.
+locks() {
+python3 - "$1" <<'EOF'
+import base64, hashlib, json, os, sys
+
+side = sys.argv[1]
+
+
+def put(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as file:
+        file.write(text)
+
+
+def digest(*parts):
+    return hashlib.sha256("/".join(parts).encode()).digest()
+
+
+def hexdigest(*parts, length=40):
+    return digest(*parts).hex()[:length]
+
+
+# Swift packages: identity → (URL, version or "branch:<name>").
+pins = {
+    "base": {
+        "swift-algorithms": ("https://github.com/apple/swift-algorithms.git", "1.1.0"),
+        "swift-collections": ("https://github.com/apple/swift-collections.git", "1.0.6"),
+        "swift-log": ("https://github.com/apple/swift-log.git", "1.5.3"),
+        "swift-snapshot-testing": ("https://github.com/pointfreeco/swift-snapshot-testing", "1.15.0"),
+    },
+    "feature": {
+        "lottie-spm": ("https://github.com/airbnb/lottie-spm.git", "4.4.1"),
+        "swift-algorithms": ("https://github.com/apple/swift-algorithms.git", "1.1.0"),
+        "swift-collections": ("https://github.com/apple/swift-collections.git", "1.1.0"),
+        "swift-log": ("https://github.com/apple/swift-log.git", "1.5.4"),
+        "swift-snapshot-testing": ("https://github.com/pointfreeco/swift-snapshot-testing", "branch:main"),
+    },
+    "main": {
+        "swift-collections": ("https://github.com/apple/swift-collections.git", "1.0.7"),
+        "swift-log": ("https://github.com/apple/swift-log.git", "1.5.3"),
+        "swift-snapshot-testing": ("https://github.com/pointfreeco/swift-snapshot-testing", "1.16.0"),
+    },
+}[side]
+entries = []
+for identity in sorted(pins):
+    url, version = pins[identity]
+    revision = hexdigest(identity, version)
+    if version.startswith("branch:"):
+        state = {"branch": version[7:], "revision": revision}
+    else:
+        state = {"revision": revision, "version": version}
+    entries.append({"identity": identity, "kind": "remoteSourceControl", "location": url, "state": state})
+resolved = {"originHash": hexdigest("origin", side, length=64), "pins": entries, "version": 3}
+put("ios/Package.resolved", json.dumps(resolved, indent=2, separators=(",", " : ")) + "\n")
+
+# CocoaPods: pod → (version, requirement in the Podfile).
+pods = {
+    "base": {"Alamofire": ("5.8.0", "~> 5.8"), "KeychainAccess": ("4.2.2", "~> 4.2")},
+    "feature": {"Alamofire": ("5.9.0", "~> 5.9"), "KeychainAccess": ("4.2.2", "~> 4.2"), "Reachability": ("3.2", "~> 3.2")},
+    "main": {"Alamofire": ("5.8.1", "~> 5.8.1"), "KeychainAccess": ("4.2.2", "~> 4.2"), "Kingfisher": ("7.10.0", "~> 7.10")},
+}[side]
+names = sorted(pods)
+lock = "PODS:\n" + "".join(f"  - {name} ({pods[name][0]})\n" for name in names)
+lock += "\nDEPENDENCIES:\n" + "".join(f"  - {name} ({pods[name][1]})\n" for name in names)
+lock += "\nSPEC REPOS:\n  trunk:\n" + "".join(f"    - {name}\n" for name in names)
+lock += "\nSPEC CHECKSUMS:\n" + "".join(f"  {name}: {hexdigest(name, pods[name][0])}\n" for name in names)
+lock += f"\nPODFILE CHECKSUM: {hexdigest('Podfile', side)}\n"
+lock += "\nCOCOAPODS: " + {"base": "1.14.3", "feature": "1.15.2", "main": "1.16.2"}[side] + "\n"
+put("ios/Podfile.lock", lock)
+
+# Cargo: (name, version, dependencies), in Cargo's order.
+crates = {
+    "base": [("atlas-core", "0.4.0", ["serde", "tokio", "uniffi"]), ("serde", "1.0.190", ["serde_derive"]),
+             ("serde_derive", "1.0.190", ["syn 2.0.39"]), ("syn", "1.0.109", []), ("syn", "2.0.39", []),
+             ("tokio", "1.33.0", []), ("uniffi", "0.25.3", ["syn 1.0.109"])],
+    "feature": [("atlas-core", "0.5.0", ["serde", "tokio", "uniffi"]), ("serde", "1.0.197", ["serde_derive"]),
+                ("serde_derive", "1.0.197", ["syn 2.0.52"]), ("syn", "1.0.109", []), ("syn", "2.0.52", []),
+                ("tokio", "1.36.0", []), ("uniffi", "0.26.1", ["syn 1.0.109"])],
+    "main": [("atlas-core", "0.4.1", ["serde", "tokio", "uniffi"]), ("serde", "1.0.195", ["serde_derive"]),
+             ("serde_derive", "1.0.195", ["syn 2.0.48"]), ("syn", "1.0.109", []), ("syn", "2.0.48", []),
+             ("tokio", "1.35.1", ["tokio-macros"]), ("tokio-macros", "2.2.0", ["syn 2.0.48"]),
+             ("uniffi", "0.25.3", ["syn 1.0.109"])],
+}[side]
+cargo = "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 3\n"
+for name, version, dependencies in crates:
+    cargo += f'\n[[package]]\nname = "{name}"\nversion = "{version}"\n'
+    if name != "atlas-core":
+        cargo += 'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+        cargo += f'checksum = "{hexdigest(name, version, length=64)}"\n'
+    if dependencies:
+        cargo += "dependencies = [\n" + "".join(f' "{dependency}",\n' for dependency in dependencies) + "]\n"
+put("core/Cargo.lock", cargo)
+
+# npm: package.json changes on lines far apart, so it merges; its lockfile
+# does not.
+react = {"base": "18.2.0", "feature": "18.3.1", "main": "18.2.0"}[side]
+typescript, vite = {"base": ("5.3.3", "5.0.12"), "feature": ("5.3.3", "5.0.12"), "main": ("5.4.5", "5.2.11")}[side]
+manifest = {
+    "name": "atlas-web",
+    "private": True,
+    "dependencies": {"react": f"^{react}", "react-dom": f"^{react}"},
+    "scripts": {"build": "tsc && vite build", "dev": "vite", "preview": "vite preview"},
+    "devDependencies": {"typescript": f"^{typescript}", "vite": f"^{vite}"},
+}
+put("web/package.json", json.dumps(manifest, indent=2) + "\n")
+modules = {
+    "csstype": ({"base": "3.1.1", "feature": "3.1.3", "main": "3.1.2"}[side], True),
+    "js-tokens": ("4.0.0", False),
+    "loose-envify": ("1.4.0", False),
+    "react": (react, False),
+    "react-dom": (react, False),
+    "scheduler": ({"base": "0.23.0", "feature": "0.23.2", "main": "0.23.0"}[side], False),
+    "typescript": (typescript, True),
+    "vite": (vite, True),
+}
+if side == "main":
+    modules["vite/node_modules/esbuild"] = ("0.20.2", True)
+packages = {"": {"name": "atlas-web", "dependencies": manifest["dependencies"], "devDependencies": manifest["devDependencies"]}}
+for path in sorted(modules):
+    version, dev = modules[path]
+    name = path.rsplit("/", 1)[-1]
+    entry = {
+        "version": version,
+        "resolved": f"https://registry.npmjs.org/{name}/-/{name}-{version}.tgz",
+        "integrity": "sha512-" + base64.b64encode(digest(name, version) * 2).decode(),
+    }
+    if dev:
+        entry["dev"] = True
+    packages["node_modules/" + path] = entry
+put("web/package-lock.json", json.dumps({"name": "atlas-web", "lockfileVersion": 3, "requires": True, "packages": packages}, indent=2) + "\n")
+
+# Go: go.mod changes apart (uuid added at the end, chi bumped at the top);
+# go.sum's lines meet.
+chi = {"base": "v5.0.10", "feature": "v5.0.10", "main": "v5.0.12"}[side]
+modules = [("github.com/go-chi/chi/v5", chi), ("golang.org/x/sync", "v0.5.0")]
+go_mod = f"module github.com/atlas/backend\n\ngo 1.22\n\nrequire github.com/go-chi/chi/v5 {chi}\n\nrequire golang.org/x/sync v0.5.0\n"
+if side == "feature":
+    modules.append(("github.com/google/uuid", "v1.6.0"))
+    go_mod += "\nrequire github.com/google/uuid v1.6.0\n"
+put("backend/server/go.mod", go_mod)
+lines = []
+for module, version in modules:
+    for suffix in ("", "/go.mod"):
+        hash = base64.b64encode(digest(module, version, suffix)).decode()
+        lines.append(f"{module} {version}{suffix} h1:{hash}")
+put("backend/server/go.sum", "".join(line + "\n" for line in sorted(lines)))
+
+# Bundler: the Gemfile changes on lines far apart.
+cocoapods = {"base": "1.14", "feature": "1.14", "main": "1.16"}[side]
+fastlane = {"base": "2.219", "feature": "2.220", "main": "2.219"}[side]
+put("ios/Gemfile", f'source "https://rubygems.org"\n\ngem "cocoapods", "~> {cocoapods}"\n\n# Release automation (scripts/release.sh)\ngem "fastlane", "~> {fastlane}"\n')
+gems = {
+    "base": {"activesupport": ("7.1.3", ["concurrent-ruby (~> 1.0)"]), "cocoapods": ("1.14.3", ["activesupport (>= 5.0, < 8)"]),
+             "concurrent-ruby": ("1.2.2", []), "fastlane": ("2.219.0", ["xcpretty (~> 0.3.0)"]), "xcpretty": ("0.3.0", [])},
+    "feature": {"activesupport": ("7.1.3", ["concurrent-ruby (~> 1.0)"]), "cocoapods": ("1.14.3", ["activesupport (>= 5.0, < 8)"]),
+                "concurrent-ruby": ("1.2.3", []), "fastlane": ("2.220.0", ["xcpretty (~> 0.3.0)", "xcpretty-travis-formatter (>= 0.0.3)"]),
+                "xcpretty": ("0.3.0", []), "xcpretty-travis-formatter": ("1.0.1", ["xcpretty (~> 0.2, >= 0.0.7)"])},
+    "main": {"activesupport": ("7.1.3.4", ["concurrent-ruby (~> 1.0)"]), "cocoapods": ("1.16.2", ["activesupport (>= 5.0, < 8)"]),
+             "concurrent-ruby": ("1.3.1", []), "fastlane": ("2.219.0", ["xcpretty (~> 0.3.0)"]), "xcpretty": ("0.3.0", [])},
+}[side]
+platforms = {"base": ["arm64-darwin-23", "ruby"], "feature": ["arm64-darwin-24", "ruby"], "main": ["arm64-darwin-23", "ruby", "x86_64-darwin-23"]}[side]
+gemlock = "GEM\n  remote: https://rubygems.org/\n  specs:\n"
+for name in sorted(gems):
+    version, requirements = gems[name]
+    gemlock += f"    {name} ({version})\n" + "".join(f"      {requirement}\n" for requirement in requirements)
+gemlock += "\nPLATFORMS\n" + "".join(f"  {platform}\n" for platform in platforms)
+gemlock += f"\nDEPENDENCIES\n  cocoapods (~> {cocoapods})\n  fastlane (~> {fastlane})\n"
+gemlock += "\nBUNDLED WITH\n   " + {"base": "2.5.3", "feature": "2.5.9", "main": "2.5.11"}[side] + "\n"
+put("ios/Gemfile.lock", gemlock)
+
+# uv: pyproject.toml changes on lines far apart.
+fastapi = {"base": "0.110", "feature": "0.110", "main": "0.111"}[side]
+dependencies = [f"fastapi>={fastapi}", "pydantic>=2.6", "uvicorn>=0.29"] + (["pillow>=10.3"] if side == "feature" else [])
+put("backend/pyproject.toml", '[project]\nname = "atlas-backend"\nversion = "0.4.0"\nrequires-python = ">=3.12"\ndependencies = [\n' + "".join(f'    "{dependency}",\n' for dependency in dependencies) + "]\n")
+wheels = {
+    "base": {"fastapi": "0.110.0", "pydantic": "2.6.4", "pydantic-core": "2.16.3", "starlette": "0.36.3", "uvicorn": "0.29.0"},
+    "feature": {"fastapi": "0.110.0", "pillow": "10.3.0", "pydantic": "2.7.1", "pydantic-core": "2.18.2", "starlette": "0.36.3", "uvicorn": "0.29.0"},
+    "main": {"fastapi": "0.111.0", "pydantic": "2.7.0", "pydantic-core": "2.18.1", "starlette": "0.37.2", "uvicorn": "0.29.0"},
+}[side]
+requires = {"fastapi": ["pydantic", "starlette"], "pydantic": ["pydantic-core"]}
+uvlock = 'version = 1\nrequires-python = ">=3.12"\n'
+uvlock += '\n[[package]]\nname = "atlas-backend"\nversion = "0.4.0"\nsource = { editable = "." }\ndependencies = [\n'
+uvlock += "".join(f'    {{ name = "{dependency.split(">=")[0]}" }},\n' for dependency in sorted(dependencies)) + "]\n"
+for name in sorted(wheels):
+    version = wheels[name]
+    file = name.replace("-", "_") + "-" + version
+    uvlock += f'\n[[package]]\nname = "{name}"\nversion = "{version}"\nsource = {{ registry = "https://pypi.org/simple" }}\n'
+    if name in requires:
+        uvlock += "dependencies = [\n" + "".join(f'    {{ name = "{dependency}" }},\n' for dependency in requires[name]) + "]\n"
+    uvlock += f'sdist = {{ url = "https://files.pythonhosted.org/packages/{file}.tar.gz", hash = "sha256:{hexdigest(name, version, length=64)}", size = {len(name) * 9173} }}\n'
+    uvlock += f'wheels = [\n    {{ url = "https://files.pythonhosted.org/packages/{file}-py3-none-any.whl", hash = "sha256:{hexdigest(name, version, "whl", length=64)}", size = {len(name) * 4211} }},\n]\n'
+put("backend/uv.lock", uvlock)
+EOF
 }
 
 # build <dir>: the Atlas repository, main and feature/sync-v2 diverged,
@@ -345,22 +563,7 @@ target 'Atlas' do
 end
 EOF
 
-put ios/Package.resolved <<'EOF'
-{
-  "pins" : [
-    {
-      "identity" : "swift-collections",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-collections.git",
-      "state" : {
-        "revision" : "94cf62b3ba8d4bed62680a282d4c25f9c63c2efb",
-        "version" : "1.0.6"
-      }
-    }
-  ],
-  "version" : 2
-}
-EOF
+locks base
 
 put .github/workflows/ci.yml <<'EOF'
 name: CI
@@ -647,7 +850,7 @@ EOF
 commit "fixup! Show the user's full name"
 
 # 5. Upgrade dependencies and CI: Ruby, JSON, TOML, YAML, Bash, a deleted
-# Objective-C file and a binary icon.
+# Objective-C file, a binary icon, lockfiles and Swift package pins.
 put ios/Podfile <<'EOF'
 platform :ios, '17.0'
 
@@ -658,22 +861,7 @@ target 'Atlas' do
   pod 'Reachability', '~> 3.2'
 end
 EOF
-put ios/Package.resolved <<'EOF'
-{
-  "pins" : [
-    {
-      "identity" : "swift-collections",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-collections.git",
-      "state" : {
-        "revision" : "671108c96644956dddcd89dd59c203dcdb36cec7",
-        "version" : "1.1.0"
-      }
-    }
-  ],
-  "version" : 2
-}
-EOF
+locks feature
 put core/Cargo.toml <<'EOF'
 [package]
 name = "atlas-core"
@@ -950,22 +1138,7 @@ target 'Atlas' do
   pod 'Kingfisher', '~> 7.10'
 end
 EOF
-put ios/Package.resolved <<'EOF'
-{
-  "pins" : [
-    {
-      "identity" : "swift-collections",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-collections.git",
-      "state" : {
-        "revision" : "d029d9d39c87bed85b1c50adee7c41795261a192",
-        "version" : "1.0.7"
-      }
-    }
-  ],
-  "version" : 2
-}
-EOF
+locks main
 put core/Cargo.toml <<'EOF'
 [package]
 name = "atlas-core"

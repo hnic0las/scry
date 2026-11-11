@@ -14,10 +14,12 @@ use serde::{Deserialize, Serialize};
 use crate::catalog::{self, CatalogMerge};
 use crate::conflict;
 use crate::git::{Git, GitError};
+use crate::lockfile::{self, PackageChange};
 use crate::merge_graph::{self, MergeGraph};
 use crate::operation::{self, Operation, OperationKind};
 use crate::pbxproj::{self, ProjectReview};
 use crate::rebase_plan::{self, Plan};
+use crate::resolved::{self, ResolvedMerge};
 use crate::session::{self, MergetoolFiles, write_atomically};
 use crate::syntax::Language;
 use crate::theme::State;
@@ -57,6 +59,11 @@ pub enum Special {
     ProjectFile,
     /// `.xcstrings`: merged key by key.
     StringCatalog,
+    /// `Package.resolved`: merged package by package.
+    PackageResolved,
+    /// A lockfile (`package-lock.json`, `Podfile.lock`…): take a side, then
+    /// let the package manager write it again.
+    Lockfile,
 }
 
 /// One of the two versions of a conflicted file, as git stages them.
@@ -108,6 +115,25 @@ pub struct BinaryVersion {
     /// The content, up to `BINARY_PREVIEW_LIMIT`, so the UI can show an
     /// image.
     pub bytes: Option<Vec<u8>>,
+}
+
+/// A lockfile's two sides, and how to write it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockfileReview {
+    /// "npm", "CocoaPods"…
+    pub tool: String,
+    /// The manifest beside it, from the root ("web/package.json").
+    pub manifest: String,
+    /// The manifest has conflicts too: resolve it first, since the tool
+    /// writes the lockfile from it.
+    pub manifest_conflicted: bool,
+    /// What to run once a side is taken, from the root
+    /// ("cd web && npm install").
+    pub command: String,
+    /// Both sides' lines can be kept (`go.sum`).
+    pub merges_by_lines: bool,
+    /// The packages each side changed since the base.
+    pub changes: Vec<PackageChange>,
 }
 
 /// Binary versions larger than this are not read for a preview.
@@ -172,6 +198,14 @@ pub enum OverviewCommand {
     /// Writes a string catalog merged key by key, with one pick per value
     /// both sides changed.
     ResolveCatalog { path: String, picks: Vec<Version> },
+    /// Writes one side of a lockfile without staging it: the package
+    /// manager writes it again first.
+    TakeLockfile { path: String, version: Version },
+    /// Keeps both sides' lines of a `go.sum`.
+    MergeLockfileLines { path: String },
+    /// Writes a `Package.resolved` merged package by package, with one
+    /// pick per package both sides changed.
+    ResolvePackages { path: String, picks: Vec<Version> },
 }
 
 /// What a command did.
@@ -378,14 +412,33 @@ impl Overview {
             }
             OverviewCommand::ResolveCatalog { path, picks } => {
                 let merge = self.catalog(git, &path)?;
-                let picks: Vec<catalog::Pick> = picks
-                    .iter()
-                    .map(|version| match version {
-                        Version::Ours => catalog::Pick::Ours,
-                        Version::Theirs => catalog::Pick::Theirs,
-                    })
-                    .collect();
-                write_atomically(&self.root.join(&path), &merge.resolve(&picks))
+                write_atomically(&self.root.join(&path), &merge.resolve(&picks_of(&picks)))
+                    .map_err(OverviewError::Io)?;
+                Ok(vec![OverviewEvent::Written { path }])
+            }
+            OverviewCommand::TakeLockfile { path, version } => {
+                self.lockfile(git, &path)?;
+                if stage(git, &path, version)?.is_none() {
+                    return Err(OverviewError::NotThatKind(path));
+                }
+                git.run(&["checkout", version.flag(), "--", &path])?;
+                Ok(vec![OverviewEvent::Written { path }])
+            }
+            OverviewCommand::MergeLockfileLines { path } => {
+                if !self.lockfile(git, &path)?.merges_by_lines {
+                    return Err(OverviewError::NotThatKind(path));
+                }
+                let merged = lockfile::merge_lines(
+                    &stage_text(git, &path, "1")?,
+                    &stage_text(git, &path, "2")?,
+                    &stage_text(git, &path, "3")?,
+                );
+                write_atomically(&self.root.join(&path), &merged).map_err(OverviewError::Io)?;
+                Ok(vec![OverviewEvent::Written { path }])
+            }
+            OverviewCommand::ResolvePackages { path, picks } => {
+                let merge = self.packages(git, &path)?;
+                write_atomically(&self.root.join(&path), &merge.resolve(&picks_of(&picks)))
                     .map_err(OverviewError::Io)?;
                 Ok(vec![OverviewEvent::Written { path }])
             }
@@ -505,19 +558,61 @@ impl Overview {
 
     /// A string catalog's three versions merged key by key.
     pub fn catalog(&self, git: &dyn Git, path: &str) -> Result<CatalogMerge, OverviewError> {
-        let text = |version: Option<Version>| -> Result<String, OverviewError> {
-            let bytes = match version {
-                Some(version) => stage(git, path, version)?,
-                None => stage_number(git, path, "1")?,
-            };
-            Ok(String::from_utf8_lossy(&bytes.unwrap_or_default()).into_owned())
-        };
         catalog::merge(
-            &text(None)?,
-            &text(Some(Version::Ours))?,
-            &text(Some(Version::Theirs))?,
+            &stage_text(git, path, "1")?,
+            &stage_text(git, path, "2")?,
+            &stage_text(git, path, "3")?,
         )
         .map_err(OverviewError::Invalid)
+    }
+
+    /// A `Package.resolved`'s three versions merged package by package.
+    pub fn packages(&self, git: &dyn Git, path: &str) -> Result<ResolvedMerge, OverviewError> {
+        if !is_package_resolved(path) {
+            return Err(OverviewError::NotThatKind(path.to_string()));
+        }
+        resolved::merge(
+            &stage_text(git, path, "1")?,
+            &stage_text(git, path, "2")?,
+            &stage_text(git, path, "3")?,
+        )
+        .map_err(OverviewError::Invalid)
+    }
+
+    /// What each side changed in a lockfile, and how to write it again.
+    pub fn lockfile(&self, git: &dyn Git, path: &str) -> Result<LockfileReview, OverviewError> {
+        let Some(format) = lockfile::Format::of(path) else {
+            return Err(OverviewError::NotThatKind(path.to_string()));
+        };
+        let directory = path.rsplit_once('/').map(|(directory, _)| directory);
+        let beside = |name: &str| match directory {
+            Some(directory) => format!("{directory}/{name}"),
+            None => name.to_string(),
+        };
+        let candidates: Vec<String> = format.manifests().iter().map(|name| beside(name)).collect();
+        let manifest = candidates
+            .iter()
+            .find(|candidate| self.root.join(candidate).exists())
+            .unwrap_or(&candidates[0])
+            .clone();
+        let manifest_conflicted = operation::conflicted_paths(git)?.contains(&manifest);
+        let command = match directory {
+            Some(directory) => format!("cd {directory} && {}", format.command()),
+            None => format.command().to_string(),
+        };
+        Ok(LockfileReview {
+            tool: format.tool().to_string(),
+            manifest,
+            manifest_conflicted,
+            command,
+            merges_by_lines: format.merges_by_lines(),
+            changes: lockfile::changes(
+                format,
+                &stage_text(git, path, "1")?,
+                &stage_text(git, path, "2")?,
+                &stage_text(git, path, "3")?,
+            ),
+        })
     }
 
     /// A project file with its markers and their size. Its conflicts need
@@ -622,6 +717,10 @@ impl Overview {
             Some(Special::ProjectFile)
         } else if path.ends_with(".xcstrings") {
             Some(Special::StringCatalog)
+        } else if is_package_resolved(path) {
+            Some(Special::PackageResolved)
+        } else if lockfile::Format::of(path).is_some() {
+            Some(Special::Lockfile)
         } else {
             None
         };
@@ -642,6 +741,26 @@ impl Overview {
 /// none (it deleted the file, or never had it).
 fn stage(git: &dyn Git, path: &str, version: Version) -> Result<Option<Vec<u8>>, GitError> {
     stage_number(git, path, version.stage())
+}
+
+/// A staged version as text; empty when there is none.
+fn stage_text(git: &dyn Git, path: &str, stage: &str) -> Result<String, GitError> {
+    let bytes = stage_number(git, path, stage)?.unwrap_or_default();
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn picks_of(versions: &[Version]) -> Vec<catalog::Pick> {
+    versions
+        .iter()
+        .map(|version| match version {
+            Version::Ours => catalog::Pick::Ours,
+            Version::Theirs => catalog::Pick::Theirs,
+        })
+        .collect()
+}
+
+fn is_package_resolved(path: &str) -> bool {
+    path == "Package.resolved" || path.ends_with("/Package.resolved")
 }
 
 fn stage_number(git: &dyn Git, path: &str, stage: &str) -> Result<Option<Vec<u8>>, GitError> {
@@ -671,6 +790,12 @@ fn kind(path: &str) -> String {
     }
     if path.ends_with(".xcstrings") {
         return String::from("String catalog");
+    }
+    if is_package_resolved(path) {
+        return String::from("Swift packages");
+    }
+    if let Some(format) = lockfile::Format::of(path) {
+        return format!("{} lockfile", format.tool());
     }
     match Language::from_path(Path::new(path)) {
         Some(language) => language.name().to_string(),

@@ -5,7 +5,7 @@ import Testing
 struct SpecialFileViewModelTests {
     private func sheet(_ kind: SpecialKind, _ source: FakeOverview, done: @escaping () -> Void = {}) -> SpecialFileViewModel {
         SpecialFileViewModel(
-            file: file("Sources/X", .unresolved, openable: kind == .projectFile || kind == .stringCatalog, special: kind),
+            file: file("Sources/X", .unresolved, openable: kind != .deletedOnOneSide && kind != .binary, special: kind),
             source: source,
             done: done,
             openInEditor: { _ in }
@@ -86,12 +86,60 @@ struct SpecialFileViewModelTests {
         #expect(viewModel.catalogRows[1].ours == "(removed)")
         #expect(viewModel.catalogRows[1].base == "—")
         viewModel.choose(.theirs, for: 0)
-        viewModel.writeCatalog()
+        viewModel.writeChoices()
         #expect(source.actions.isEmpty)
         viewModel.choose(.ours, for: 1)
         #expect(viewModel.catalogRows.map(\.pick) == [.theirs, .ours])
-        viewModel.writeCatalog()
+        viewModel.writeChoices()
         #expect(source.actions == [.resolveCatalog(path: "Sources/X", picks: [.theirs, .ours])])
+    }
+
+    /// A Package.resolved lists what merged by itself, from which side,
+    /// and is written once each package moved on both sides has a pick.
+    @Test func packagesMergeByPackageWithAChoiceLeft() {
+        let source = FakeOverview(files: [])
+        let viewModel = sheet(.packageResolved, source)
+
+        #expect(viewModel.explanation == "2 packages taken from the side that moved them. 1 package was moved on both sides: choose each version.")
+        #expect(viewModel.pinRows.map(\.change) == ["7.9.0 → 7.10.0", "added 4.4.1"])
+        #expect(viewModel.pinRows.map(\.side) == [.theirs, .ours])
+        #expect(viewModel.originHashNote != nil)
+        #expect(viewModel.writeTitle == "Write Package.resolved")
+        #expect(!viewModel.canWriteChoices)
+        viewModel.chooseAll(.theirs)
+        viewModel.writeChoices()
+        #expect(source.actions == [.resolvePackages(path: "Sources/X", picks: [.theirs])])
+    }
+
+    /// A lockfile is never edited by hand: taking a side keeps the sheet
+    /// open on the command to run; a conflicted manifest is named first,
+    /// and go.sum can keep both sides' lines.
+    @Test func lockfileTakesASideThenShowsTheCommand() {
+        let source = FakeOverview(files: [])
+        var closed = 0
+        let viewModel = sheet(.lockfile, source) { closed += 1 }
+
+        #expect(!viewModel.canOpenInEditor)
+        #expect(viewModel.command == "cd web && npm install")
+        #expect(viewModel.manifestWarning == nil)
+        #expect(viewModel.lockfileRows.first?.theirs == "—")
+        #expect(!viewModel.canMergeLines)
+        viewModel.takeLockfile(.theirs)
+        #expect(source.actions == [.takeLockfile(path: "Sources/X", version: .theirs)])
+        #expect(viewModel.taken == .theirs)
+        #expect(closed == 0)
+        #expect(viewModel.explanation.hasPrefix("The lockfile of feature is written. Run the command below"))
+        viewModel.finish()
+        #expect(closed == 1)
+
+        source.lockfileInfo = LockfileInfo(
+            oursLabel: "main", theirsLabel: "feature", tool: "Go", manifest: "go.mod", manifestConflicted: true,
+            command: "go mod tidy", mergesByLines: true, changes: []
+        )
+        let sum = sheet(.lockfile, source)
+        #expect(sum.manifestWarning == "go.mod has conflicts too: resolve it first, since Go writes the lockfile from it.")
+        sum.mergeLines()
+        #expect(source.actions.last == .mergeLockfileLines(path: "Sources/X"))
     }
 
     /// From the overview, a special file opens its sheet instead of the

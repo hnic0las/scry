@@ -527,3 +527,155 @@ fn special_files_are_settled_from_the_overview() {
         .unwrap();
     assert!(overview.refresh(&git).unwrap().can_continue());
 }
+
+/// Generated files in one real merge: a `Package.resolved` merges package
+/// by package with one choice left, a lockfile lists each side's upgrades
+/// and is taken unstaged so the package manager can write it again, and a
+/// `go.sum` keeps both sides' checksums.
+#[test]
+fn lockfiles_and_package_pins_are_settled_from_the_overview() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("gitconfig"), "").unwrap();
+    fs::create_dir_all(root.path().join("repo/ios")).unwrap();
+    let repo = Repo { root };
+    repo.ok(&["init", "--quiet", "--initial-branch=main"]);
+    let path = repo.path();
+    let pin = |identity: &str, version: &str| {
+        format!(
+            "    {{\n      \"identity\" : \"{identity}\",\n      \"kind\" : \"remoteSourceControl\",\n      \"location\" : \"https://github.com/example/{identity}\",\n      \"state\" : {{\n        \"revision\" : \"r{version}\",\n        \"version\" : \"{version}\"\n      }}\n    }}"
+        )
+    };
+    let resolved = |alamofire: &str, kingfisher: &str| {
+        format!(
+            "{{\n  \"originHash\" : \"h\",\n  \"pins\" : [\n{},\n{}\n  ],\n  \"version\" : 3\n}}\n",
+            pin("alamofire", alamofire),
+            pin("kingfisher", kingfisher)
+        )
+    };
+    let pods = |alamofire: &str, kingfisher: &str| {
+        format!(
+            "PODS:\n  - Alamofire ({alamofire})\n  - Kingfisher ({kingfisher})\n\nCOCOAPODS: 1.15.2\n"
+        )
+    };
+    let write = |files: &[(&str, String)], message: &str| {
+        for (name, content) in files {
+            fs::write(path.join(name), content).unwrap();
+        }
+        repo.ok(&["add", "-A"]);
+        repo.ok(&["commit", "--quiet", "-m", message]);
+    };
+    write(
+        &[
+            ("ios/Package.resolved", resolved("5.8.0", "7.9.0")),
+            ("ios/Podfile.lock", pods("5.8.0", "7.9.0")),
+            ("go.sum", String::from("a v1 h1:a\nb v1 h1:b\n")),
+        ],
+        "base",
+    );
+    repo.ok(&["switch", "--quiet", "-c", "feature"]);
+    write(
+        &[
+            ("ios/Package.resolved", resolved("5.8.1", "7.9.0")),
+            ("ios/Podfile.lock", pods("5.8.1", "7.9.0")),
+            ("go.sum", String::from("a v1 h1:a\nb v1 h1:b\nc v1 h1:c\n")),
+        ],
+        "feature",
+    );
+    repo.ok(&["switch", "--quiet", "main"]);
+    write(
+        &[
+            ("ios/Package.resolved", resolved("5.9.0", "7.10.0")),
+            ("ios/Podfile.lock", pods("5.9.0", "7.10.0")),
+            ("go.sum", String::from("a v1 h1:a\nb v2 h1:b2\n")),
+        ],
+        "main",
+    );
+    repo.ok(&["switch", "--quiet", "feature"]);
+    assert!(!repo.git(&["merge", "main"]));
+
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    let snapshot = overview.refresh(&git).unwrap();
+    let file = |name: &str| {
+        snapshot
+            .files
+            .iter()
+            .find(|file| file.path == name)
+            .unwrap()
+    };
+    assert_eq!(
+        file("ios/Package.resolved").special,
+        Some(Special::PackageResolved)
+    );
+    assert_eq!(file("ios/Package.resolved").kind, "Swift packages");
+    assert_eq!(file("ios/Podfile.lock").special, Some(Special::Lockfile));
+    assert_eq!(file("ios/Podfile.lock").kind, "CocoaPods lockfile");
+    assert_eq!(file("go.sum").special, Some(Special::Lockfile));
+
+    // Package.resolved: kingfisher from main, alamofire chosen.
+    let merge = overview.packages(&git, "ios/Package.resolved").unwrap();
+    assert_eq!(merge.automatic.len(), 1);
+    assert_eq!(merge.conflicts.len(), 1);
+    assert_eq!(merge.conflicts[0].identity, "alamofire");
+    overview
+        .apply(
+            &git,
+            OverviewCommand::ResolvePackages {
+                path: String::from("ios/Package.resolved"),
+                picks: vec![Version::Theirs],
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(path.join("ios/Package.resolved")).unwrap(),
+        resolved("5.9.0", "7.10.0")
+    );
+
+    // Podfile.lock: both upgrades listed, ours taken but not staged.
+    let review = overview.lockfile(&git, "ios/Podfile.lock").unwrap();
+    assert_eq!(review.tool, "CocoaPods");
+    assert_eq!(review.manifest, "ios/Podfile");
+    assert!(!review.manifest_conflicted);
+    assert_eq!(review.command, "cd ios && pod install");
+    assert_eq!(review.changes.len(), 2);
+    assert!(review.changes[0].both_changed());
+    overview
+        .apply(
+            &git,
+            OverviewCommand::TakeLockfile {
+                path: String::from("ios/Podfile.lock"),
+                version: Version::Ours,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(path.join("ios/Podfile.lock")).unwrap(),
+        pods("5.8.1", "7.9.0")
+    );
+
+    // go.sum: c added on feature, b moved to v2 on main.
+    assert!(overview.lockfile(&git, "go.sum").unwrap().merges_by_lines);
+    overview
+        .apply(
+            &git,
+            OverviewCommand::MergeLockfileLines {
+                path: String::from("go.sum"),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(path.join("go.sum")).unwrap(),
+        "a v1 h1:a\nb v2 h1:b2\nc v1 h1:c\n"
+    );
+
+    // Written, not staged: the overview shows them resolved.
+    let snapshot = overview.refresh(&git).unwrap();
+    for name in ["ios/Package.resolved", "ios/Podfile.lock", "go.sum"] {
+        let file = snapshot
+            .files
+            .iter()
+            .find(|file| file.path == name)
+            .unwrap();
+        assert_eq!(file.state, State::Resolved, "{name}");
+    }
+}

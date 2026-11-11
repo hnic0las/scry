@@ -83,11 +83,17 @@ impl CatalogMerge {
             };
             set(&mut value, &conflict.path, chosen.clone());
         }
-        let mut text = String::new();
-        write(&value, 0, &mut text);
-        text.push('\n');
-        text
+        apple_json(&value)
     }
+}
+
+/// JSON as Apple's tools write it (`JSONEncoder` pretty-printed, as in
+/// string catalogs and `Package.resolved`), with a final newline.
+pub(crate) fn apple_json(value: &Value) -> String {
+    let mut text = String::new();
+    write(value, 0, &mut text);
+    text.push('\n');
+    text
 }
 
 fn merge_value(
