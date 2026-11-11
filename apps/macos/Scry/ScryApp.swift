@@ -27,6 +27,27 @@ struct ScryApp: App {
 /// moves on, and quitting goes through the window, which asks before
 /// losing choices not written yet.
 final class ScryAppDelegate: NSObject, NSApplicationDelegate {
+    /// The code the app exits with, from the window's view model: what
+    /// `git mergetool` reads. Until the window says otherwise, the merge
+    /// tool's file is not written.
+    @MainActor static var exitStatus: () -> Int32 = {
+        RootViewModel.mergetoolFiles(in: CommandLine.arguments) == nil ? 0 : 1
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Started by `git-scry resolve` from a terminal, the app would open
+        // behind it.
+        NSApp.activate()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        let status = Self.exitStatus()
+        if let path = RootViewModel.resultPath(in: CommandLine.arguments) {
+            try? "\(status)\n".write(toFile: path, atomically: true, encoding: .utf8)
+        }
+        exit(status)
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
@@ -65,7 +86,13 @@ struct RootView: View {
         } message: {
             Text(viewModel.closeMessage)
         }
-        .task { await viewModel.openLaunchFile() }
+        .onChange(of: viewModel.finished) { _, finished in
+            if finished { dismissWindow(id: ScryApp.window) }
+        }
+        .task {
+            ScryAppDelegate.exitStatus = { [viewModel] in viewModel.exitStatus }
+            await viewModel.openLaunchFile()
+        }
     }
 
     private func chooseFile() {

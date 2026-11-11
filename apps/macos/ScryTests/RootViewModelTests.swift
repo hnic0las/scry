@@ -61,4 +61,58 @@ struct RootViewModelTests {
         root.closeWithoutWriting()
         #expect(root.shouldClose())
     }
+
+    /// `git-scry resolve --app` passes each of the four files after its
+    /// option; without all four, it is not the merge tool.
+    @Test func findsTheMergetoolFiles() {
+        let arguments = [
+            "Scry", "--base", "/r/f_BASE", "--local", "/r/f_LOCAL",
+            "--remote", "/r/f_REMOTE", "--merged", "/r/f",
+        ]
+
+        #expect(RootViewModel.mergetoolFiles(in: arguments) == MergetoolFiles(
+            base: "/r/f_BASE", local: "/r/f_LOCAL", remote: "/r/f_REMOTE", merged: "/r/f"
+        ))
+        #expect(RootViewModel.mergetoolFiles(in: ["Scry", "--merged", "/r/f"]) == nil)
+        #expect(RootViewModel.resultPath(in: arguments + ["--result", "/tmp/answer"]) == "/tmp/answer")
+        #expect(RootViewModel.resultPath(in: arguments) == nil)
+        #expect(RootViewModel.mergetoolFiles(in: ["Scry", "/r/f"]) == nil)
+    }
+
+    /// Opened by `git mergetool`, the file shows its base, rebuilt as the
+    /// CLI does; the app answers 1 until the file is written, then 0, and
+    /// closes so git moves on to the next file.
+    @Test func answersGitMergetool() async throws {
+        let files = try ConflictFile.mergetool()
+        let root = RootViewModel()
+
+        await root.open(mergetool: files)
+        let editor = try #require(root.editor)
+        #expect(root.isMergetool)
+        #expect(editor.inspector.cards.contains { $0.id == "base" })
+        #expect(root.exitStatus == 1)
+        #expect(!root.finished)
+
+        editor.take("theirs")
+        editor.markResolved()
+
+        #expect(root.finished)
+        #expect(root.exitStatus == 0)
+        #expect(try String(contentsOfFile: files.merged, encoding: .utf8) == "let a = 2\n")
+    }
+
+    /// Outside the merge tool, the app always exits 0 and stays open after
+    /// writing.
+    @Test func outsideTheMergetoolNothingChanges() async throws {
+        let root = RootViewModel()
+        await root.open(try ConflictFile().url.path)
+        let editor = try #require(root.editor)
+        editor.take("theirs")
+        editor.next()
+        editor.take("ours")
+        editor.markResolved()
+
+        #expect(!root.finished)
+        #expect(root.exitStatus == 0)
+    }
 }

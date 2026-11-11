@@ -17,7 +17,7 @@ use scry_core::layout;
 use scry_core::operation;
 use scry_core::presentation;
 use scry_core::resolution::CandidateKind;
-use scry_core::session::{self, MergeSession};
+use scry_core::session::{self, MergeSession, MergetoolFiles};
 use scry_core::syntax::{Language, ParseCheck};
 use scry_core::theme;
 use scry_core::words;
@@ -335,11 +335,7 @@ impl MergeDocument {
         let text = std::fs::read_to_string(&path)
             .map_err(|error| failed(format!("cannot read {}: {error}", path.display())))?;
         let language = Language::from_path(&path);
-        let directory = match path.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-            _ => PathBuf::from("."),
-        };
-        let git = GitCli::with_program(git_program(), directory);
+        let git = git_beside(&path);
         let marker_size = match path.file_name() {
             Some(name) => conflict::marker_size(&git, Path::new(name)),
             None => conflict::DEFAULT_MARKER_SIZE,
@@ -348,18 +344,30 @@ impl MergeDocument {
             .map_err(failed)?
             .with_file(path.clone());
         let operation = operation::current(&git).ok().flatten();
-        let header = header(presentation::header(&path, &session, operation.as_ref()));
-        let commits = match (&operation, path.file_name()) {
-            (Some(operation), Some(name)) => {
-                blame::conflict_commits(&git, operation, &name.to_string_lossy(), &session)
-            }
-            _ => Vec::new(),
+        Ok(MergeDocument::new(&path, session, &git, operation))
+    }
+
+    /// Opens the files `git mergetool` passes, as `git-scry resolve` does:
+    /// a file in the `merge` style, still as git wrote it, is rebuilt from
+    /// the three versions so the base shows. Saving writes `merged`.
+    #[uniffi::constructor]
+    pub fn open_mergetool(
+        base: String,
+        local: String,
+        remote: String,
+        merged: String,
+    ) -> Result<Arc<MergeDocument>, ScryError> {
+        let files = MergetoolFiles {
+            base: PathBuf::from(base),
+            local: PathBuf::from(local),
+            remote: PathBuf::from(remote),
+            merged: PathBuf::from(merged),
         };
-        Ok(Arc::new(MergeDocument {
-            header,
-            commits,
-            session: Mutex::new(session),
-        }))
+        let git = git_beside(&files.merged);
+        let operation = operation::current(&git).ok().flatten();
+        let (ours, theirs) = presentation::side_labels(operation.as_ref());
+        let session = session::load(&git, &files, &ours, &theirs).map_err(failed)?;
+        Ok(MergeDocument::new(&files.merged, session, &git, operation))
     }
 
     pub fn header(&self) -> Header {
@@ -442,6 +450,28 @@ impl MergeDocument {
 }
 
 impl MergeDocument {
+    /// The document on `session`, read from `path`, with its header and
+    /// lens commits from the operation in progress.
+    fn new(
+        path: &Path,
+        session: MergeSession,
+        git: &GitCli,
+        operation: Option<operation::Operation>,
+    ) -> Arc<MergeDocument> {
+        let header = header(presentation::header(path, &session, operation.as_ref()));
+        let commits = match (&operation, path.file_name()) {
+            (Some(operation), Some(name)) => {
+                blame::conflict_commits(git, operation, &name.to_string_lossy(), &session)
+            }
+            _ => Vec::new(),
+        };
+        Arc::new(MergeDocument {
+            header,
+            commits,
+            session: Mutex::new(session),
+        })
+    }
+
     fn lock(&self) -> MutexGuard<'_, MergeSession> {
         // A panic while the lock was held leaves a usable session: recover it.
         self.session
@@ -550,6 +580,15 @@ fn lens_badge(badge: theme::Badge) -> LensBadge {
         text: badge.text,
         role,
     }
+}
+
+/// Git, run from the directory of the file at `path`.
+fn git_beside(path: &Path) -> GitCli {
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    GitCli::with_program(git_program(), directory)
 }
 
 /// The git the user runs. Opened from the Finder, the app gets launchd's
@@ -881,5 +920,38 @@ mod tests {
             choose_git(launchd, installed(&["/usr/bin/git"])),
             PathBuf::from("git")
         );
+    }
+
+    /// Opened by `git mergetool`, a file in the `merge` style shows its
+    /// base, rebuilt from the three versions as the CLI does, and saving
+    /// writes the merged file.
+    #[test]
+    fn open_mergetool_rebuilds_the_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, text: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, text).unwrap();
+            path.display().to_string()
+        };
+        let base = write("a_BASE.swift", "let a = 0\n");
+        let local = write("a_LOCAL.swift", "let a = 1\n");
+        let remote = write("a_REMOTE.swift", "let a = 2\n");
+        let merged = write(
+            "a.swift",
+            "<<<<<<< ours\nlet a = 1\n=======\nlet a = 2\n>>>>>>> theirs\n",
+        );
+
+        let document = MergeDocument::open_mergetool(base, local, remote, merged.clone()).unwrap();
+        let conflicts = document.conflicts();
+        assert!(
+            conflicts[0]
+                .candidates
+                .iter()
+                .any(|candidate| candidate.id == "base")
+        );
+
+        choose(&document, "theirs").unwrap();
+        save(&document, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&merged).unwrap(), "let a = 2\n");
     }
 }

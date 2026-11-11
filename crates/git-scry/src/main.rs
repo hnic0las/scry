@@ -61,9 +61,9 @@ enum Command {
     ///   git config mergetool.scry.trustExitCode true
     ///
     /// Asks for a candidate per conflict in the terminal, unless --take or
-    /// --suggested are given. Writes the file only when every conflict is
-    /// resolved. Exits with 0 when written, 1 when conflicts are left
-    /// (nothing written), 2 on error.
+    /// --suggested are given, or opens the Scry app with --app. Writes the
+    /// file only when every conflict is resolved. Exits with 0 when
+    /// written, 1 when conflicts are left (nothing written), 2 on error.
     Resolve {
         base: PathBuf,
         local: PathBuf,
@@ -80,6 +80,18 @@ enum Command {
         /// Without asking, write the file even when it does not parse.
         #[arg(long)]
         allow_invalid: bool,
+        /// Resolve in the Scry app instead of the terminal, and wait for
+        /// its window to close. The app is $SCRY_APP, /Applications/Scry.app
+        /// or ~/Applications/Scry.app, unless a path is given
+        /// (--app=/path/to/Scry.app).
+        #[arg(
+            long,
+            value_name = "PATH",
+            num_args = 0..=1,
+            require_equals = true,
+            conflicts_with_all = ["takes", "suggested", "allow_invalid"]
+        )]
+        app: Option<Option<PathBuf>>,
     },
 }
 
@@ -94,9 +106,18 @@ fn main() -> ExitCode {
             local,
             remote,
             merged,
+            app: Some(app),
+            ..
+        } => resolve::run_in_app(app, resolve::files(&base, &local, &remote, &merged)),
+        Command::Resolve {
+            base,
+            local,
+            remote,
+            merged,
             takes,
             suggested,
             allow_invalid,
+            app: None,
         } => resolve::run(resolve::Options {
             files: resolve::files(&base, &local, &remote, &merged),
             takes,

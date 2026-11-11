@@ -202,6 +202,8 @@ final class MergeEditorViewModel {
 
     var language: String? { model.status.language }
     var written: Bool { model.written }
+    /// Written at least once since the file was opened.
+    var everWritten: Bool { model.everWritten }
 
     /// Choices made since the file was opened or last written, or an edit
     /// still open: closing the window would lose them.

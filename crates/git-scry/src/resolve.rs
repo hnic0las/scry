@@ -12,6 +12,7 @@ use std::process::ExitCode;
 use scry_core::command::{Command, CommandError};
 use scry_core::git::GitCli;
 use scry_core::operation;
+use scry_core::presentation;
 use scry_core::resolution::{Candidate, CandidateKind};
 use scry_core::session::{self, MergeSession, MergetoolFiles, Origin, SaveError};
 use scry_core::syntax::ParseCheck;
@@ -28,16 +29,9 @@ pub struct Options {
 pub fn run(options: Options) -> ExitCode {
     let files = &options.files;
     let git = GitCli::new(PathBuf::from("."));
-    let (ours, theirs, summary) = match operation::current(&git) {
-        Ok(Some(operation)) => {
-            let theirs = match &operation.theirs {
-                Some(side) => side.label(),
-                None => String::from("theirs"),
-            };
-            (operation.ours.label(), theirs, Some(operation.summary()))
-        }
-        _ => (String::from("ours"), String::from("theirs"), None),
-    };
+    let operation = operation::current(&git).ok().flatten();
+    let (ours, theirs) = presentation::side_labels(operation.as_ref());
+    let summary = operation.as_ref().map(|operation| operation.summary());
 
     let mut session = match session::load(&git, files, &ours, &theirs) {
         Ok(session) => session,
@@ -123,6 +117,108 @@ pub fn run(options: Options) -> ExitCode {
     }
     println!("{name} resolved.");
     ExitCode::SUCCESS
+}
+
+/// Opens the Scry app on the files and waits for it, passing its answer
+/// on: 0 once the file is written, 1 when the window closed without. `app`
+/// is the app bundle, or an executable to run as the app; when not given,
+/// the bundle is looked for.
+pub fn run_in_app(app: Option<PathBuf>, files: MergetoolFiles) -> ExitCode {
+    let Some(app) = app.or_else(find_app) else {
+        eprintln!(
+            "git-scry: Scry.app not found in /Applications or ~/Applications; \
+             pass --app=<path> or set SCRY_APP"
+        );
+        return ExitCode::from(2);
+    };
+    // Each path follows an option: AppKit takes a bare path for a file to
+    // open, and SwiftUI then opens no window. The app does not run in git's
+    // directory, so the paths are absolute.
+    let mut arguments = Vec::new();
+    for (option, path) in [
+        ("--base", &files.base),
+        ("--local", &files.local),
+        ("--remote", &files.remote),
+        ("--merged", &files.merged),
+    ] {
+        match std::path::absolute(path) {
+            Ok(path) => {
+                arguments.push(option.into());
+                arguments.push(path.into_os_string());
+            }
+            Err(error) => {
+                eprintln!("git-scry: {}: {error}", path.display());
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let answer = if app.is_dir() {
+        run_bundle(&app, arguments)
+    } else {
+        run_executable(&app, arguments)
+    };
+    match answer {
+        Ok(Some(0)) => ExitCode::SUCCESS,
+        Ok(Some(1)) => ExitCode::from(1),
+        Ok(_) => {
+            eprintln!("git-scry: {} stopped without an answer", app.display());
+            ExitCode::from(2)
+        }
+        Err(error) => {
+            eprintln!("git-scry: cannot run {}: {error}", app.display());
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Opens the bundle through Launch Services (`open`), which brings the app
+/// to the front: started as a plain process from the terminal, macOS keeps
+/// the terminal active and the window opens behind it. `open` does not
+/// pass the app's exit code on, so the app writes its answer to a file.
+fn run_bundle(app: &Path, mut arguments: Vec<std::ffi::OsString>) -> std::io::Result<Option<i32>> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let result = std::env::temp_dir().join(format!("scry-answer-{}-{stamp}", std::process::id()));
+    arguments.push("--result".into());
+    arguments.push(result.clone().into_os_string());
+    // -W waits for the app to quit; -n starts a new one even when Scry is
+    // already open on another file.
+    let status = std::process::Command::new("open")
+        .args(["-W", "-n", "-a"])
+        .arg(app)
+        .arg("--args")
+        .args(&arguments)
+        .status()?;
+    let answer = std::fs::read_to_string(&result).ok();
+    let _ = std::fs::remove_file(&result);
+    if !status.success() {
+        return Ok(None);
+    }
+    Ok(answer.and_then(|answer| answer.trim().parse().ok()))
+}
+
+fn run_executable(
+    program: &Path,
+    arguments: Vec<std::ffi::OsString>,
+) -> std::io::Result<Option<i32>> {
+    let status = std::process::Command::new(program)
+        .args(&arguments)
+        .status()?;
+    Ok(status.code())
+}
+
+/// The app: `$SCRY_APP`, then the usual Applications folders.
+fn find_app() -> Option<PathBuf> {
+    if let Some(app) = std::env::var_os("SCRY_APP") {
+        return Some(PathBuf::from(app));
+    }
+    let mut places = vec![PathBuf::from("/Applications/Scry.app")];
+    if let Some(home) = std::env::var_os("HOME") {
+        places.push(PathBuf::from(home).join("Applications/Scry.app"));
+    }
+    places.into_iter().find(|place| place.is_dir())
 }
 
 /// Applies one `<conflict>=<candidate>`, where `<conflict>` is a number or

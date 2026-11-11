@@ -133,3 +133,72 @@ fn edits_made_before_launching_are_kept() {
     assert_eq!(repo.file(), "feature line\nend, edited\n");
     assert_eq!(repo.unmerged(), "");
 }
+
+/// A stand-in for the Scry app: records its arguments, then answers like
+/// the app, writing the merged file and exiting 0, or leaving it and
+/// exiting 1 as when the window closes unresolved.
+#[cfg(unix)]
+fn fake_app(dir: &std::path::Path, resolves: bool) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let app = dir.join("Scry");
+    let arguments = dir.join("arguments.txt");
+    let answer = if resolves {
+        "printf 'resolved in the app\\nend\\n' > \"$8\"\nexit 0"
+    } else {
+        "exit 1"
+    };
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n{answer}\n",
+        arguments.display()
+    );
+    fs::write(&app, script).unwrap();
+    fs::set_permissions(&app, fs::Permissions::from_mode(0o755)).unwrap();
+    (app, arguments)
+}
+
+/// With `--app`, `git mergetool` waits for the app, which gets the four
+/// files as absolute paths, each after its option (a bare path would make
+/// AppKit open no window); once it has written the file and exited 0, git
+/// stages it.
+#[cfg(unix)]
+#[test]
+fn the_app_resolves_and_git_stages_the_file() {
+    let apps = tempfile::tempdir().unwrap();
+    let (app, arguments) = fake_app(apps.path(), true);
+    let repo = Repo::stopped_rebase("merge", &format!("--app={}", app.display()));
+
+    let output = repo.git(&["mergetool"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(repo.file(), "resolved in the app\nend\n");
+    assert_eq!(repo.unmerged(), "");
+
+    let arguments = fs::read_to_string(arguments).unwrap();
+    let arguments: Vec<&str> = arguments.lines().collect();
+    assert_eq!(arguments.len(), 8);
+    let options: Vec<&str> = arguments.iter().step_by(2).copied().collect();
+    assert_eq!(options, ["--base", "--local", "--remote", "--merged"]);
+    assert!(
+        arguments
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .all(|path| path.starts_with('/'))
+    );
+    assert!(arguments[7].ends_with("/file.txt"));
+}
+
+/// When the app's window closes without writing, it exits 1: git keeps
+/// the file conflicted and untouched.
+#[cfg(unix)]
+#[test]
+fn closing_the_app_unresolved_leaves_the_conflict() {
+    let apps = tempfile::tempdir().unwrap();
+    let (app, _) = fake_app(apps.path(), false);
+    let repo = Repo::stopped_rebase("zdiff3", &format!("--app={}", app.display()));
+    let before = repo.file();
+
+    let output = repo.git(&["mergetool"]);
+    assert!(!output.status.success());
+    assert_eq!(repo.file(), before);
+    assert_eq!(repo.unmerged(), "file.txt\n");
+}

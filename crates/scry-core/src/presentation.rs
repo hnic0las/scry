@@ -210,6 +210,22 @@ pub struct Header {
     pub language: Option<String>,
 }
 
+/// The sides' labels, for the markers of a rebuilt file and the
+/// candidates' subtitles: the operation's ("main + 1 rebased commit"), or
+/// git's own words without one.
+pub fn side_labels(operation: Option<&Operation>) -> (String, String) {
+    match operation {
+        Some(operation) => (
+            operation.ours.label(),
+            operation
+                .theirs
+                .as_ref()
+                .map_or_else(|| String::from("theirs"), |side| side.label()),
+        ),
+        None => (String::from("ours"), String::from("theirs")),
+    }
+}
+
 /// The header of the file at `path`, with the sides of the operation git
 /// has in progress, or the labels on the markers without one.
 pub fn header(path: &Path, session: &MergeSession, operation: Option<&Operation>) -> Header {

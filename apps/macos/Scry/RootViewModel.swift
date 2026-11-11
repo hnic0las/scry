@@ -10,27 +10,86 @@ final class RootViewModel {
     private(set) var openError: String?
     /// The name of the file being opened, while it is.
     private(set) var opening: String?
+    /// Launched by `git mergetool` (through `git-scry resolve --app`): the
+    /// app answers with its exit code, and quits once the file is written.
+    private(set) var isMergetool = false
     /// The window was asked to close with choices not written yet.
     var confirmingClose = false
 
     /// The user agreed to lose the unwritten choices.
     @ObservationIgnored private var closeConfirmed = false
 
-    /// Opens the file given on the command line, if any.
+    /// Opens what the command line gives: the files of `git mergetool`, or
+    /// a file.
     func openLaunchFile(arguments: [String] = CommandLine.arguments) async {
-        guard editor == nil, let path = Self.launchPath(in: arguments) else { return }
-        await open(path)
+        guard editor == nil else { return }
+        if let files = Self.mergetoolFiles(in: arguments) {
+            await open(mergetool: files)
+        } else if let path = Self.launchPath(in: arguments) {
+            await open(path)
+        }
     }
 
     func open(_ path: String) async {
+        await open(named: path) { try await MergeModel.open(path: path) }
+    }
+
+    func open(mergetool files: MergetoolFiles) async {
+        isMergetool = true
+        await open(named: files.merged) { try await MergeModel.open(mergetool: files) }
+    }
+
+    private func open(named path: String, _ load: () async throws -> MergeModel) async {
         opening = URL(fileURLWithPath: path).lastPathComponent
         defer { opening = nil }
         do {
-            editor = MergeEditorViewModel(model: try await MergeModel.open(path: path))
+            editor = MergeEditorViewModel(model: try await load())
             openError = nil
         } catch {
             openError = "\(error)"
         }
+    }
+
+    // MARK: Merge tool
+
+    /// What `git mergetool` reads once the app quits: 0 when the file was
+    /// written, so git stages it, 1 when it is left conflicted. Outside the
+    /// merge tool, 0.
+    var exitStatus: Int32 {
+        guard isMergetool else { return 0 }
+        return editor?.everWritten == true ? 0 : 1
+    }
+
+    /// The merge tool's file is written: the window closes, and `git
+    /// mergetool` moves on to the next file.
+    var finished: Bool {
+        isMergetool && editor?.written == true
+    }
+
+    /// `--base B --local L --remote R --merged M`, as `git-scry resolve
+    /// --app` passes them: each path after its option, since AppKit takes
+    /// a bare path for a file to open, and SwiftUI then opens no window.
+    static func mergetoolFiles(in arguments: [String]) -> MergetoolFiles? {
+        guard let base = value(of: "--base", in: arguments),
+              let local = value(of: "--local", in: arguments),
+              let remote = value(of: "--remote", in: arguments),
+              let merged = value(of: "--merged", in: arguments)
+        else { return nil }
+        return MergetoolFiles(base: base, local: local, remote: remote, merged: merged)
+    }
+
+    /// Where to write the exit status: `git-scry resolve` opens the app
+    /// through `open`, which does not pass the app's exit code on.
+    static func resultPath(in arguments: [String]) -> String? {
+        value(of: "--result", in: arguments)
+    }
+
+    /// The argument after `option`.
+    private static func value(of option: String, in arguments: [String]) -> String? {
+        guard let index = arguments.firstIndex(of: option), index + 1 < arguments.count else {
+            return nil
+        }
+        return arguments[index + 1]
     }
 
     // MARK: Closing

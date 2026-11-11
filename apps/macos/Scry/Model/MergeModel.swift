@@ -23,6 +23,9 @@ final class MergeModel {
     private(set) var editing: Int?
     /// The result was written to disk and has not changed since.
     private(set) var written = false
+    /// The result was written at least once since the file was opened: the
+    /// file on disk is resolved, whatever changed after.
+    private(set) var everWritten = false
     /// The last action the core refused, until it is shown.
     var failure: String?
     /// Goes up whenever what the editor shows changes (the snapshot, the
@@ -38,6 +41,20 @@ final class MergeModel {
     static func open(path: String) async throws -> MergeModel {
         let document = try await Task.detached {
             try MergeDocument.open(path: path)
+        }.value
+        return MergeModel(document: document)
+    }
+
+    /// Opens the files `git mergetool` passes off the main thread, as
+    /// `git-scry resolve` does: the base is rebuilt when the file has none.
+    static func open(mergetool files: MergetoolFiles) async throws -> MergeModel {
+        let document = try await Task.detached {
+            try MergeDocument.openMergetool(
+                base: files.base,
+                local: files.local,
+                remote: files.remote,
+                merged: files.merged
+            )
         }.value
         return MergeModel(document: document)
     }
@@ -169,6 +186,7 @@ final class MergeModel {
                 refresh()
             case .saved:
                 written = true
+                everWritten = true
             case .undone, .redone, .historyChanged:
                 // The status read with the choices says what undo can do.
                 break
@@ -186,4 +204,12 @@ final class MergeModel {
         conflicts = document.conflicts()
         status = document.status()
     }
+}
+
+/// The four files `git mergetool` passes to a merge tool, as absolute paths.
+struct MergetoolFiles: Equatable {
+    let base: String
+    let local: String
+    let remote: String
+    let merged: String
 }

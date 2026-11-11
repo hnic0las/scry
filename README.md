@@ -34,7 +34,7 @@ cargo run -p git-scry -- session    # the operation in progress and who is on ea
 cargo run -p git-scry -- highlight path/to/file   # the syntax colours the app shows (--spans to list them)
 ```
 
-Use it as git's merge tool (terminal only until the app exists):
+Use it as git's merge tool, in the terminal:
 
 ```sh
 git config --global merge.tool scry
@@ -43,6 +43,14 @@ git config --global mergetool.scry.trustExitCode true
 ```
 
 `git mergetool` then asks for a candidate per conflict (the same digits as the app's shortcuts: 1 ours, 2 theirs, 3 and 4 both, 5 and 6 both with each side closed, 0 base, 9 none) and writes the file only when every conflict is resolved. For 19 languages (Swift, Objective-C, C, C++, Rust, JavaScript, TypeScript, TSX, HTML, CSS, Python, Kotlin, Java, Go, Ruby, Bash, JSON including `.xcstrings`, YAML, TOML), each candidate is checked by parsing, when both sides' versions of the file parse (✗ when the file would not parse), and a file that does not parse is written only after confirmation, or with `--allow-invalid`.
+
+Or in the Scry app, which `git-scry resolve --app` opens on each file, in front of the terminal, and waits for. The app is `$SCRY_APP`, `/Applications/Scry.app` or `~/Applications/Scry.app`, unless given as `--app=/path/to/Scry.app`:
+
+```sh
+git config --global mergetool.scry.cmd 'git-scry resolve --app "$BASE" "$LOCAL" "$REMOTE" "$MERGED"'
+```
+
+The app shows the base even when the file has none, as the terminal does. Mark as Resolved writes the file and closes the window, and `git mergetool` moves on to the next file. Closing the window without writing leaves the file conflicted.
 
 To try it on real conflicts, `scripts/make-conflicts.sh` rebuilds `conflicts/` (ignored by git) with one repository stopped on a conflict per operation: `rebase`, `merge`, `cherry-pick` and `revert`. In each, `git mergetool` runs this checkout's `git-scry`.
 
