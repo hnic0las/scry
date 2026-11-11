@@ -7,6 +7,8 @@ import Observation
 protocol MergetoolInstaller {
     /// Whether the app carries the `git-scry` the command runs.
     var isAvailable: Bool { get }
+    /// Where the app's `git-scry` is.
+    var cli: String { get }
     /// The command git would run, to show it.
     var command: String { get }
     func setup() throws -> MergetoolSetup
@@ -31,6 +33,9 @@ final class SettingsViewModel {
 
     /// The command git will run for each conflicted file.
     var command: String { installer.command }
+
+    /// The app's own `git-scry`, which the command runs.
+    var cliPath: String { installer.cli }
 
     var status: String {
         guard installer.isAvailable else {

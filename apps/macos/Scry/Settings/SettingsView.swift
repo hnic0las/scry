@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// Scry › Settings: the merge tool.
+/// Scry › Settings. The CLI tab: the command-line tool inside the app,
+/// and making it git's merge tool.
 struct SettingsView: View {
     @State private var viewModel: SettingsViewModel
 
@@ -9,6 +10,16 @@ struct SettingsView: View {
     }
 
     var body: some View {
+        TabView {
+            Tab("CLI", systemImage: "terminal") {
+                cli
+            }
+        }
+        .frame(width: 520)
+        .onAppear { viewModel.refresh() }
+    }
+
+    private var cli: some View {
         Form {
             Section {
                 Label {
@@ -29,20 +40,37 @@ struct SettingsView: View {
             } header: {
                 Text("Merge Tool")
             } footer: {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Sets merge.tool, mergetool.scry.cmd and mergetool.scry.trustExitCode in your global git configuration. git runs:")
-                    Text(viewModel.command)
-                        .font(Metrics.codeSmall)
-                        .textSelection(.enabled)
-                }
-                .font(Metrics.caption)
-                .foregroundStyle(Theme.Surfaces.textSecondary)
+                Text("Sets merge.tool, mergetool.scry.cmd and mergetool.scry.trustExitCode in your global git configuration.")
+                    .font(Metrics.caption)
+                    .foregroundStyle(Theme.Surfaces.textSecondary)
+            }
+            Section("git-scry") {
+                CodeLine(text: viewModel.cliPath)
+            }
+            Section {
+                CodeLine(text: viewModel.command)
+            } header: {
+                Text("Merge tool command")
+            } footer: {
+                Text("What git runs for each conflicted file once Scry is its merge tool.")
+                    .font(Metrics.caption)
+                    .foregroundStyle(Theme.Surfaces.textSecondary)
             }
         }
         .formStyle(.grouped)
-        .frame(width: 520)
         .fixedSize(horizontal: false, vertical: true)
-        .onAppear { viewModel.refresh() }
+    }
+}
+
+/// A path or a command, in code type, to select and copy.
+struct CodeLine: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(Metrics.codeSmall)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -50,6 +78,7 @@ struct SettingsView: View {
 private struct PreviewInstaller: MergetoolInstaller {
     var state: MergetoolSetup
     var isAvailable = true
+    var cli = "/Applications/Scry.app/Contents/Helpers/git-scry"
     var command: String {
         "\"/Applications/Scry.app/Contents/Helpers/git-scry\" resolve --app=\"/Applications/Scry.app\" \"$BASE\" \"$LOCAL\" \"$REMOTE\" \"$MERGED\""
     }

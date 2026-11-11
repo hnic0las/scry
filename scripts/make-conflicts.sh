@@ -4,13 +4,18 @@
 #
 #   scripts/make-conflicts.sh
 #   cd conflicts/rebase && git scry session
-#   cd conflicts/rebase && git mergetool      # runs this checkout's git-scry
+#   cd conflicts/rebase && git mergetool
 #
-# The repositories ignore your git configuration (no signing, no hooks).
+# git mergetool opens the Scry app when Scry is your merge tool (Scry ›
+# Settings), and otherwise runs this checkout's git-scry in the terminal.
+# The repositories ignore the rest of your git configuration (no signing,
+# no hooks).
 set -euo pipefail
 
 workspace="$(cd "$(dirname "$0")/.." && pwd)"
 root="$workspace/conflicts"
+# Read before GIT_CONFIG_GLOBAL below hides it.
+global_tool="$(git config --global --get merge.tool 2>/dev/null || true)"
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME="Alex Martin" GIT_AUTHOR_EMAIL=alex@example.com
@@ -25,10 +30,14 @@ diverged() {
   mkdir -p "$dir" && cd "$dir"
   git init --quiet --initial-branch=main
   git config merge.conflictStyle zdiff3
-  # git mergetool runs this checkout's code, rebuilt if needed.
-  git config merge.tool scry
-  git config mergetool.scry.cmd "cargo run -q --manifest-path '$workspace/Cargo.toml' -p git-scry -- resolve \"\$BASE\" \"\$LOCAL\" \"\$REMOTE\" \"\$MERGED\""
-  git config mergetool.scry.trustExitCode true
+  # A local merge tool would win over the one the app's settings set:
+  # without Scry as your merge tool, run this checkout's code, rebuilt if
+  # needed, in the terminal.
+  if [ "$global_tool" != scry ]; then
+    git config merge.tool scry
+    git config mergetool.scry.cmd "cargo run -q --manifest-path '$workspace/Cargo.toml' -p git-scry -- resolve \"\$BASE\" \"\$LOCAL\" \"\$REMOTE\" \"\$MERGED\""
+    git config mergetool.scry.trustExitCode true
+  fi
   git config mergetool.prompt false
   git config mergetool.keepBackup false
   printf 'func upload(_ item: Item) async throws {\n    try await client.send(item)\n}\n\nfunc download(_ id: Item.ID) async throws -> Item {\n    try await client.fetch(id)\n}\n' > SyncEngine.swift

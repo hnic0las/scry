@@ -6,6 +6,7 @@ import Testing
 private final class FakeInstaller: MergetoolInstaller {
     var state: MergetoolSetup
     var isAvailable = true
+    let cli = "/A/git-scry"
     var failure: ScryError?
     private(set) var installs = 0
 
@@ -43,6 +44,15 @@ struct SettingsViewModelTests {
         #expect(installer.installs == 1)
         #expect(settings.isInstalled)
         #expect(!settings.canInstall)
+    }
+
+    /// The settings show the app's own git-scry and the exact command git
+    /// runs, so they can be copied and checked.
+    @Test func showsTheCommandLineTool() {
+        let settings = SettingsViewModel(installer: FakeInstaller(.notSet))
+
+        #expect(settings.cliPath == "/A/git-scry")
+        #expect(settings.command.hasPrefix("\"/A/git-scry\" resolve --app="))
     }
 
     /// A Scry command for an app moved since is offered as an update.
