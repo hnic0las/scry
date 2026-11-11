@@ -47,7 +47,8 @@ struct HorizontalScrollMonitor: NSViewRepresentable {
 
         private func handle(_ event: NSEvent) -> NSEvent? {
             guard event.window === window,
-                  bounds.contains(convert(event.locationInWindow, from: nil))
+                  bounds.contains(convert(event.locationInWindow, from: nil)),
+                  !Self.scrollsItself(window?.contentView?.hitTest(event.locationInWindow))
             else { return event }
             var dx = event.scrollingDeltaX
             var dy = event.scrollingDeltaY
@@ -62,6 +63,18 @@ struct HorizontalScrollMonitor: NSViewRepresentable {
             let points = event.hasPreciseScrollingDeltas ? dx : dx * Metrics.codeCharacterWidth * 3
             onScroll(-points)
             return nil
+        }
+
+        /// Whether `view` is inside a view that scrolls sideways on its own,
+        /// such as the hand editor's text view: the scroll is its own, not
+        /// the panes'.
+        static func scrollsItself(_ view: NSView?) -> Bool {
+            var scrollView = view?.enclosingScrollView
+            while let current = scrollView {
+                if current.hasHorizontalScroller { return true }
+                scrollView = current.enclosingScrollView
+            }
+            return false
         }
     }
 }
