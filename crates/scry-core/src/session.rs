@@ -855,7 +855,7 @@ pub fn load(
 
 /// Whether two parsed files have the same text and the same conflict
 /// sides, whatever their markers' labels.
-fn same_ignoring_labels(a: &[Segment], b: &[Segment]) -> bool {
+pub(crate) fn same_ignoring_labels(a: &[Segment], b: &[Segment]) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|pair| match pair {
             (Segment::Common(a), Segment::Common(b)) => a == b,
@@ -868,7 +868,7 @@ fn same_ignoring_labels(a: &[Segment], b: &[Segment]) -> bool {
 
 /// The three versions merged by `git merge-file`, in the `merge` style
 /// unless `style` says otherwise (`--zdiff3`).
-fn merge_file(
+pub(crate) fn merge_file(
     git: &dyn Git,
     files: &MergetoolFiles,
     ours: &str,

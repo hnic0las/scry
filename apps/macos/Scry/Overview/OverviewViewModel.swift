@@ -7,6 +7,10 @@ import Observation
 protocol OverviewSource {
     func snapshot() throws -> OverviewSnapshot
     func apply(action: OverviewAction) throws
+    func deletion(path: String) throws -> DeletionInfo
+    func binary(path: String) throws -> BinaryInfo
+    func project(path: String) throws -> ProjectInfo
+    func catalog(path: String) throws -> CatalogInfo
 }
 
 extension RepositoryOverview: OverviewSource {}
@@ -96,9 +100,10 @@ final class OverviewViewModel {
         let stateLabel: String
         /// "2", or "—" when the file cannot be read.
         let conflicts: String
-        /// Whether the merge editor can open it from here: a text file
-        /// not staged yet.
+        /// Whether it opens from here, not staged yet: in the merge editor,
+        /// or in its own view when `special` says which.
         let canOpen: Bool
+        let special: SpecialKind?
         var id: String { path }
     }
 
@@ -107,6 +112,8 @@ final class OverviewViewModel {
     private(set) var filter: Filter = .all
     /// Asking before giving up the whole operation.
     var confirmingAbort = false
+    /// The view settling a special file, while it is shown.
+    private(set) var special: SpecialFileViewModel?
 
     @ObservationIgnored private let source: OverviewSource
     @ObservationIgnored private let openFile: (OverviewFile) -> Void
@@ -286,7 +293,8 @@ final class OverviewViewModel {
                     state: file.state,
                     stateLabel: Self.label(file.state),
                     conflicts: file.conflicts.map(String.init) ?? "—",
-                    canOpen: file.openable && file.state != .staged
+                    canOpen: (file.openable || file.special != nil) && file.state != .staged,
+                    special: file.state == .staged ? nil : file.special
                 )
             }
     }
@@ -329,9 +337,29 @@ final class OverviewViewModel {
         self.filter = filter
     }
 
+    /// Opens a file: its own view when it has one, else the merge editor.
     func open(_ path: String) {
-        guard let file = files.first(where: { $0.path == path }), file.openable else { return }
-        openFile(file)
+        guard let file = files.first(where: { $0.path == path }), file.state != .staged else { return }
+        if file.special != nil {
+            special = SpecialFileViewModel(
+                file: file,
+                source: source,
+                done: { [weak self] in
+                    self?.closeSpecial()
+                    self?.refresh()
+                },
+                openInEditor: { [weak self] file in
+                    self?.closeSpecial()
+                    self?.openFile(file)
+                }
+            )
+        } else if file.openable {
+            openFile(file)
+        }
+    }
+
+    func closeSpecial() {
+        special = nil
     }
 
     func stageResolved() {

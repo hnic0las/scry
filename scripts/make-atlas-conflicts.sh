@@ -149,6 +149,22 @@ put ios/Atlas.xcodeproj/project.pbxproj <<'EOF'
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
+
+/* Begin PBXProject section */
+		A9000001 /* Project object */ = {isa = PBXProject; mainGroup = A3000001 /* Sources */; };
+/* End PBXProject section */
+
+/* Begin XCBuildConfiguration section */
+		A4000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CURRENT_PROJECT_VERSION = 41;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MARKETING_VERSION = 1.3;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
 	};
 	rootObject = A9000001 /* Project object */;
 }
@@ -458,6 +474,13 @@ s = s.replace(
 s = s.replace(
     "\t\t\t\tA2000002 /* ForecastView.swift */,\n\t\t\t);",
     "\t\t\t\tA2000002 /* ForecastView.swift */,\n\t\t\t\tA2000003 /* OfflineQueue.swift */,\n\t\t\t);")
+# A Widgets group that lists ForecastView.swift, which main deletes: git
+# merges it without a conflict, yet the project would be broken.
+s = s.replace(
+    "/* End PBXGroup section */",
+    "\t\tA3000002 /* Widgets */ = {\n\t\t\tisa = PBXGroup;\n\t\t\tchildren = (\n\t\t\t\tA2000002 /* ForecastView.swift */,\n\t\t\t);\n\t\t\tpath = Widgets;\n\t\t\tsourceTree = \"<group>\";\n\t\t};\n/* End PBXGroup section */")
+s = s.replace("CURRENT_PROJECT_VERSION = 41;", "CURRENT_PROJECT_VERSION = 42;")
+s = s.replace("MARKETING_VERSION = 1.3;", "MARKETING_VERSION = 1.4;")
 open(p, "w").write(s)
 EOF
 put android/app/src/main/java/com/atlas/sync/SyncWorker.kt <<'EOF'
@@ -765,18 +788,22 @@ EOF
 python3 - <<'EOF'
 p = "ios/Atlas.xcodeproj/project.pbxproj"
 s = open(p).read()
+# ForecastView.swift is replaced by ForecastCache.swift, in the same places.
 s = s.replace(
-    "/* End PBXBuildFile section */",
-    "\t\tA1000004 /* ForecastCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000004 /* ForecastCache.swift */; };\n/* End PBXBuildFile section */")
+    "\t\tA1000002 /* ForecastView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000002 /* ForecastView.swift */; };\n",
+    "\t\tA1000004 /* ForecastCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000004 /* ForecastCache.swift */; };\n")
 s = s.replace(
-    "/* End PBXFileReference section */",
-    "\t\tA2000004 /* ForecastCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForecastCache.swift; sourceTree = \"<group>\"; };\n/* End PBXFileReference section */")
+    "\t\tA2000002 /* ForecastView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForecastView.swift; sourceTree = \"<group>\"; };\n",
+    "\t\tA2000004 /* ForecastCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForecastCache.swift; sourceTree = \"<group>\"; };\n")
 s = s.replace(
     "\t\t\t\tA2000002 /* ForecastView.swift */,\n\t\t\t);",
-    "\t\t\t\tA2000002 /* ForecastView.swift */,\n\t\t\t\tA2000004 /* ForecastCache.swift */,\n\t\t\t);")
+    "\t\t\t\tA2000004 /* ForecastCache.swift */,\n\t\t\t);")
+s = s.replace("CURRENT_PROJECT_VERSION = 41;", "CURRENT_PROJECT_VERSION = 50;")
+s = s.replace("IPHONEOS_DEPLOYMENT_TARGET = 16.0;", "IPHONEOS_DEPLOYMENT_TARGET = 16.4;")
+s = s.replace("MARKETING_VERSION = 1.3;", "MARKETING_VERSION = 2.0;")
 open(p, "w").write(s)
 EOF
-commit "Add a 30 s upload timeout and a forecast cache (#412)"
+commit "Add a 30 s upload timeout; replace ForecastView with a forecast cache; version 2.0 (#412)"
 
 put android/app/src/main/java/com/atlas/sync/SyncWorker.kt <<'EOF'
 package com.atlas.sync

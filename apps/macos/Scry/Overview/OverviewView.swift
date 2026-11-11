@@ -56,6 +56,9 @@ struct OverviewView: View {
                 .keyboardShortcut("r")
             }
         }
+        .sheet(item: Binding(get: { viewModel.special }, set: { if $0 == nil { viewModel.closeSpecial() } })) { special in
+            SpecialFileView(viewModel: special) { viewModel.closeSpecial() }
+        }
         .alert(viewModel.abortTitle, isPresented: $viewModel.confirmingAbort) {
             Button("Abort", role: .destructive) { viewModel.abort() }
             Button("Cancel", role: .cancel) {}
@@ -69,11 +72,11 @@ struct OverviewView: View {
             TableColumn("") { row in
                 if row.canOpen {
                     Button { viewModel.open(row.path) } label: {
-                        Image(systemName: "square.and.pencil")
+                        Image(systemName: row.special?.symbol ?? "square.and.pencil")
                             .foregroundStyle(Theme.Interaction.accent)
                     }
                     .buttonStyle(.borderless)
-                    .help("Resolve \(row.name) in the merge editor (double-click the row)")
+                    .help("\(row.special?.help ?? "Resolve in the merge editor"): \(row.name) (double-click the row)")
                     .accessibilityLabel("Resolve \(row.name)")
                 }
             }
@@ -108,8 +111,8 @@ struct OverviewView: View {
             .width(70)
         }
         .contextMenu(forSelectionType: String.self) { paths in
-            if let path = paths.first, viewModel.rows.first(where: { $0.path == path })?.canOpen == true {
-                Button("Resolve in Merge Editor") { viewModel.open(path) }
+            if let path = paths.first, let row = viewModel.rows.first(where: { $0.path == path }), row.canOpen {
+                Button(row.special?.help ?? "Resolve in Merge Editor") { viewModel.open(path) }
             }
         } primaryAction: { paths in
             // Double-click, or Return on the selected row.
@@ -285,6 +288,10 @@ private struct PreviewOverview: OverviewSource {
     }
 
     func apply(action: OverviewAction) throws {}
+    func deletion(path: String) throws -> DeletionInfo { try SpecialSamples().deletion(path: path) }
+    func binary(path: String) throws -> BinaryInfo { try SpecialSamples().binary(path: path) }
+    func project(path: String) throws -> ProjectInfo { try SpecialSamples().project(path: path) }
+    func catalog(path: String) throws -> CatalogInfo { try SpecialSamples().catalog(path: path) }
 
     /// The same files, in a merge of main into the branch.
     struct Merge: OverviewSource {
@@ -309,7 +316,7 @@ private struct PreviewOverview: OverviewSource {
                         commit("71ab09e", "Patch dependencies, Xcode 15.4, thread-safe OldCache"),
                         commit("4c2d8f0", "Rename name to displayName and add avatars (API v2)"),
                         commit("b81e6a2", "Send changes in batches, with a bounded queue"),
-                        commit("3e9f1c7", "Add a 30 s upload timeout and a forecast cache (#412)"),
+                        commit("3e9f1c7", "Add a 30 s upload timeout; replace ForecastView with a forecast cache; version 2.0 (#412)"),
                     ], more: 0),
                     base: commit("a40c2d1", "Initial Atlas app")
                 ),
@@ -321,6 +328,10 @@ private struct PreviewOverview: OverviewSource {
         }
 
         func apply(action: OverviewAction) throws {}
+        func deletion(path: String) throws -> DeletionInfo { try SpecialSamples().deletion(path: path) }
+        func binary(path: String) throws -> BinaryInfo { try SpecialSamples().binary(path: path) }
+        func project(path: String) throws -> ProjectInfo { try SpecialSamples().project(path: path) }
+        func catalog(path: String) throws -> CatalogInfo { try SpecialSamples().catalog(path: path) }
     }
 
     static func file(_ path: String, _ kind: String, _ state: ConflictState, _ conflicts: UInt32?) -> OverviewFile {
@@ -333,7 +344,11 @@ private struct PreviewOverview: OverviewSource {
             kind: kind,
             state: state,
             conflicts: conflicts,
-            openable: kind != "Deleted on one side"
+            openable: kind != "Deleted on one side" && kind != "Binary",
+            special: kind == "Deleted on one side" ? .deletedOnOneSide
+                : kind == "Xcode project" ? .projectFile
+                : kind == "String catalog" ? .stringCatalog
+                : kind == "Binary" ? .binary : nil
         )
     }
 
@@ -357,6 +372,7 @@ private struct PreviewOverview: OverviewSource {
         file("App.xcodeproj/project.pbxproj", "Xcode project", .unresolved, 3),
         file("Resources/Localizable.xcstrings", "String catalog", .resolved, 0),
         file("Sources/Legacy/OldCache.swift", "Deleted on one side", .unresolved, nil),
+        file("Resources/AppIcon.png", "Binary", .unresolved, nil),
         file("README.md", "Text", .staged, nil),
     ]
 }

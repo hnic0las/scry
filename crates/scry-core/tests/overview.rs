@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use scry_core::git::GitCli;
-use scry_core::overview::{Overview, OverviewCommand, OverviewError, OverviewEvent};
+use scry_core::overview::{
+    Overview, OverviewCommand, OverviewError, OverviewEvent, Special, Version,
+};
 use scry_core::rebase_plan::{Action, StepState};
 use scry_core::theme::State;
 use tempfile::TempDir;
@@ -331,4 +333,197 @@ fn a_merge_shows_both_branches_since_their_base() {
     );
     assert_eq!((graph.ours.more, graph.theirs.more), (0, 0));
     assert_eq!(graph.base.subject, "base");
+}
+
+/// The files the merge editor cannot settle, in one real merge: a file
+/// deleted on one side is kept or deleted, a binary file takes one
+/// version, a project file keeps both sides' additions, and a string
+/// catalog merges key by key with one choice left.
+#[test]
+fn special_files_are_settled_from_the_overview() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("gitconfig"), "").unwrap();
+    fs::create_dir_all(root.path().join("repo/Sources")).unwrap();
+    let repo = Repo { root };
+    repo.ok(&["init", "--quiet", "--initial-branch=main"]);
+    let path = repo.path();
+    let catalog = |done: &str, pending: &str| {
+        format!(
+            "{{\n  \"sourceLanguage\" : \"en\",\n  \"strings\" : {{\n    \"done\" : {{\n      \"comment\" : \"{done}\"\n    }},\n    \"pending\" : {{\n      \"comment\" : \"{pending}\"\n    }}\n  }},\n  \"version\" : \"1.0\"\n}}\n"
+        )
+    };
+    let project = |entry: &str| {
+        format!(
+            "\t\tA2000001 /* One.swift */ = {{isa = PBXFileReference; }};\n{entry}\t\tchildren = (\n\t\t\t\tA2000001 /* One.swift */,\n\t\t\t);\n"
+        )
+    };
+    let write = |files: &[(&str, &[u8])], message: &str| {
+        for (name, content) in files {
+            fs::write(path.join(name), content).unwrap();
+        }
+        repo.ok(&["add", "-A"]);
+        repo.ok(&["commit", "--quiet", "-m", message]);
+    };
+    write(
+        &[
+            ("old.txt", b"old\n"),
+            ("gone.txt", b"gone\n"),
+            ("icon.png", b"\x89PNG\x00base"),
+            ("project.pbxproj", project("").as_bytes()),
+            (
+                "Localizable.xcstrings",
+                catalog("Done", "Waiting").as_bytes(),
+            ),
+        ],
+        "base",
+    );
+    repo.ok(&["switch", "--quiet", "-c", "feature"]);
+    fs::remove_file(path.join("old.txt")).unwrap();
+    write(
+        &[
+            ("gone.txt", b"gone, changed on feature\n"),
+            ("icon.png", b"\x89PNG\x00feature"),
+            (
+                "project.pbxproj",
+                project("\t\tA2000002 /* Two.swift */ = {isa = PBXFileReference; };\n").as_bytes(),
+            ),
+            (
+                "Localizable.xcstrings",
+                catalog("Finished", "Waiting").as_bytes(),
+            ),
+        ],
+        "feature",
+    );
+    repo.ok(&["switch", "--quiet", "main"]);
+    fs::remove_file(path.join("gone.txt")).unwrap();
+    write(
+        &[
+            ("old.txt", b"old, changed on main\n"),
+            ("icon.png", b"\x89PNG\x00main"),
+            (
+                "project.pbxproj",
+                project("\t\tA2000003 /* Three.swift */ = {isa = PBXFileReference; };\n")
+                    .as_bytes(),
+            ),
+            (
+                "Localizable.xcstrings",
+                catalog("All done", "Queued").as_bytes(),
+            ),
+        ],
+        "main",
+    );
+    repo.ok(&["switch", "--quiet", "feature"]);
+    assert!(!repo.git(&["merge", "main"]));
+
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    let snapshot = overview.refresh(&git).unwrap();
+    let special = |name: &str| {
+        snapshot
+            .files
+            .iter()
+            .find(|file| file.path == name)
+            .unwrap()
+            .special
+    };
+    assert_eq!(special("old.txt"), Some(Special::DeletedOnOneSide));
+    assert_eq!(special("gone.txt"), Some(Special::DeletedOnOneSide));
+    assert_eq!(special("icon.png"), Some(Special::Binary));
+    assert_eq!(special("project.pbxproj"), Some(Special::ProjectFile));
+    assert_eq!(
+        special("Localizable.xcstrings"),
+        Some(Special::StringCatalog)
+    );
+
+    // Deleted on one side: feature (ours) deleted old.txt, main changed it.
+    let deletion = overview.deletion(&git, "old.txt").unwrap();
+    assert_eq!(deletion.deleted_by, Version::Ours);
+    assert!(deletion.kept_label.starts_with("main"));
+    assert_eq!(deletion.kept_lines, Some(1));
+    assert_eq!(
+        deletion.changes,
+        "@@ -1 +1 @@\n-old\n+old, changed on main\n"
+    );
+    overview
+        .apply(
+            &git,
+            OverviewCommand::KeepFile {
+                path: String::from("old.txt"),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(path.join("old.txt")).unwrap(),
+        "old, changed on main\n"
+    );
+    overview
+        .apply(
+            &git,
+            OverviewCommand::DeleteFile {
+                path: String::from("gone.txt"),
+            },
+        )
+        .unwrap();
+    assert!(!path.join("gone.txt").exists());
+
+    // Binary: both versions previewed, theirs taken.
+    let (ours, theirs) = overview.binary(&git, "icon.png").unwrap();
+    assert_eq!(ours.bytes.as_deref(), Some(&b"\x89PNG\x00feature"[..]));
+    assert_eq!(theirs.size, Some(9));
+    overview
+        .apply(
+            &git,
+            OverviewCommand::TakeVersion {
+                path: String::from("icon.png"),
+                version: Version::Theirs,
+            },
+        )
+        .unwrap();
+    assert_eq!(fs::read(path.join("icon.png")).unwrap(), b"\x89PNG\x00main");
+
+    // Project file: each side added a file; both kept.
+    let review = overview.project(&git, "project.pbxproj").unwrap();
+    assert!(review.can_keep_both());
+    assert_eq!(review.conflicts[0].ours_adds, ["Two.swift"]);
+    assert_eq!(review.conflicts[0].theirs_adds, ["Three.swift"]);
+    overview
+        .apply(
+            &git,
+            OverviewCommand::KeepBothAdditions {
+                path: String::from("project.pbxproj"),
+                remove_missing: true,
+            },
+        )
+        .unwrap();
+    let project_file = fs::read_to_string(path.join("project.pbxproj")).unwrap();
+    assert!(project_file.contains("Two.swift") && project_file.contains("Three.swift"));
+    assert!(!project_file.contains("<<<<<<<"));
+
+    // String catalog: "pending" changed on main only merges by itself;
+    // "done" changed on both sides is the one choice.
+    let merge = overview.catalog(&git, "Localizable.xcstrings").unwrap();
+    assert_eq!(merge.automatic, 1);
+    assert_eq!(merge.conflicts.len(), 1);
+    assert_eq!(merge.conflicts[0].key.as_deref(), Some("done"));
+    overview
+        .apply(
+            &git,
+            OverviewCommand::ResolveCatalog {
+                path: String::from("Localizable.xcstrings"),
+                picks: vec![Version::Theirs],
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(path.join("Localizable.xcstrings")).unwrap(),
+        catalog("All done", "Queued")
+    );
+
+    // The two written files are resolved; staging them ends the merge.
+    let snapshot = overview.refresh(&git).unwrap();
+    assert_eq!(snapshot.count(State::Resolved), 2);
+    overview
+        .apply(&git, OverviewCommand::StageResolved)
+        .unwrap();
+    assert!(overview.refresh(&git).unwrap().can_continue());
 }

@@ -11,11 +11,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::{self, CatalogMerge};
 use crate::conflict;
 use crate::git::{Git, GitError};
 use crate::merge_graph::{self, MergeGraph};
 use crate::operation::{self, Operation, OperationKind};
+use crate::pbxproj::{self, ProjectReview};
 use crate::rebase_plan::{self, Plan};
+use crate::session::{self, MergetoolFiles, write_atomically};
 use crate::syntax::Language;
 use crate::theme::State;
 
@@ -37,7 +40,78 @@ pub struct FileView {
     /// Whether the merge editor can open it: a text file with markers, or
     /// resolved but not staged yet.
     pub openable: bool,
+    /// The view that settles it, for a file the editor cannot (deleted on
+    /// one side, binary) or one a view settles better (Xcode project,
+    /// string catalog); `None` once staged.
+    pub special: Option<Special>,
 }
+
+/// A conflicted file the overview settles with its own view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Special {
+    /// One side deleted it, the other changed it: keep it or delete it.
+    DeletedOnOneSide,
+    /// No text to merge: take one version.
+    Binary,
+    /// `project.pbxproj`: usually both sides adding entries.
+    ProjectFile,
+    /// `.xcstrings`: merged key by key.
+    StringCatalog,
+}
+
+/// One of the two versions of a conflicted file, as git stages them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Version {
+    /// Git's "ours" (stage 2).
+    Ours,
+    /// Git's "theirs" (stage 3).
+    Theirs,
+}
+
+impl Version {
+    fn stage(self) -> &'static str {
+        match self {
+            Version::Ours => "2",
+            Version::Theirs => "3",
+        }
+    }
+
+    fn flag(self) -> &'static str {
+        match self {
+            Version::Ours => "--ours",
+            Version::Theirs => "--theirs",
+        }
+    }
+}
+
+/// Who deleted a file the other side changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Deletion {
+    pub deleted_by: Version,
+    /// The sides as the editor names them ("main · rebase target").
+    pub deleted_label: String,
+    pub kept_label: String,
+    /// The lines of the version that changed it.
+    pub kept_lines: Option<usize>,
+    /// What that side changed since the base, as a unified diff without
+    /// its headers: what deleting the file would throw away.
+    pub changes: String,
+}
+
+/// One version of a binary file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryVersion {
+    pub label: String,
+    /// Bytes; `None` when that side has no such file.
+    pub size: Option<u64>,
+    /// The content, up to `BINARY_PREVIEW_LIMIT`, so the UI can show an
+    /// image.
+    pub bytes: Option<Vec<u8>>,
+}
+
+/// Binary versions larger than this are not read for a preview.
+pub const BINARY_PREVIEW_LIMIT: u64 = 8 * 1024 * 1024;
 
 /// The operation and its files, as the overview shows them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +147,7 @@ impl Snapshot {
 }
 
 /// Something the user asks of the operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "kebab-case")]
 pub enum OverviewCommand {
     /// Stages every file resolved and not staged yet.
@@ -85,16 +159,39 @@ pub enum OverviewCommand {
     Skip,
     /// Gives up the whole operation; the UI asks first.
     Abort,
+    /// Keeps a file one side deleted, as the other side changed it.
+    KeepFile { path: String },
+    /// Deletes a file one side deleted and the other changed.
+    DeleteFile { path: String },
+    /// Takes one version of a file whole, such as a binary file.
+    TakeVersion { path: String, version: Version },
+    /// Keeps both sides' changes to an Xcode project file where that is
+    /// safe; with `remove_missing`, also removes the list entries of
+    /// objects no longer defined.
+    KeepBothAdditions { path: String, remove_missing: bool },
+    /// Writes a string catalog merged key by key, with one pick per value
+    /// both sides changed.
+    ResolveCatalog { path: String, picks: Vec<Version> },
 }
 
 /// What a command did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum OverviewEvent {
-    Staged { paths: Vec<String> },
+    Staged {
+        paths: Vec<String>,
+    },
     Continued,
     Skipped,
     Aborted,
+    /// A file kept, deleted or taken whole, and staged.
+    Settled {
+        path: String,
+    },
+    /// A file written without markers, to stage with the others.
+    Written {
+        path: String,
+    },
 }
 
 /// Why a command was refused.
@@ -104,6 +201,12 @@ pub enum OverviewError {
     /// Files git still has with conflicts.
     NotStaged(usize),
     CannotSkipMerge,
+    /// The command does not fit the file (keeping a file nobody deleted).
+    NotThatKind(String),
+    /// Keeping both additions would break the project file.
+    CannotKeepBoth(String),
+    Invalid(String),
+    Io(std::io::Error),
     Git(GitError),
 }
 
@@ -121,6 +224,15 @@ impl fmt::Display for OverviewError {
             }
             OverviewError::NotStaged(count) => write!(f, "{count} file(s) not staged yet"),
             OverviewError::CannotSkipMerge => write!(f, "a merge has no commit to skip"),
+            OverviewError::NotThatKind(path) => write!(f, "{path} cannot be settled this way"),
+            OverviewError::CannotKeepBoth(path) => {
+                write!(
+                    f,
+                    "keeping both sides would break {path}: resolve it in the editor"
+                )
+            }
+            OverviewError::Invalid(reason) => write!(f, "{reason}"),
+            OverviewError::Io(error) => error.fmt(f),
             OverviewError::Git(error) => error.fmt(f),
         }
     }
@@ -231,6 +343,52 @@ impl Overview {
         };
         let verb = verb(operation.kind);
         match command {
+            OverviewCommand::KeepFile { path } => {
+                self.deletion(git, &path)?;
+                git.run(&["add", "--", &path])?;
+                Ok(vec![OverviewEvent::Settled { path }])
+            }
+            OverviewCommand::DeleteFile { path } => {
+                self.deletion(git, &path)?;
+                git.run(&["rm", "--quiet", "--", &path])?;
+                Ok(vec![OverviewEvent::Settled { path }])
+            }
+            OverviewCommand::TakeVersion { path, version } => {
+                if stage(git, &path, version)?.is_none() {
+                    return Err(OverviewError::NotThatKind(path));
+                }
+                git.run(&["checkout", version.flag(), "--", &path])?;
+                git.run(&["add", "--", &path])?;
+                Ok(vec![OverviewEvent::Settled { path }])
+            }
+            OverviewCommand::KeepBothAdditions {
+                path,
+                remove_missing,
+            } => {
+                let (text, size) = self.project_text(git, &path)?;
+                let review = pbxproj::review(&text, size)
+                    .map_err(|error| OverviewError::Invalid(format!("{path}: {error:?}")))?;
+                if !review.can_keep_both() {
+                    return Err(OverviewError::CannotKeepBoth(path));
+                }
+                let result = pbxproj::keep_both(&text, size, remove_missing)
+                    .map_err(|error| OverviewError::Invalid(format!("{path}: {error:?}")))?;
+                write_atomically(&self.root.join(&path), &result).map_err(OverviewError::Io)?;
+                Ok(vec![OverviewEvent::Written { path }])
+            }
+            OverviewCommand::ResolveCatalog { path, picks } => {
+                let merge = self.catalog(git, &path)?;
+                let picks: Vec<catalog::Pick> = picks
+                    .iter()
+                    .map(|version| match version {
+                        Version::Ours => catalog::Pick::Ours,
+                        Version::Theirs => catalog::Pick::Theirs,
+                    })
+                    .collect();
+                write_atomically(&self.root.join(&path), &merge.resolve(&picks))
+                    .map_err(OverviewError::Io)?;
+                Ok(vec![OverviewEvent::Written { path }])
+            }
             OverviewCommand::StageResolved => {
                 let paths: Vec<String> = snapshot
                     .files
@@ -273,6 +431,150 @@ impl Overview {
         }
     }
 
+    /// Who deleted the file, and how the other side left it.
+    pub fn deletion(&self, git: &dyn Git, path: &str) -> Result<Deletion, OverviewError> {
+        let ours = stage(git, path, Version::Ours)?;
+        let theirs = stage(git, path, Version::Theirs)?;
+        let (deleted_by, kept) = match (&ours, &theirs) {
+            (None, Some(kept)) => (Version::Ours, kept),
+            (Some(kept), None) => (Version::Theirs, kept),
+            _ => return Err(OverviewError::NotThatKind(path.to_string())),
+        };
+        let (ours_label, theirs_label) = side_labels(git)?;
+        let (deleted_label, kept_label) = match deleted_by {
+            Version::Ours => (ours_label, theirs_label),
+            Version::Theirs => (theirs_label, ours_label),
+        };
+        let kept_stage = match deleted_by {
+            Version::Ours => Version::Theirs,
+            Version::Theirs => Version::Ours,
+        };
+        let changes = git.output(&[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            &format!(":1:{path}"),
+            &format!(":{}:{path}", kept_stage.stage()),
+        ])?;
+        let changes = String::from_utf8_lossy(&changes.stdout)
+            .lines()
+            .skip_while(|line| !line.starts_with("@@"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        Ok(Deletion {
+            deleted_by,
+            deleted_label,
+            kept_label,
+            changes,
+            kept_lines: std::str::from_utf8(kept)
+                .ok()
+                .map(|text| text.lines().count()),
+        })
+    }
+
+    /// Both versions of a file to take whole, with their content when
+    /// small enough to preview.
+    pub fn binary(
+        &self,
+        git: &dyn Git,
+        path: &str,
+    ) -> Result<(BinaryVersion, BinaryVersion), OverviewError> {
+        let (ours_label, theirs_label) = side_labels(git)?;
+        let version = |version: Version, label: String| -> Result<BinaryVersion, OverviewError> {
+            let bytes = stage(git, path, version)?;
+            let size = bytes.as_ref().map(|bytes| bytes.len() as u64);
+            Ok(BinaryVersion {
+                label,
+                size,
+                bytes: bytes.filter(|bytes| (bytes.len() as u64) <= BINARY_PREVIEW_LIMIT),
+            })
+        };
+        Ok((
+            version(Version::Ours, ours_label)?,
+            version(Version::Theirs, theirs_label)?,
+        ))
+    }
+
+    /// What each side adds to an Xcode project file, and whether keeping
+    /// both is safe.
+    pub fn project(&self, git: &dyn Git, path: &str) -> Result<ProjectReview, OverviewError> {
+        let (text, size) = self.project_text(git, path)?;
+        pbxproj::review(&text, size)
+            .map_err(|error| OverviewError::Invalid(format!("{path}: {error:?}")))
+    }
+
+    /// A string catalog's three versions merged key by key.
+    pub fn catalog(&self, git: &dyn Git, path: &str) -> Result<CatalogMerge, OverviewError> {
+        let text = |version: Option<Version>| -> Result<String, OverviewError> {
+            let bytes = match version {
+                Some(version) => stage(git, path, version)?,
+                None => stage_number(git, path, "1")?,
+            };
+            Ok(String::from_utf8_lossy(&bytes.unwrap_or_default()).into_owned())
+        };
+        catalog::merge(
+            &text(None)?,
+            &text(Some(Version::Ours))?,
+            &text(Some(Version::Theirs))?,
+        )
+        .map_err(OverviewError::Invalid)
+    }
+
+    /// A project file with its markers and their size. Its conflicts need
+    /// the base to tell a removal from an addition: when git wrote them in
+    /// the `merge` style, and the file is still as git wrote it, they are
+    /// rebuilt from the three versions with the base, as the editor does.
+    fn project_text(&self, git: &dyn Git, path: &str) -> Result<(String, usize), OverviewError> {
+        let text = std::fs::read_to_string(self.root.join(path)).map_err(OverviewError::Io)?;
+        let size = conflict::marker_size(git, Path::new(path));
+        let Ok(segments) = conflict::parse_with_marker_size(&text, size) else {
+            return Ok((text, size));
+        };
+        if conflict::conflicts(&segments).all(|conflict| conflict.base.is_some()) {
+            return Ok((text, size));
+        }
+        let folder = std::env::temp_dir().join(format!(
+            "scry-project-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&folder).map_err(OverviewError::Io)?;
+        let rebuilt = (|| -> Result<Option<String>, OverviewError> {
+            let mut files = MergetoolFiles {
+                base: folder.join("base"),
+                local: folder.join("ours"),
+                remote: folder.join("theirs"),
+                merged: self.root.join(path),
+            };
+            for (stage, file) in [
+                ("1", &mut files.base),
+                ("2", &mut files.local),
+                ("3", &mut files.remote),
+            ] {
+                let bytes = stage_number(git, path, stage)?.unwrap_or_default();
+                std::fs::write(&*file, bytes).map_err(OverviewError::Io)?;
+            }
+            let failed =
+                |_| OverviewError::Invalid(format!("{path}: cannot rebuild its conflicts"));
+            let as_written =
+                session::merge_file(git, &files, "ours", "theirs", size, None).map_err(failed)?;
+            let unchanged = conflict::parse_with_marker_size(&as_written, size)
+                .is_ok_and(|written| session::same_ignoring_labels(&segments, &written));
+            if !unchanged {
+                return Ok(None);
+            }
+            Ok(Some(
+                session::merge_file(git, &files, "ours", "theirs", size, Some("--zdiff3"))
+                    .map_err(failed)?,
+            ))
+        })();
+        let _ = std::fs::remove_dir_all(&folder);
+        Ok((rebuilt?.unwrap_or(text), size))
+    }
+
     fn file(&self, git: &dyn Git, path: &str, unmerged: bool) -> Result<FileView, GitError> {
         let (name, directory) = match path.rsplit_once('/') {
             Some((directory, name)) => (name.to_string(), directory.to_string()),
@@ -286,6 +588,7 @@ impl Overview {
             state: State::Staged,
             conflicts: None,
             openable: false,
+            special: None,
         };
         if !unmerged {
             return Ok(view);
@@ -299,8 +602,12 @@ impl Overview {
                 .split('\0')
                 .any(|entry| entry.split_whitespace().nth(2) == Some(stage))
         };
-        if !(has("2") && has("3")) {
+        if has("2") != has("3") {
             view.kind = String::from("Deleted on one side");
+            view.special = Some(Special::DeletedOnOneSide);
+            return Ok(view);
+        }
+        if !(has("2") && has("3")) {
             return Ok(view);
         }
         let Ok(bytes) = std::fs::read(self.root.join(path)) else {
@@ -308,7 +615,15 @@ impl Overview {
         };
         let Ok(text) = String::from_utf8(bytes) else {
             view.kind = String::from("Binary");
+            view.special = Some(Special::Binary);
             return Ok(view);
+        };
+        view.special = if path.ends_with(".pbxproj") {
+            Some(Special::ProjectFile)
+        } else if path.ends_with(".xcstrings") {
+            Some(Special::StringCatalog)
+        } else {
+            None
         };
         let size = conflict::marker_size(git, Path::new(path));
         if let Ok(segments) = conflict::parse_with_marker_size(&text, size) {
@@ -321,6 +636,32 @@ impl Overview {
         }
         Ok(view)
     }
+}
+
+/// A version of the file as git staged it; `None` when that side has
+/// none (it deleted the file, or never had it).
+fn stage(git: &dyn Git, path: &str, version: Version) -> Result<Option<Vec<u8>>, GitError> {
+    stage_number(git, path, version.stage())
+}
+
+fn stage_number(git: &dyn Git, path: &str, stage: &str) -> Result<Option<Vec<u8>>, GitError> {
+    let spec = format!(":{stage}:{path}");
+    let output = git.output(&["cat-file", "blob", &spec])?;
+    Ok((output.status == Some(0)).then_some(output.stdout))
+}
+
+/// Ours and theirs as the editor names them.
+pub fn side_labels(git: &dyn Git) -> Result<(String, String), GitError> {
+    Ok(match operation::current(git)? {
+        Some(operation) => (
+            operation.ours.label(),
+            operation
+                .theirs
+                .map(|side| side.label())
+                .unwrap_or_else(|| String::from("theirs")),
+        ),
+        None => (String::from("ours"), String::from("theirs")),
+    })
 }
 
 /// What the file is, in words.

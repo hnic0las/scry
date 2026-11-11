@@ -5,6 +5,7 @@
 //! free of platform-specific code (vault decision 0003).
 
 pub mod blame;
+pub mod catalog;
 pub mod command;
 pub mod conflict;
 pub mod git;
@@ -15,6 +16,7 @@ pub mod merge_graph;
 pub mod mergetool;
 pub mod operation;
 pub mod overview;
+pub mod pbxproj;
 pub mod presentation;
 pub mod rebase_plan;
 pub mod resolution;

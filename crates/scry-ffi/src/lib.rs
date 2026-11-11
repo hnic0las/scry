@@ -599,6 +599,103 @@ pub struct OverviewFile {
     pub state: ConflictState,
     pub conflicts: Option<u32>,
     pub openable: bool,
+    /// The view that settles it, when it has one.
+    pub special: Option<SpecialKind>,
+}
+
+/// A conflicted file the overview settles with its own view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SpecialKind {
+    DeletedOnOneSide,
+    Binary,
+    ProjectFile,
+    StringCatalog,
+}
+
+/// One of the two versions of a conflicted file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FileVersion {
+    /// Git's "ours".
+    Ours,
+    /// Git's "theirs".
+    Theirs,
+}
+
+/// Who deleted a file the other side changed.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct DeletionInfo {
+    pub deleted_by: FileVersion,
+    pub deleted_label: String,
+    pub kept_label: String,
+    pub kept_lines: Option<u32>,
+    /// What the side that kept it changed, as a unified diff.
+    pub changes: String,
+}
+
+/// One version of a binary file.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct BinaryVersionInfo {
+    pub label: String,
+    /// Bytes; `None` when that side has no such file.
+    pub size: Option<u64>,
+    /// The content when small enough to preview.
+    pub data: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct BinaryInfo {
+    pub ours: BinaryVersionInfo,
+    pub theirs: BinaryVersionInfo,
+}
+
+/// One conflict of an Xcode project file.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ProjectConflictInfo {
+    pub ours_adds: Vec<String>,
+    pub theirs_adds: Vec<String>,
+    pub ours_removes: Vec<String>,
+    pub theirs_removes: Vec<String>,
+    /// "MARKETING_VERSION 1.3 → 1.4".
+    pub ours_changes: Vec<String>,
+    pub theirs_changes: Vec<String>,
+    pub keeps_both: bool,
+    /// Why it is left to the editor.
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ProjectInfo {
+    pub ours_label: String,
+    pub theirs_label: String,
+    pub conflicts: Vec<ProjectConflictInfo>,
+    /// How many conflicts keeping both settles; the others stay for the
+    /// editor.
+    pub resolvable: u32,
+    /// Objects the result refers to without defining them, outside the
+    /// conflicts left ("A2000002 ForecastView.swift").
+    pub missing: Vec<String>,
+    /// Removing the missing objects' list entries repairs the project.
+    pub missing_removable: bool,
+}
+
+/// A string catalog value both sides changed differently.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CatalogConflictInfo {
+    pub key: Option<String>,
+    /// "fr › value".
+    pub detail: String,
+    pub base: Option<String>,
+    pub ours: Option<String>,
+    pub theirs: Option<String>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CatalogInfo {
+    pub ours_label: String,
+    pub theirs_label: String,
+    /// Values taken from the one side that changed them.
+    pub automatic: u32,
+    pub conflicts: Vec<CatalogConflictInfo>,
 }
 
 /// The operation in progress and its files.
@@ -688,12 +785,30 @@ pub enum RebaseStepState {
 }
 
 /// What the user asks of the operation.
-#[derive(Debug, Clone, Copy, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum OverviewAction {
     StageResolved,
     Continue,
     Skip,
     Abort,
+    KeepFile {
+        path: String,
+    },
+    DeleteFile {
+        path: String,
+    },
+    TakeVersion {
+        path: String,
+        version: FileVersion,
+    },
+    KeepBothAdditions {
+        path: String,
+        remove_missing: bool,
+    },
+    ResolveCatalog {
+        path: String,
+        picks: Vec<FileVersion>,
+    },
 }
 
 /// The operation overview of one repository (S1).
@@ -800,6 +915,12 @@ impl RepositoryOverview {
                     state: conflict_state(file.state),
                     conflicts: file.conflicts.map(|count| count as u32),
                     openable: file.openable,
+                    special: file.special.map(|special| match special {
+                        overview::Special::DeletedOnOneSide => SpecialKind::DeletedOnOneSide,
+                        overview::Special::Binary => SpecialKind::Binary,
+                        overview::Special::ProjectFile => SpecialKind::ProjectFile,
+                        overview::Special::StringCatalog => SpecialKind::StringCatalog,
+                    }),
                 })
                 .collect(),
         })
@@ -812,11 +933,121 @@ impl RepositoryOverview {
             OverviewAction::Continue => overview::OverviewCommand::Continue,
             OverviewAction::Skip => overview::OverviewCommand::Skip,
             OverviewAction::Abort => overview::OverviewCommand::Abort,
+            OverviewAction::KeepFile { path } => overview::OverviewCommand::KeepFile { path },
+            OverviewAction::DeleteFile { path } => overview::OverviewCommand::DeleteFile { path },
+            OverviewAction::TakeVersion { path, version } => {
+                overview::OverviewCommand::TakeVersion {
+                    path,
+                    version: core_version(version),
+                }
+            }
+            OverviewAction::KeepBothAdditions {
+                path,
+                remove_missing,
+            } => overview::OverviewCommand::KeepBothAdditions {
+                path,
+                remove_missing,
+            },
+            OverviewAction::ResolveCatalog { path, picks } => {
+                overview::OverviewCommand::ResolveCatalog {
+                    path,
+                    picks: picks.into_iter().map(core_version).collect(),
+                }
+            }
         };
         self.lock()
             .apply(&self.git, command)
             .map(|_| ())
             .map_err(failed)
+    }
+
+    /// Who deleted a file the other side changed.
+    pub fn deletion(&self, path: String) -> Result<DeletionInfo, ScryError> {
+        let deletion = self.lock().deletion(&self.git, &path).map_err(failed)?;
+        Ok(DeletionInfo {
+            deleted_by: ffi_version(deletion.deleted_by),
+            deleted_label: deletion.deleted_label,
+            kept_label: deletion.kept_label,
+            kept_lines: deletion.kept_lines.map(|lines| lines as u32),
+            changes: deletion.changes,
+        })
+    }
+
+    /// Both versions of a file to take whole.
+    pub fn binary(&self, path: String) -> Result<BinaryInfo, ScryError> {
+        let (ours, theirs) = self.lock().binary(&self.git, &path).map_err(failed)?;
+        let version = |version: overview::BinaryVersion| BinaryVersionInfo {
+            label: version.label,
+            size: version.size,
+            data: version.bytes,
+        };
+        Ok(BinaryInfo {
+            ours: version(ours),
+            theirs: version(theirs),
+        })
+    }
+
+    /// What each side adds to an Xcode project file.
+    pub fn project(&self, path: String) -> Result<ProjectInfo, ScryError> {
+        let review = self.lock().project(&self.git, &path).map_err(failed)?;
+        let (ours_label, theirs_label) = overview::side_labels(&self.git).map_err(failed)?;
+        Ok(ProjectInfo {
+            ours_label,
+            theirs_label,
+            conflicts: review
+                .conflicts
+                .into_iter()
+                .map(|conflict| ProjectConflictInfo {
+                    ours_adds: conflict.ours_adds,
+                    theirs_adds: conflict.theirs_adds,
+                    ours_removes: conflict.ours_removes,
+                    theirs_removes: conflict.theirs_removes,
+                    ours_changes: conflict.ours_changes,
+                    theirs_changes: conflict.theirs_changes,
+                    keeps_both: conflict.keeps_both,
+                    reason: conflict.reason,
+                })
+                .collect(),
+            resolvable: review.resolvable as u32,
+            missing_removable: review.missing_removable,
+            missing: review.missing,
+        })
+    }
+
+    /// A string catalog merged key by key, and the values left to choose.
+    pub fn catalog(&self, path: String) -> Result<CatalogInfo, ScryError> {
+        let merge = self.lock().catalog(&self.git, &path).map_err(failed)?;
+        let (ours_label, theirs_label) = overview::side_labels(&self.git).map_err(failed)?;
+        Ok(CatalogInfo {
+            ours_label,
+            theirs_label,
+            automatic: merge.automatic as u32,
+            conflicts: merge
+                .conflicts
+                .into_iter()
+                .map(|conflict| CatalogConflictInfo {
+                    key: conflict.key,
+                    detail: conflict.detail,
+                    base: conflict.base,
+                    ours: conflict.ours,
+                    theirs: conflict.theirs,
+                })
+                .collect(),
+        })
+    }
+}
+
+fn core_version(version: FileVersion) -> overview::Version {
+    match version {
+        FileVersion::Ours => overview::Version::Ours,
+        FileVersion::Theirs => overview::Version::Theirs,
+    }
+}
+
+fn ffi_version(version: overview::Version) -> FileVersion {
+    match version {
+        overview::Version::Ours => FileVersion::Ours,
+        overview::Version::Theirs => FileVersion::Theirs,
     }
 }
 

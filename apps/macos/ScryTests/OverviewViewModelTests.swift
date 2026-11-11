@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Scry
 
@@ -34,6 +35,35 @@ final class FakeOverview: OverviewSource {
         )
     }
 
+    func deletion(path: String) throws -> DeletionInfo {
+        DeletionInfo(
+            deletedBy: .ours, deletedLabel: "main · rebase target", keptLabel: "Your commit a1b2c3d · Retry", keptLines: 12,
+            changes: "@@ -1,2 +1,2 @@\n keep\n-old\n+new\n"
+        )
+    }
+
+    func binary(path: String) throws -> BinaryInfo {
+        BinaryInfo(
+            ours: BinaryVersionInfo(label: "main", size: 2048, data: Data([1, 2, 3])),
+            theirs: BinaryVersionInfo(label: "feature", size: nil, data: nil)
+        )
+    }
+
+    var projectInfo = ProjectInfo(
+        oursLabel: "main", theirsLabel: "feature",
+        conflicts: [projectConflict(["Two.swift in Sources"], ["Three.swift in Sources"], reason: nil)],
+        resolvable: 1, missing: [], missingRemovable: false
+    )
+
+    func project(path: String) throws -> ProjectInfo { projectInfo }
+
+    func catalog(path: String) throws -> CatalogInfo {
+        CatalogInfo(oursLabel: "main", theirsLabel: "feature", automatic: 3, conflicts: [
+            CatalogConflictInfo(key: "sync.done", detail: "fr › value", base: "Synchronisé", ours: "Tout est synchronisé", theirs: "Synchronisation terminée"),
+            CatalogConflictInfo(key: "sync.pending", detail: "de › value", base: nil, ours: nil, theirs: "%lld ausstehend"),
+        ])
+    }
+
     func apply(action: OverviewAction) throws {
         actions.append(action)
         switch action {
@@ -44,11 +74,24 @@ final class FakeOverview: OverviewSource {
             files = []
         case .skip:
             files = []
+        case .keepFile(let path), .deleteFile(let path), .takeVersion(let path, _):
+            files = files.map { $0.path == path ? file(path, .staged) : $0 }
+        case .keepBothAdditions(let path, _), .resolveCatalog(let path, _):
+            files = files.map { $0.path == path ? file(path, .resolved) : $0 }
         }
     }
 }
 
-func file(_ path: String, _ state: ConflictState, absolutePath: String? = nil, openable: Bool = true) -> OverviewFile {
+func projectConflict(_ ours: [String], _ theirs: [String], reason: String?) -> ProjectConflictInfo {
+    ProjectConflictInfo(
+        oursAdds: ours, theirsAdds: theirs, oursRemoves: [], theirsRemoves: [],
+        oursChanges: [], theirsChanges: [], keepsBoth: reason == nil, reason: reason
+    )
+}
+
+func file(
+    _ path: String, _ state: ConflictState, absolutePath: String? = nil, openable: Bool = true, special: SpecialKind? = nil
+) -> OverviewFile {
     let name = path.split(separator: "/").last.map(String.init) ?? path
     let directory = path.contains("/") ? String(path[..<path.lastIndex(of: "/")!]) : ""
     return OverviewFile(
@@ -59,7 +102,8 @@ func file(_ path: String, _ state: ConflictState, absolutePath: String? = nil, o
         kind: "Swift",
         state: state,
         conflicts: state == .unresolved ? 2 : 0,
-        openable: openable
+        openable: openable,
+        special: special
     )
 }
 
