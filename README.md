@@ -58,6 +58,8 @@ Xcode runs `scripts/build-ffi.sh` before each build. On a fresh checkout without
 ```sh
 xcodebuild test -project apps/macos/Scry.xcodeproj -scheme Scry -destination 'platform=macOS'
 ```
+
+The CI's `app` job does the same on GitHub's `xcode-27` image, after `scripts/build-ffi.sh`, then builds the app in Release.
  Colours come from the design tokens: after a new export in `~/workspace/scry-ui`, run `scripts/generate-theme.py`.
 
 ## Layout
