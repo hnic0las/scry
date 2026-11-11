@@ -6,7 +6,8 @@
 #   cd conflicts/rebase && git scry session
 #   cd conflicts/rebase && git mergetool
 #
-# It also builds conflicts/interactive-rebase (make-interactive-rebase.sh).
+# It also builds the Atlas repositories (make-atlas-conflicts.sh): an
+# interactive rebase, a simple rebase and a merge over many languages.
 #
 # git mergetool opens the Scry app when Scry is your merge tool (Scry ›
 # Settings), and otherwise runs this checkout's git-scry in the terminal.
@@ -81,5 +82,5 @@ for dir in rebase merge cherry-pick revert; do
   echo "  conflicts/$dir"
 done
 
-# An interactive rebase over many languages, stopping at several steps.
-"$workspace/scripts/make-interactive-rebase.sh"
+# Larger repositories, over many languages.
+"$workspace/scripts/make-atlas-conflicts.sh"

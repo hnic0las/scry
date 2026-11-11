@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# Builds conflicts/interactive-rebase: a multi-platform app ("Atlas") whose
-# feature branch is rebased interactively onto main, and stops on conflicts
-# at four of its steps, in many languages:
+# Builds three copies of a multi-platform app ("Atlas") whose branch
+# feature/sync-v2 and main changed the same lines in many languages, each
+# stopped on conflicts:
+#
+#   conflicts/interactive-rebase   the branch rebased interactively onto main
+#   conflicts/simple-rebase        the same commits rebased with `git rebase main`
+#   conflicts/big-merge            main merged into the branch, all at once
+#
+# The rebases stop at four of their seven steps:
 #
 #   1. pick    Queue uploads while offline     Swift, Kotlin, Rust, Xcode project
 #   2. reword  Explain the sync queue          (applies cleanly)
@@ -13,17 +19,18 @@
 #   6. drop    WIP debug logging
 #   7. pick    Translate the sync messages     String catalog, Go
 #
-# Each stop leaves the next ones intact, whatever you choose:
+# The simple rebase picks all seven. Each stop leaves the next ones
+# intact, whatever you choose:
 #
-#   scripts/make-interactive-rebase.sh      (make-conflicts.sh runs it too)
-#   open the app on conflicts/interactive-rebase (Open Repository…, ⌘O)
+#   scripts/make-atlas-conflicts.sh      (make-conflicts.sh runs it too)
+#   open the app on one of them (Open Repository…, ⌘O)
 #
-# Like make-conflicts.sh, the repository ignores the rest of your git
+# Like make-conflicts.sh, the repositories ignore the rest of your git
 # configuration (no signing, no hooks).
 set -euo pipefail
 
 workspace="$(cd "$(dirname "$0")/.." && pwd)"
-dir="$workspace/conflicts/interactive-rebase"
+root="$workspace/conflicts"
 global_tool="$(git config --global --get merge.tool 2>/dev/null || true)"
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
@@ -47,6 +54,10 @@ commit() {
   git add -A && git commit --quiet -m "$1"
 }
 
+# build <dir>: the Atlas repository, main and feature/sync-v2 diverged,
+# on main.
+build() {
+dir="$1"
 rm -rf "$dir"
 mkdir -p "$dir" && cd "$dir"
 git init --quiet --initial-branch=main
@@ -1011,9 +1022,12 @@ func main() {
 EOF
 commit "Serve the sync status as JSON, reword French strings"
 
+git switch --quiet feature/sync-v2
+}
+
 # ------------------------------------------------------- interactive rebase
 
-git switch --quiet feature/sync-v2
+build "$root/interactive-rebase"
 todo="$(mktemp)"
 {
   echo "pick $(git rev-parse --short ':/Queue uploads while offline') Queue uploads while offline"
@@ -1027,5 +1041,20 @@ todo="$(mktemp)"
 GIT_SEQUENCE_EDITOR="cp '$todo'" git rebase -i main > /dev/null 2>&1 || true
 rm -f "$todo"
 
-echo "conflicts/interactive-rebase: stopped on step 1 of 7 (4 steps conflict)"
-git status --short | sed 's/^/  /'
+
+# ------------------------------------------------------------ simple rebase
+
+# Every commit picked, in order: it stops at the same steps.
+build "$root/simple-rebase"
+git rebase main > /dev/null 2>&1 || true
+
+# -------------------------------------------------------------------- merge
+
+# main merged into the branch: every conflict at once, in one stop.
+build "$root/big-merge"
+git merge --no-edit main > /dev/null 2>&1 || true
+
+echo "Atlas repositories, in $root:"
+echo "  conflicts/interactive-rebase  stopped on step 1 of 7 (4 steps conflict)"
+echo "  conflicts/simple-rebase       stopped on commit 1 of 7 (4 commits conflict)"
+echo "  conflicts/big-merge           main merged into feature/sync-v2, every conflict at once"
