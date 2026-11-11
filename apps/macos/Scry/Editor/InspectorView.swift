@@ -54,6 +54,7 @@ struct InspectorView: View {
             CandidateCard(candidate: card.candidate, selected: card.selected, language: viewModel.language) {
                 viewModel.choose(card.candidate.id)
             }
+            .disabled(!viewModel.canChoose)
         }
 
         if let edited = viewModel.editedCard {
@@ -61,7 +62,7 @@ struct InspectorView: View {
                 viewModel.editByHand()
             }
         }
-        Button(action: viewModel.editByHand) {
+        Button { viewModel.editByHand() } label: {
             Label("Edit by Hand", systemImage: "pencil")
         }
         .help("Write this conflict's result yourself (↩)")

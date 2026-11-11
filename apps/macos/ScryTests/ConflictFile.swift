@@ -25,12 +25,15 @@ struct ConflictFile {
 
     let url: URL
 
-    init() throws {
+    /// The sample with Windows line endings.
+    static let crlfText = text.replacingOccurrences(of: "\n", with: "\r\n")
+
+    init(text: String = Self.text) throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "ScryTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         url = directory.appending(path: "Sample.swift")
-        try Self.text.write(to: url, atomically: true, encoding: .utf8)
+        try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
     var contents: String {

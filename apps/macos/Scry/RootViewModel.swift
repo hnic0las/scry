@@ -10,6 +10,11 @@ final class RootViewModel {
     private(set) var openError: String?
     /// The name of the file being opened, while it is.
     private(set) var opening: String?
+    /// The window was asked to close with choices not written yet.
+    var confirmingClose = false
+
+    /// The user agreed to lose the unwritten choices.
+    @ObservationIgnored private var closeConfirmed = false
 
     /// Opens the file given on the command line, if any.
     func openLaunchFile(arguments: [String] = CommandLine.arguments) async {
@@ -26,6 +31,27 @@ final class RootViewModel {
         } catch {
             openError = "\(error)"
         }
+    }
+
+    // MARK: Closing
+
+    /// Whether the window may close now. With choices not written, it asks
+    /// first: the window closes once the user confirms with
+    /// `closeWithoutWriting`.
+    func shouldClose() -> Bool {
+        guard !closeConfirmed, editor?.hasUnwrittenWork == true else { return true }
+        confirmingClose = true
+        return false
+    }
+
+    /// Lets the window close, losing the unwritten choices.
+    func closeWithoutWriting() {
+        closeConfirmed = true
+    }
+
+    var closeMessage: String {
+        guard let editor else { return "" }
+        return "\(editor.resolvedSummary). Your choices are not written to \(editor.title) and will be lost."
     }
 
     /// The first argument naming an existing file. Xcode adds its own

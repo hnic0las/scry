@@ -42,4 +42,26 @@ struct EditBlockViewModelTests {
         #expect(newline.text.hasPrefix("func f() {\n    "))
         #expect(!block.highlight("let a = 1\n").joined().isEmpty)
     }
+
+    /// In a file with Windows line endings, the draft breaks lines with
+    /// `\n` so it splits into lines (Swift sees `\r\n` as one character)
+    /// and Return matches it; applying puts `\r\n` back, so the written
+    /// file does not mix line endings.
+    @Test func keepsWindowsLineEndings() throws {
+        let file = try ConflictFile(text: ConflictFile.crlfText)
+        let editor = try file.editor()
+        editor.take("theirs")
+        editor.startEditing(1)
+        let block = try #require(editor.editBlock)
+
+        #expect(block.draft == "let c = 1\n")
+        #expect(block.lineEnding == "\r\n")
+        block.draft = "let c = 3\nlet d = 4\n"
+        #expect(block.visibleLines == 4)
+        block.apply()
+
+        #expect(editor.inspector.editedCard?.candidate.preview == ["let c = 3", "let d = 4"])
+        editor.markResolved()
+        #expect(file.contents == "let a = 2\r\nlet b = 0\r\nlet c = 3\r\nlet d = 4\r\n")
+    }
 }

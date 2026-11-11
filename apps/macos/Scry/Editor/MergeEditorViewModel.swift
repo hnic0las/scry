@@ -211,6 +211,12 @@ final class MergeEditorViewModel {
     var language: String? { model.status.language }
     var written: Bool { model.written }
 
+    /// Choices made since the file was opened or last written, or an edit
+    /// still open: closing the window would lose them.
+    var hasUnwrittenWork: Bool {
+        isEditing || (!model.written && model.status.canUndo)
+    }
+
     // MARK: Alerts
 
     var overwriteMessage: String {

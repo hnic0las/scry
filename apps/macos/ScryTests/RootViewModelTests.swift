@@ -28,4 +28,37 @@ struct RootViewModelTests {
         #expect(root.openError == nil)
         #expect(root.opening == nil)
     }
+
+    /// Closing the window with choices not written asks first, so a click
+    /// on the close button does not lose a merge; once written, or with
+    /// nothing chosen, it closes straight away.
+    @Test func asksBeforeClosingOnUnwrittenChoices() async throws {
+        let root = RootViewModel()
+        #expect(root.shouldClose())
+
+        await root.open(try ConflictFile().url.path)
+        let editor = try #require(root.editor)
+        #expect(root.shouldClose())
+
+        editor.take("theirs")
+        #expect(!root.shouldClose())
+        #expect(root.confirmingClose)
+        #expect(root.closeMessage.hasPrefix("1 of 2 conflicts resolved"))
+
+        editor.next()
+        editor.take("ours")
+        editor.markResolved()
+        #expect(root.shouldClose())
+    }
+
+    /// Once the user agreed to lose the choices, the window closes.
+    @Test func closesWithoutWritingOnceConfirmed() async throws {
+        let root = RootViewModel()
+        await root.open(try ConflictFile().url.path)
+        root.editor?.take("theirs")
+        #expect(!root.shouldClose())
+
+        root.closeWithoutWriting()
+        #expect(root.shouldClose())
+    }
 }

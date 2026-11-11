@@ -46,4 +46,20 @@ struct InspectorViewModelTests {
         #expect(edited.candidate.provenance == .human)
         #expect(edited.candidate.preview == ["let a = 42"])
     }
+
+    /// While a conflict is edited by hand, the cards cannot choose: a
+    /// click would change the resolution behind the open editor, and
+    /// Apply would then overwrite it.
+    @Test func cannotChooseWhileEditing() throws {
+        let editor = try ConflictFile().editor()
+        editor.take("ours")
+
+        editor.startEditing()
+        #expect(!editor.inspector.canChoose)
+        editor.inspector.choose("theirs")
+        #expect(editor.chosen(0) == "ours")
+
+        editor.editBlock?.cancel()
+        #expect(editor.inspector.canChoose)
+    }
 }

@@ -48,8 +48,12 @@ final class InspectorViewModel {
     /// One conflict is edited at a time.
     var canEditByHand: Bool { conflict != nil && model.editing == nil }
 
+    /// While a conflict is edited by hand, a card would change the
+    /// resolution behind the open editor.
+    var canChoose: Bool { conflict != nil && model.editing == nil }
+
     func choose(_ candidate: String) {
-        guard let conflict else { return }
+        guard let conflict, canChoose else { return }
         model.choose(candidate, conflict: conflict.index)
     }
 

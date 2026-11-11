@@ -40,7 +40,8 @@ extension ConflictInfo {
         guard chosen == CandidateInfo.editedID else {
             return candidates.first { $0.id == chosen }
         }
-        let lines = editText.split(separator: "\n", omittingEmptySubsequences: false).dropLast()
+        // Any line ending: `\r\n` is one character in Swift.
+        let lines = editText.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).dropLast()
         return CandidateInfo(
             id: CandidateInfo.editedID,
             title: "Edited by you",

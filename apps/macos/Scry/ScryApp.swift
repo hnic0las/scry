@@ -3,17 +3,40 @@ import SwiftUI
 
 @main
 struct ScryApp: App {
+    @NSApplicationDelegateAdaptor private var delegate: ScryAppDelegate
+
+    /// One window per merge: a second window on the same file would be a
+    /// second session, each writing over the other's choices.
     var body: some Scene {
-        WindowGroup {
+        Window("Scry", id: ScryApp.window) {
             RootView()
         }
         .windowToolbarStyle(.unified)
+    }
+
+    static let window = "merge"
+}
+
+/// The app is the merge: it quits with its window, so `git mergetool`
+/// moves on, and quitting goes through the window, which asks before
+/// losing choices not written yet.
+final class ScryAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let window = sender.windows.first(where: \.isVisible) else { return .terminateNow }
+        // Closing the last window quits the app once the user agreed.
+        window.performClose(nil)
+        return .terminateCancel
     }
 }
 
 /// Opens the file given on the command line, or asks for one.
 struct RootView: View {
     @State private var viewModel = RootViewModel()
+    @Environment(\.dismissWindow) private var dismissWindow
 
     var body: some View {
         Group {
@@ -26,6 +49,16 @@ struct RootView: View {
             }
         }
         .frame(minWidth: 900, minHeight: 600)
+        .background { WindowCloseGuard { viewModel.shouldClose() } }
+        .alert("Close without writing?", isPresented: $viewModel.confirmingClose) {
+            Button("Close Without Writing", role: .destructive) {
+                viewModel.closeWithoutWriting()
+                dismissWindow(id: ScryApp.window)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(viewModel.closeMessage)
+        }
         .task { await viewModel.openLaunchFile() }
     }
 

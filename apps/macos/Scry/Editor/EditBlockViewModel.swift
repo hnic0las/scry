@@ -3,11 +3,18 @@ import Observation
 
 /// A conflict's text being edited by hand: the draft, and what the core
 /// says about it as it is typed (colours, indentation).
+///
+/// The draft always breaks lines with `\n`, whatever the file uses: Swift
+/// sees `\r\n` as one character, so lines would not split, and the text
+/// view inserts `\n` on Return. The file's line ending comes back on
+/// apply, so the written file keeps one kind.
 @MainActor
 @Observable
 final class EditBlockViewModel {
     let conflict: Int
     var draft: String
+    /// The line ending of the conflict's text: `\r\n` or `\n`.
+    let lineEnding: String
 
     @ObservationIgnored private let model: MergeModel
     @ObservationIgnored private let onClose: () -> Void
@@ -18,7 +25,9 @@ final class EditBlockViewModel {
         self.model = model
         self.conflict = conflict
         self.onClose = onClose
-        draft = model.conflict(conflict)?.editText ?? ""
+        let text = model.conflict(conflict)?.editText ?? ""
+        lineEnding = text.contains("\r\n") ? "\r\n" : "\n"
+        draft = text.replacingOccurrences(of: "\r\n", with: "\n")
     }
 
     /// Rows the editor shows: one per line plus one to type into, between
@@ -31,7 +40,11 @@ final class EditBlockViewModel {
     /// Resolves the conflict with the draft; the editor stays open when the
     /// core refuses it.
     func apply() {
-        if model.edit(conflict, text: draft) { onClose() }
+        // Pasted text may bring its own `\r\n`.
+        let text = draft
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\n", with: lineEnding)
+        if model.edit(conflict, text: text) { onClose() }
     }
 
     func cancel() {
