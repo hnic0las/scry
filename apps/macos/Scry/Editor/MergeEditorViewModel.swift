@@ -97,20 +97,37 @@ final class MergeEditorViewModel {
         let kind: Kind
     }
 
+    /// The rows, built again only when the model changes: SwiftUI reads
+    /// them on every evaluation of the editor, and a large file has tens of
+    /// thousands.
     var rows: [RowState] {
-        model.rows.map { row in
+        let revision = model.revision
+        if let cached = rowsCache, cached.revision == revision {
+            return cached.rows
+        }
+        let rows = buildRows()
+        rowsCache = (revision, rows)
+        return rows
+    }
+
+    @ObservationIgnored private var rowsCache: (revision: Int, rows: [RowState])?
+
+    private func buildRows() -> [RowState] {
+        // Once per conflict, not once per line.
+        let chosen = model.conflicts.map(\.chosenCandidate)
+        return model.rows.map { row in
             switch row {
             case .lens(let conflict):
-                return .lens(lensRow(Int(conflict)))
+                return .lens(lensRow(Int(conflict), chosen: chosen[Int(conflict)]))
             case .code(let ours, let result, let theirs, let conflict):
-                let chosen = conflict.flatMap { model.conflict(Int($0))?.chosenCandidate }
+                let candidate = conflict.flatMap { chosen[Int($0)] }
                 return .code(CodeRowState(
                     ours: ours,
                     result: result,
                     theirs: theirs,
                     conflict: conflict.map { Int($0) },
-                    resultInvalid: chosen?.doesNotParse ?? false,
-                    resultProvenance: chosen?.provenance ?? .git
+                    resultInvalid: candidate?.doesNotParse ?? false,
+                    resultProvenance: candidate?.provenance ?? .git
                 ))
             }
         }
@@ -131,7 +148,7 @@ final class MergeEditorViewModel {
         }
     }
 
-    private func lensRow(_ conflict: Int) -> LensRowState {
+    private func lensRow(_ conflict: Int, chosen: CandidateInfo?) -> LensRowState {
         let info = model.conflict(conflict)
         return LensRowState(
             conflict: conflict,
@@ -139,7 +156,7 @@ final class MergeEditorViewModel {
             focused: model.current == conflict,
             oursCommit: info?.oursCommit,
             theirsCommit: info?.theirsCommit,
-            badges: badges(info?.chosenCandidate),
+            badges: badges(chosen),
             editing: model.editing == conflict
         )
     }

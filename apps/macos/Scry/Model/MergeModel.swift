@@ -24,6 +24,10 @@ final class MergeModel {
     private(set) var written = false
     /// The last action the core refused, until it is shown.
     var failure: String?
+    /// Goes up whenever what the editor shows changes (the snapshot, the
+    /// focus, the conflict being edited), so view models can keep what
+    /// they derive from it until then.
+    private(set) var revision = 0
 
     @ObservationIgnored private let document: MergeDocument
 
@@ -56,8 +60,9 @@ final class MergeModel {
     // MARK: Focus
 
     func focus(_ index: Int) {
-        guard conflicts.indices.contains(index) else { return }
+        guard conflicts.indices.contains(index), index != current else { return }
         current = index
+        revision += 1
     }
 
     // MARK: Resolution
@@ -107,10 +112,12 @@ final class MergeModel {
         guard conflicts.indices.contains(index) else { return }
         current = index
         editing = index
+        revision += 1
     }
 
     func stopEditing() {
         editing = nil
+        revision += 1
     }
 
     /// Resolves a conflict with text typed by hand; the core checks it.
@@ -157,6 +164,7 @@ final class MergeModel {
     }
 
     private func refresh() {
+        revision += 1
         rows = document.rows()
         longestLine = rows.reduce(0) { longest, row in
             guard case .code(let ours, let result, let theirs, _) = row else { return longest }

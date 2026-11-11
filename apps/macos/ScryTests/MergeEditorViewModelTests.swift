@@ -185,4 +185,26 @@ struct MergeEditorViewModelTests {
         #expect(editor.written)
         #expect(file.contents == "let a = 2\nlet b = 0\nlet c = 1\n")
     }
+
+    /// The rows are kept between renders and built again whenever the
+    /// model changes, whichever screen changed it: a choice from the
+    /// inspector, undo, focus or editing must all show in the lens rows.
+    @Test func rowsFollowEveryChangeOfTheModel() throws {
+        let editor = try ConflictFile().editor()
+        #expect(editor.lensRows.map(\.focused) == [true, false])
+
+        editor.inspector.choose("theirs")
+        #expect(editor.lensRows[0].badges.map(\.kind) == [.resolved(.git)])
+
+        editor.undo()
+        #expect(editor.lensRows[0].badges.map(\.kind) == [.unresolved])
+
+        editor.next()
+        #expect(editor.lensRows.map(\.focused) == [false, true])
+
+        editor.startEditing()
+        #expect(editor.lensRows.map(\.editing) == [false, true])
+        editor.editBlock?.cancel()
+        #expect(editor.lensRows.map(\.editing) == [false, false])
+    }
 }

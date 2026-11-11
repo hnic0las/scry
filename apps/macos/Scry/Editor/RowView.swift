@@ -5,8 +5,8 @@ import SwiftUI
 struct RowView: View {
     let row: MergeEditorViewModel.RowState
     let widths: PaneWidths
-    /// The panes' shared sideways scroll.
-    let scrollX: CGFloat
+    /// The panes' shared sideways scroll, read by the cells only.
+    let scroll: SideScroll
     /// Focuses a conflict.
     let focus: (Int) -> Void
 
@@ -16,19 +16,19 @@ struct RowView: View {
             LensRow(state: lens, widths: widths) { focus(lens.conflict) }
         case .code(let code):
             HStack(spacing: 0) {
-                CellView(cell: code.ours, pane: .ours, invalid: false, scrollX: scrollX, codeWidth: widths.code(widths.side))
+                CellView(cell: code.ours, pane: .ours, invalid: false, scroll: scroll, codeWidth: widths.code(widths.side))
                     .frame(width: widths.side)
                 Connector(color: Theme.Sides.ours, active: code.conflict != nil)
                     .frame(width: widths.connector)
                 CellView(
                     cell: code.result, pane: .result, invalid: code.resultInvalid,
-                    scrollX: scrollX, codeWidth: widths.code(widths.result),
+                    scroll: scroll, codeWidth: widths.code(widths.result),
                     provenance: code.resultProvenance.color
                 )
                     .frame(width: widths.result)
                 Connector(color: Theme.Sides.theirs, active: code.conflict != nil)
                     .frame(width: widths.connector)
-                CellView(cell: code.theirs, pane: .theirs, invalid: false, scrollX: scrollX, codeWidth: widths.code(widths.side))
+                CellView(cell: code.theirs, pane: .theirs, invalid: false, scroll: scroll, codeWidth: widths.code(widths.side))
                     .frame(width: widths.side)
             }
             .frame(height: Metrics.rowHeight)
@@ -49,7 +49,7 @@ struct CellView: View {
     let pane: Pane
     /// The chosen candidate does not parse.
     let invalid: Bool
-    let scrollX: CGFloat
+    let scroll: SideScroll
     /// The width the code is shown in, gutters excluded.
     let codeWidth: CGFloat
     /// The colour of the chosen resolution's provenance, for the result.
@@ -94,7 +94,7 @@ struct CellView: View {
                 .font(Metrics.code)
                 .lineLimit(1)
                 .fixedSize()
-                .offset(x: -scrollX)
+                .offset(x: -scroll.clamped)
                 .frame(width: codeWidth, alignment: .leading)
                 .mask { clipped ? AnyView(fadeMask) : AnyView(Color.black) }
                 .overlay(alignment: .trailing) {
@@ -105,7 +105,7 @@ struct CellView: View {
 
     /// Whether the line goes on past the pane's right edge.
     private var clipped: Bool {
-        CGFloat(cell.text.count) * Metrics.codeCharacterWidth - scrollX > codeWidth
+        CGFloat(cell.text.count) * Metrics.codeCharacterWidth - scroll.clamped > codeWidth
     }
 
     /// An opaque tab on the pane's edge, with the cell's own background and a

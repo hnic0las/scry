@@ -65,3 +65,30 @@ struct HorizontalScrollMonitor: NSViewRepresentable {
         }
     }
 }
+
+/// How far the three panes are scrolled sideways, shared by every cell. An
+/// object of its own that only the cells read: a scroll redraws the visible
+/// cells without evaluating the editor and its rows again.
+@MainActor
+@Observable
+final class SideScroll {
+    /// The offset as scrolled; it can exceed `maximum` until the window
+    /// widens again.
+    private(set) var offset: CGFloat
+    /// How far the longest line can scroll in the narrowest pane; set by
+    /// the editor as the window or the rows change.
+    var maximum: CGFloat = .greatestFiniteMagnitude
+
+    init(offset: CGFloat = 0) {
+        self.offset = offset
+    }
+
+    /// The offset the cells show, kept in range.
+    var clamped: CGFloat {
+        min(max(offset, 0), maximum)
+    }
+
+    func scroll(by delta: CGFloat) {
+        offset = min(max(clamped + delta, 0), maximum)
+    }
+}

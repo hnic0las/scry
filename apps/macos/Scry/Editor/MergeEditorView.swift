@@ -5,12 +5,12 @@ struct MergeEditorView: View {
     @Bindable var viewModel: MergeEditorViewModel
     @State private var showInspector = true
     /// How far the three panes are scrolled sideways, shared by all rows.
-    @State private var scrollX: CGFloat
+    @State private var scroll: SideScroll
 
     /// `scrollX` starts the panes scrolled sideways, for previews.
     init(viewModel: MergeEditorViewModel, scrollX: CGFloat = 0) {
         self.viewModel = viewModel
-        _scrollX = State(initialValue: scrollX)
+        _scroll = State(initialValue: SideScroll(offset: scrollX))
     }
 
     var body: some View {
@@ -79,12 +79,14 @@ struct MergeEditorView: View {
         ScrollViewReader { proxy in
             ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(viewModel.rows.enumerated()), id: \.offset) { offset, row in
+                    let rows = viewModel.rows
+                    ForEach(rows.indices, id: \.self) { offset in
+                        let row = rows[offset]
                         RowView(
                             row: row,
                             widths: widths,
-                            scrollX: clampedScrollX(widths),
-                            focus: viewModel.focus
+                            scroll: scroll,
+                            focus: { viewModel.focus($0) }
                         )
                         .id(offset)
                         if case .lens(let lens) = row, lens.editing, let editBlock = viewModel.editBlock {
@@ -95,8 +97,11 @@ struct MergeEditorView: View {
             }
             .background {
                 HorizontalScrollMonitor { delta in
-                    scrollX = min(max(clampedScrollX(widths) + delta, 0), maxScrollX(widths))
+                    scroll.scroll(by: delta)
                 }
+            }
+            .onChange(of: maxScrollX(widths), initial: true) { _, maximum in
+                scroll.maximum = maximum
             }
             .onChange(of: viewModel.currentConflict) { _, conflict in
                 if let row = viewModel.lensRowIndex(of: conflict) {
@@ -110,11 +115,6 @@ struct MergeEditorView: View {
     private func maxScrollX(_ widths: PaneWidths) -> CGFloat {
         let longest = CGFloat(viewModel.longestLine) * Metrics.codeCharacterWidth + Metrics.clipFadeWidth
         return max(longest - widths.code(widths.side), 0)
-    }
-
-    /// The offset, kept in range when the window narrows or the rows change.
-    private func clampedScrollX(_ widths: PaneWidths) -> CGFloat {
-        min(scrollX, maxScrollX(widths))
     }
 
     @ToolbarContentBuilder
