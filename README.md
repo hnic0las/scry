@@ -56,6 +56,16 @@ To try it on real conflicts, `scripts/make-conflicts.sh` rebuilds `conflicts/` (
 
 ## macOS app
 
+To use the app day to day, without Xcode:
+
+```sh
+scripts/install-app.sh      # builds in Release, installs /Applications/Scry.app and links git-scry on the PATH
+```
+
+Then, in a repository with a merge, rebase, cherry-pick or revert in progress, from any folder in it, `git scry` (or `git scry open [path]`) opens the app on its overview. When Scry is git's merge tool, the script points it at the installed app; otherwise Scry › Settings › CLI › Install sets it up, and `git mergetool` then opens each file in the app. Run the script again to update.
+
+To develop it:
+
 ```sh
 scripts/build-ffi.sh        # once before opening Xcode: builds the core and the Swift bindings
 open apps/macos/Scry.xcodeproj

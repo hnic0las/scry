@@ -209,10 +209,27 @@ fn run_executable(
     Ok(status.code())
 }
 
-/// The app: `$SCRY_APP`, then the usual Applications folders.
-fn find_app() -> Option<PathBuf> {
+/// The app: `$SCRY_APP`; the bundle this executable lives in
+/// (`Scry.app/Contents/Helpers/git-scry`, also when reached through a
+/// symbolic link on the PATH); then the usual Applications folders.
+pub fn find_app() -> Option<PathBuf> {
     if let Some(app) = std::env::var_os("SCRY_APP") {
         return Some(PathBuf::from(app));
+    }
+    if let Some(bundle) = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .ok()
+        .and_then(|exe| {
+            exe.ancestors()
+                .find(|folder| {
+                    folder
+                        .extension()
+                        .is_some_and(|extension| extension == "app")
+                })
+                .map(Path::to_path_buf)
+        })
+    {
+        return Some(bundle);
     }
     let mut places = vec![PathBuf::from("/Applications/Scry.app")];
     if let Some(home) = std::env::var_os("HOME") {

@@ -202,3 +202,49 @@ fn closing_the_app_unresolved_leaves_the_conflict() {
     assert_eq!(repo.file(), before);
     assert_eq!(repo.unmerged(), "file.txt\n");
 }
+
+/// `git scry` alone, from a subfolder, opens the app on the repository's
+/// root, so the overview shows the operation in progress.
+#[cfg(unix)]
+#[test]
+fn git_scry_alone_opens_the_app_on_the_repository() {
+    let apps = tempfile::tempdir().unwrap();
+    let (app, arguments) = fake_app(apps.path(), true);
+    let repo = Repo::stopped_rebase("merge", "");
+    let folder = repo.path().join("sub");
+    fs::create_dir(&folder).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_git-scry"))
+        .current_dir(&folder)
+        .env("SCRY_APP", &app)
+        .env("GIT_CONFIG_GLOBAL", repo.root.path().join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let arguments = fs::read_to_string(arguments).unwrap();
+    let root = fs::canonicalize(repo.path()).unwrap();
+    assert_eq!(arguments.trim(), root.display().to_string());
+}
+
+/// Outside a repository there is nothing to show: it says so and exits 2
+/// without starting the app.
+#[cfg(unix)]
+#[test]
+fn git_scry_open_outside_a_repository_fails() {
+    let apps = tempfile::tempdir().unwrap();
+    let (app, arguments) = fake_app(apps.path(), true);
+    let folder = tempfile::tempdir().unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_git-scry"))
+        .args(["open"])
+        .arg(folder.path())
+        .arg(format!("--app={}", app.display()))
+        .env("GIT_CEILING_DIRECTORIES", folder.path().parent().unwrap())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not in a git repository"));
+    assert!(!arguments.exists());
+}

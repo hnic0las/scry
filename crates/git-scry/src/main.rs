@@ -4,6 +4,7 @@
 //! binary is also available as `git scry`.
 
 mod highlight;
+mod open;
 mod resolve;
 
 use std::path::PathBuf;
@@ -23,12 +24,28 @@ use scry_core::syntax::{Language, ParseCheck};
     about = "Merge and review changes with git"
 )]
 struct Cli {
+    /// Without a command, opens the app on the current repository, as
+    /// `git scry open` does.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Open the Scry app on the repository's merge, rebase, cherry-pick or
+    /// revert in progress, from any folder in it. `git scry` alone does
+    /// the same.
+    ///
+    /// Exits with 0 once the app is open, 2 outside a repository or when
+    /// the app cannot be found.
+    Open {
+        /// A folder in the repository; the current one by default.
+        path: Option<PathBuf>,
+        /// The app, when not $SCRY_APP, the bundle this git-scry belongs
+        /// to, /Applications/Scry.app or ~/Applications/Scry.app.
+        #[arg(long, value_name = "PATH", require_equals = true)]
+        app: Option<PathBuf>,
+    },
     /// List the conflict regions of a file that contains conflict markers.
     ///
     /// Exits with 0 when the file has no conflict, 1 when it has some,
@@ -81,8 +98,9 @@ enum Command {
         #[arg(long)]
         allow_invalid: bool,
         /// Resolve in the Scry app instead of the terminal, and wait for
-        /// its window to close. The app is $SCRY_APP, /Applications/Scry.app
-        /// or ~/Applications/Scry.app, unless a path is given
+        /// its window to close. The app is $SCRY_APP, the bundle this
+        /// git-scry belongs to, /Applications/Scry.app or
+        /// ~/Applications/Scry.app, unless a path is given
         /// (--app=/path/to/Scry.app).
         #[arg(
             long,
@@ -97,7 +115,11 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match cli.command {
+    let Some(command) = cli.command else {
+        return open::run(None, None);
+    };
+    match command {
+        Command::Open { path, app } => open::run(path, app),
         Command::Conflicts { file } => list_conflicts(&file),
         Command::Session => show_session(),
         Command::Highlight { file, spans } => highlight::run(&file, spans),
