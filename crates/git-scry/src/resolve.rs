@@ -9,6 +9,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use scry_core::command::{Command, CommandError};
 use scry_core::git::GitCli;
 use scry_core::operation;
 use scry_core::resolution::{Candidate, CandidateKind};
@@ -47,8 +48,11 @@ pub fn run(options: Options) -> ExitCode {
     };
     let name = files.merged.display().to_string();
 
-    if options.suggested {
-        session.apply_suggestions();
+    if options.suggested
+        && let Err(error) = session.apply(Command::ApplySuggestions)
+    {
+        eprintln!("git-scry: {error}");
+        return ExitCode::from(2);
     }
     for take in &options.takes {
         if let Err(message) = apply_take(&mut session, take) {
@@ -99,15 +103,15 @@ pub fn run(options: Options) -> ExitCode {
         println!("Nothing written; {name} stays conflicted.");
         return ExitCode::from(1);
     }
-    match session.save(&files.merged, false) {
-        Ok(()) => {}
-        Err(SaveError::ChangedOnDisk(_)) => {
+    match session.apply(Command::Save { overwrite: false }) {
+        Ok(_) => {}
+        Err(CommandError::Save(SaveError::ChangedOnDisk(_))) => {
             let problem = format!("{name} changed on disk since Scry read it");
             if !(interactive && ask_yes_no(&format!("{problem}. Overwrite it?"), false)) {
                 println!("{problem}; nothing written.");
                 return ExitCode::from(1);
             }
-            if let Err(error) = session.save(&files.merged, true) {
+            if let Err(error) = session.apply(Command::Save { overwrite: true }) {
                 eprintln!("git-scry: {error}");
                 return ExitCode::from(2);
             }
@@ -134,7 +138,11 @@ fn apply_take(session: &mut MergeSession, take: &str) -> Result<(), String> {
         return Err(format!("unknown candidate {candidate:?}"));
     };
     session
-        .choose(index, kind)
+        .apply(Command::Choose {
+            conflict: index,
+            candidate: kind,
+        })
+        .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
@@ -228,12 +236,22 @@ fn ask_each_conflict(session: &mut MergeSession, ours: &str, theirs: &str) -> bo
                     .find(|kind| key(*kind) == answer)
             };
             match kind {
-                Some(kind) if session.choose(index, kind).is_ok() => break,
+                Some(kind) if choose(session, index, kind) => break,
                 _ => println!("Type one of the keys in brackets."),
             }
         }
     }
     true
+}
+
+/// Chooses a candidate; false when the conflict does not offer it.
+fn choose(session: &mut MergeSession, index: usize, kind: CandidateKind) -> bool {
+    session
+        .apply(Command::Choose {
+            conflict: index,
+            candidate: kind,
+        })
+        .is_ok()
 }
 
 fn print_side(heading: &str, text: &str) {

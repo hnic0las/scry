@@ -76,6 +76,19 @@ struct MergeEditorViewModelTests {
         #expect(editor.chosen(0) == "theirs")
     }
 
+    /// Taking the side already taken changes nothing: one undo takes the
+    /// choice back, rather than an undo that seems to do nothing.
+    @Test func takingTheSameSideTwiceIsOneStep() throws {
+        let editor = try ConflictFile().editor()
+
+        editor.take("theirs")
+        editor.take("theirs")
+        editor.undo()
+
+        #expect(editor.chosen(0) == nil)
+        #expect(!editor.canUndo)
+    }
+
     /// While a conflict is edited by hand, the editor's own shortcuts are
     /// off, so ↩, ⌘Z and ⌘↩ go to the text being typed, and a side cannot
     /// be taken behind the user's back.

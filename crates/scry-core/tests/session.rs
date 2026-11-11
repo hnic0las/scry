@@ -4,9 +4,23 @@
 use std::fs;
 use std::path::Path;
 
+use scry_core::command::{Command, CommandError, Event};
 use scry_core::git::GitCli;
 use scry_core::resolution::CandidateKind;
 use scry_core::session::{self, MergetoolFiles, Origin, SaveError};
+
+fn choose(session: &mut session::MergeSession, candidate: CandidateKind) {
+    session
+        .apply(Command::Choose {
+            conflict: 0,
+            candidate,
+        })
+        .unwrap();
+}
+
+fn save(session: &mut session::MergeSession, overwrite: bool) -> Result<Vec<Event>, CommandError> {
+    session.apply(Command::Save { overwrite })
+}
 
 fn files(dir: &Path, base: &str, local: &str, remote: &str, merged: &str) -> MergetoolFiles {
     let files = MergetoolFiles {
@@ -45,7 +59,7 @@ fn markers_without_base_are_rebuilt_with_it() {
     assert_eq!(conflict.theirs.label, "Your commit");
     assert_eq!(conflict.base.as_ref().unwrap().text, "base\n");
 
-    session.choose(0, CandidateKind::Theirs).unwrap();
+    choose(&mut session, CandidateKind::Theirs);
     assert_eq!(session.merged_text().as_deref(), Some("theirs\nend\n"));
 }
 
@@ -68,7 +82,7 @@ fn markers_with_base_are_kept_as_they_are() {
     let git = GitCli::new(dir.path().to_path_buf());
     let mut session = session::load(&git, &files, "ours", "theirs").unwrap();
     assert!(!session.rebuilt());
-    session.choose(0, CandidateKind::Ours).unwrap();
+    choose(&mut session, CandidateKind::Ours);
     assert_eq!(
         session.merged_text().as_deref(),
         Some("ours\nend, edited\n")
@@ -105,7 +119,7 @@ fn edited_markers_without_base_are_kept() {
     let mut session = session::load(&git, &files, "ours", "theirs").unwrap();
     assert_eq!(session.origin(), Origin::EditedFile);
     assert!(session.conflict(0).base.is_none());
-    session.choose(0, CandidateKind::Theirs).unwrap();
+    choose(&mut session, CandidateKind::Theirs);
     assert_eq!(
         session.merged_text().as_deref(),
         Some("theirs\nend, edited\n")
@@ -161,15 +175,15 @@ fn save_refuses_a_file_changed_on_disk() {
     let mut session = session::load(&git, &files, "ours", "theirs").unwrap();
 
     assert!(matches!(
-        session.save(&files.merged, false),
-        Err(SaveError::Unresolved(1))
+        save(&mut session, false),
+        Err(CommandError::Save(SaveError::Unresolved(1)))
     ));
-    session.choose(0, CandidateKind::Theirs).unwrap();
+    choose(&mut session, CandidateKind::Theirs);
 
     fs::write(&files.merged, "resolved elsewhere\n").unwrap();
     assert!(matches!(
-        session.save(&files.merged, false),
-        Err(SaveError::ChangedOnDisk(_))
+        save(&mut session, false),
+        Err(CommandError::Save(SaveError::ChangedOnDisk(_)))
     ));
     assert_eq!(
         fs::read_to_string(&files.merged).unwrap(),
@@ -178,13 +192,13 @@ fn save_refuses_a_file_changed_on_disk() {
 
     fs::remove_file(&files.merged).unwrap();
     assert!(matches!(
-        session.save(&files.merged, false),
-        Err(SaveError::ChangedOnDisk(_))
+        save(&mut session, false),
+        Err(CommandError::Save(SaveError::ChangedOnDisk(_)))
     ));
     assert!(!files.merged.exists());
 
-    session.save(&files.merged, true).unwrap();
+    assert_eq!(save(&mut session, true).unwrap(), vec![Event::Saved]);
     assert_eq!(fs::read_to_string(&files.merged).unwrap(), "theirs\n");
     // What Scry wrote is now the file as read: saving again is fine.
-    session.save(&files.merged, false).unwrap();
+    save(&mut session, false).unwrap();
 }

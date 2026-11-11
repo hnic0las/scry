@@ -5,6 +5,8 @@
 //! Everything here is deterministic. An agent later chooses among these
 //! candidate IDs, or adds its own candidate, instead of rewriting the file.
 
+use serde::{Deserialize, Serialize};
+
 use crate::conflict::{Conflict, Segment, conflicts};
 use crate::syntax::ParseCheck;
 
@@ -57,7 +59,10 @@ impl ConflictKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Serialised as its ID (`"ours-then-theirs"`), the name the CLI and MCP
+/// use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
 pub enum CandidateKind {
     Ours,
     Theirs,
@@ -103,6 +108,20 @@ impl CandidateKind {
         ]
         .into_iter()
         .find(|kind| kind.id() == id)
+    }
+}
+
+impl From<CandidateKind> for String {
+    fn from(kind: CandidateKind) -> String {
+        kind.id().to_string()
+    }
+}
+
+impl TryFrom<String> for CandidateKind {
+    type Error = String;
+
+    fn try_from(id: String) -> Result<CandidateKind, String> {
+        CandidateKind::from_id(&id).ok_or_else(|| format!("unknown candidate {id:?}"))
     }
 }
 

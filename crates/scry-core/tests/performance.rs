@@ -6,6 +6,7 @@
 
 use std::time::{Duration, Instant};
 
+use scry_core::command::Command;
 use scry_core::resolution::CandidateKind;
 use scry_core::session::MergeSession;
 use scry_core::syntax::Language;
@@ -68,11 +69,21 @@ fn report_timings_on_a_large_string_catalog() {
     time("rows", || session.rows());
     time("merged_check (unresolved)", || session.merged_check());
     time("choose", || {
-        session.choose(0, CandidateKind::Theirs).unwrap()
+        session
+            .apply(Command::Choose {
+                conflict: 0,
+                candidate: CandidateKind::Theirs,
+            })
+            .unwrap()
     });
     time("rows after a choice", || session.rows());
     for index in 1..40 {
-        session.choose(index, CandidateKind::Ours).unwrap();
+        session
+            .apply(Command::Choose {
+                conflict: index,
+                candidate: CandidateKind::Ours,
+            })
+            .unwrap();
     }
     time("merged_check (resolved)", || session.merged_check());
     let draft = "              \"value\" : \"Une traduction écrite à la main\"\n";

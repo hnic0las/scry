@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use scry_core::blame;
+use scry_core::command::{self as core, CommandError};
 use scry_core::git::GitCli;
 use scry_core::highlight;
 use scry_core::layout;
@@ -217,10 +218,54 @@ pub struct Status {
     pub can_redo: bool,
 }
 
+/// Something the app asks the core to do; conflicts are counted from 0.
+/// The same commands as the core's, which other UIs send as JSON.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum Command {
+    /// Resolves a conflict with a candidate, by ID ("ours", "theirs"…).
+    Choose {
+        conflict: u32,
+        candidate: String,
+    },
+    /// Resolves a conflict with text written by hand.
+    Edit {
+        conflict: u32,
+        text: String,
+    },
+    ApplySuggestions,
+    Undo,
+    Redo,
+    /// Writes the merged file; with `overwrite`, even over a file changed
+    /// on disk since it was opened.
+    Save {
+        overwrite: bool,
+    },
+}
+
+/// What a command changed.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum Event {
+    /// These conflicts' resolutions changed: rows, conflicts and status
+    /// must be read again.
+    ChoicesChanged {
+        conflicts: Vec<u32>,
+    },
+    Undone {
+        command: Command,
+    },
+    Redone {
+        command: Command,
+    },
+    HistoryChanged {
+        can_undo: bool,
+        can_redo: bool,
+    },
+    Saved,
+}
+
 /// One conflicted file open in the app.
 #[derive(uniffi::Object)]
 pub struct MergeDocument {
-    path: PathBuf,
     header: Header,
     /// Per conflict; computed once, since the sides never change.
     commits: Vec<blame::ConflictCommits>,
@@ -239,7 +284,9 @@ impl MergeDocument {
         let text = std::fs::read_to_string(&path)
             .map_err(|error| failed(format!("cannot read {}: {error}", path.display())))?;
         let language = Language::from_path(&path);
-        let session = MergeSession::from_text(&text, language).map_err(failed)?;
+        let session = MergeSession::from_text(&text, language)
+            .map_err(failed)?
+            .with_file(path.clone());
         let directory = match path.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
             _ => PathBuf::from("."),
@@ -254,7 +301,6 @@ impl MergeDocument {
             _ => Vec::new(),
         };
         Ok(Arc::new(MergeDocument {
-            path,
             header,
             commits,
             session: Mutex::new(session),
@@ -276,17 +322,21 @@ impl MergeDocument {
             .collect()
     }
 
-    /// Chooses a candidate, by ID, for the conflict at `conflict` (from 0).
-    pub fn choose(&self, conflict: u32, candidate: String) -> Result<(), ScryError> {
-        let kind = CandidateKind::from_id(&candidate)
-            .ok_or_else(|| failed(format!("unknown candidate {candidate:?}")))?;
-        self.lock().choose(conflict as usize, kind).map_err(failed)
-    }
-
-    /// Resolves the conflict at `conflict` (from 0) with text written by
-    /// hand.
-    pub fn edit(&self, conflict: u32, text: String) -> Result<(), ScryError> {
-        self.lock().edit(conflict as usize, &text).map_err(failed)
+    /// Runs a command: the only way the app changes the merge. Returns
+    /// what changed, nothing when the command changes nothing. Saving a
+    /// file changed on disk fails with `ChangedOnDisk`; the app asks, then
+    /// sends `Save` with `overwrite`.
+    pub fn apply(&self, command: Command) -> Result<Vec<Event>, ScryError> {
+        let command = core_command(command)?;
+        match self.lock().apply(command) {
+            Ok(events) => Ok(events.into_iter().map(event).collect()),
+            Err(error @ CommandError::Save(session::SaveError::ChangedOnDisk(_))) => {
+                Err(ScryError::ChangedOnDisk {
+                    message: error.to_string(),
+                })
+            }
+            Err(error) => Err(failed(error)),
+        }
     }
 
     /// What Return does while editing the conflict at `conflict`, with
@@ -321,16 +371,6 @@ impl MergeDocument {
             .collect()
     }
 
-    /// Undoes the last choice or edit; false when there is none.
-    pub fn undo(&self) -> bool {
-        self.lock().undo()
-    }
-
-    /// Redoes the last choice or edit undone; false when there is none.
-    pub fn redo(&self) -> bool {
-        self.lock().redo()
-    }
-
     pub fn status(&self) -> Status {
         let session = self.lock();
         Status {
@@ -342,19 +382,6 @@ impl MergeDocument {
             language: session
                 .language()
                 .map(|language| language.name().to_string()),
-        }
-    }
-
-    /// Writes the merged file in place. Fails while a conflict is left, and
-    /// with `ChangedOnDisk` when the file changed since it was opened,
-    /// unless `overwrite`; the app asks first in both cases where it can.
-    pub fn save(&self, overwrite: bool) -> Result<(), ScryError> {
-        match self.lock().save(&self.path, overwrite) {
-            Ok(()) => Ok(()),
-            Err(error @ session::SaveError::ChangedOnDisk(_)) => Err(ScryError::ChangedOnDisk {
-                message: error.to_string(),
-            }),
-            Err(error) => Err(failed(error)),
         }
     }
 }
@@ -516,6 +543,65 @@ fn describe(kind: CandidateKind, ours: &str, theirs: &str) -> (String, String) {
     (title.to_string(), subtitle.to_string())
 }
 
+fn core_command(command: Command) -> Result<core::Command, ScryError> {
+    Ok(match command {
+        Command::Choose {
+            conflict,
+            candidate,
+        } => core::Command::Choose {
+            conflict: conflict as usize,
+            candidate: CandidateKind::from_id(&candidate)
+                .ok_or_else(|| failed(format!("unknown candidate {candidate:?}")))?,
+        },
+        Command::Edit { conflict, text } => core::Command::Edit {
+            conflict: conflict as usize,
+            text,
+        },
+        Command::ApplySuggestions => core::Command::ApplySuggestions,
+        Command::Undo => core::Command::Undo,
+        Command::Redo => core::Command::Redo,
+        Command::Save { overwrite } => core::Command::Save { overwrite },
+    })
+}
+
+fn command(command: core::Command) -> Command {
+    match command {
+        core::Command::Choose {
+            conflict,
+            candidate,
+        } => Command::Choose {
+            conflict: conflict as u32,
+            candidate: candidate.id().to_string(),
+        },
+        core::Command::Edit { conflict, text } => Command::Edit {
+            conflict: conflict as u32,
+            text,
+        },
+        core::Command::ApplySuggestions => Command::ApplySuggestions,
+        core::Command::Undo => Command::Undo,
+        core::Command::Redo => Command::Redo,
+        core::Command::Save { overwrite } => Command::Save { overwrite },
+    }
+}
+
+fn event(event: core::Event) -> Event {
+    match event {
+        core::Event::ChoicesChanged { conflicts } => Event::ChoicesChanged {
+            conflicts: conflicts.into_iter().map(|index| index as u32).collect(),
+        },
+        core::Event::Undone { command: undone } => Event::Undone {
+            command: command(undone),
+        },
+        core::Event::Redone { command: redone } => Event::Redone {
+            command: command(redone),
+        },
+        core::Event::HistoryChanged { can_undo, can_redo } => {
+            Event::HistoryChanged { can_undo, can_redo }
+        }
+        core::Event::Saved => Event::Saved,
+    }
+}
+
 fn parse_status(check: ParseCheck) -> ParseStatus {
     match check {
         ParseCheck::NotChecked => ParseStatus::NotChecked,
@@ -596,6 +682,17 @@ fn row(row: layout::Row) -> Row {
 mod tests {
     use super::*;
 
+    fn choose(document: &MergeDocument, candidate: &str) -> Result<Vec<Event>, ScryError> {
+        document.apply(Command::Choose {
+            conflict: 0,
+            candidate: candidate.to_string(),
+        })
+    }
+
+    fn save(document: &MergeDocument, overwrite: bool) -> Result<Vec<Event>, ScryError> {
+        document.apply(Command::Save { overwrite })
+    }
+
     /// The Swift-facing API end to end: open a file, read its header and candidates, choose,
     /// refuse saving while unresolved, save once resolved, then edit by hand and undo.
     #[test]
@@ -612,7 +709,7 @@ mod tests {
         assert_eq!(document.header().ours.label, "HEAD");
         assert_eq!(document.status().total, 1);
         assert!(matches!(
-            document.save(false),
+            save(&document, false),
             Err(ScryError::Failed { .. })
         ));
 
@@ -622,22 +719,33 @@ mod tests {
             conflicts[0].candidates[1].parse,
             ParseStatus::Parses
         ));
-        document.choose(0, String::from("theirs")).unwrap();
+        choose(&document, "theirs").unwrap();
         assert_eq!(document.status().resolved, 1);
-        assert!(document.choose(0, String::from("nonsense")).is_err());
-        document.save(false).unwrap();
+        assert!(choose(&document, "nonsense").is_err());
+        save(&document, false).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "let a = 2\n");
         // Saving again is fine: the file is what Scry wrote.
-        document.save(false).unwrap();
+        save(&document, false).unwrap();
 
         // By hand, then undone back to "theirs".
-        document.edit(0, String::from("let a = 3")).unwrap();
+        document
+            .apply(Command::Edit {
+                conflict: 0,
+                text: String::from("let a = 3"),
+            })
+            .unwrap();
         let conflict = &document.conflicts()[0];
         assert_eq!(conflict.chosen.as_deref(), Some("edited"));
         assert!(matches!(conflict.edited_parse, Some(ParseStatus::Parses)));
         assert_eq!(conflict.edit_text, "let a = 3\n");
         assert!(document.status().can_undo);
-        assert!(document.undo());
+        let undone = document.apply(Command::Undo).unwrap();
+        assert!(matches!(
+            &undone[0],
+            Event::Undone {
+                command: Command::Edit { .. }
+            }
+        ));
         assert_eq!(document.conflicts()[0].chosen.as_deref(), Some("theirs"));
         assert!(document.status().can_redo);
     }
@@ -656,16 +764,51 @@ mod tests {
         )
         .unwrap();
         let document = MergeDocument::open(path.display().to_string()).unwrap();
-        document.choose(0, String::from("theirs")).unwrap();
+        choose(&document, "theirs").unwrap();
 
         std::fs::write(&path, "let a = 42\n").unwrap();
         assert!(matches!(
-            document.save(false),
+            save(&document, false),
             Err(ScryError::ChangedOnDisk { .. })
         ));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "let a = 42\n");
 
-        document.save(true).unwrap();
+        save(&document, true).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "let a = 2\n");
+    }
+
+    /// The app sends conflict indices it got from the core, but a stale
+    /// or wrong one must be refused, never crash the app and lose the
+    /// user's choices: commands fail, queries return nothing.
+    #[test]
+    fn out_of_range_conflicts_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.swift");
+        std::fs::write(
+            &path,
+            "<<<<<<< HEAD\nlet a = 1\n=======\nlet a = 2\n>>>>>>> other\n",
+        )
+        .unwrap();
+        let document = MergeDocument::open(path.display().to_string()).unwrap();
+
+        for command in [
+            Command::Choose {
+                conflict: 7,
+                candidate: String::from("ours"),
+            },
+            Command::Edit {
+                conflict: 7,
+                text: String::from("x"),
+            },
+        ] {
+            assert!(matches!(
+                document.apply(command),
+                Err(ScryError::Failed { .. })
+            ));
+        }
+        assert!(document.highlight_draft(7, String::from("x\n")).is_empty());
+        document.newline(7, String::from("{"), String::new());
+        document.typed_indent(7, String::from("{\n"), String::from("}"));
+        assert!(!document.status().can_undo);
     }
 }

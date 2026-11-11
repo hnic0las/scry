@@ -11,6 +11,7 @@ use std::io::{self, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use crate::command::{Command, CommandError, Event};
 use crate::conflict::{self, Conflict, ParseError, Segment};
 use crate::git::{Git, GitError};
 use crate::highlight::{Highlighter, Span};
@@ -52,9 +53,16 @@ pub struct Edit {
     pub parse: ParseCheck,
 }
 
-/// One step of the history: the conflicts it changed, each with the choice
-/// it had before.
+/// Conflicts with a choice each: the choices a command sets, or the ones
+/// they replaced.
 type Change = Vec<(usize, Option<Choice>)>;
+
+/// One step of the history: the command that made it, so undo can say
+/// what it undoes, and the choices it replaced.
+struct Step {
+    command: Command,
+    previous: Change,
+}
 
 /// Where a session's conflicts come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,9 +84,11 @@ pub struct MergeSession {
     choices: Vec<Option<Choice>>,
     /// Changes to undo, the latest last, and changes undone that can be
     /// redone. A new change clears the redo history, as in any editor.
-    undo_history: Vec<Change>,
-    redo_history: Vec<Change>,
+    undo_history: Vec<Step>,
+    redo_history: Vec<Step>,
     origin: Origin,
+    /// Where `Command::Save` writes: the file the session was read from.
+    file: Option<PathBuf>,
     /// The file's text as last read or written, to tell whether something
     /// else changed it before writing over it.
     on_disk: String,
@@ -114,6 +124,12 @@ impl MergeSession {
         ))
     }
 
+    /// The file the session was read from, where `Command::Save` writes.
+    pub fn with_file(mut self, path: PathBuf) -> MergeSession {
+        self.file = Some(path);
+        self
+    }
+
     fn from_segments(
         segments: Vec<Segment>,
         origin: Origin,
@@ -138,6 +154,7 @@ impl MergeSession {
             undo_history: Vec::new(),
             redo_history: Vec::new(),
             origin,
+            file: None,
             on_disk,
             language,
             checkable,
@@ -294,11 +311,33 @@ impl MergeSession {
         self.origin
     }
 
-    /// Writes the merged text to `path`, the file the session was read
-    /// from. Refuses while a conflict is left, and when the file changed on
-    /// disk since it was read (resolved in another editor, `git checkout`,
-    /// an aborted rebase) unless `overwrite` says to write over it anyway.
-    pub fn save(&mut self, path: &Path, overwrite: bool) -> Result<(), SaveError> {
+    /// Runs a command: the only way a UI changes the session. Returns what
+    /// changed, nothing when the command changes nothing; a refused command
+    /// leaves the session as it was.
+    pub fn apply(&mut self, command: Command) -> Result<Vec<Event>, CommandError> {
+        Ok(match command {
+            Command::Choose {
+                conflict,
+                candidate,
+            } => self.choose(conflict, candidate)?,
+            Command::Edit { conflict, text } => self.edit(conflict, &text)?,
+            Command::ApplySuggestions => self.apply_suggestions(),
+            Command::Undo => self.undo(),
+            Command::Redo => self.redo(),
+            Command::Save { overwrite } => {
+                self.save(overwrite)?;
+                vec![Event::Saved]
+            }
+        })
+    }
+
+    /// Writes the merged text to the file the session was read from.
+    /// Refuses while a conflict is left, and when the file changed on disk
+    /// since it was read (resolved in another editor, `git checkout`, an
+    /// aborted rebase) unless `overwrite` says to write over it anyway.
+    fn save(&mut self, overwrite: bool) -> Result<(), SaveError> {
+        let path = self.file.clone().ok_or(SaveError::NoFile)?;
+        let path = path.as_path();
         let text = self
             .merged_text()
             .ok_or(SaveError::Unresolved(self.unresolved()))?;
@@ -350,7 +389,11 @@ impl MergeSession {
 
     /// Chooses a candidate for a conflict; it must be one the conflict
     /// offers.
-    pub fn choose(&mut self, index: usize, kind: CandidateKind) -> Result<(), ChooseError> {
+    pub(crate) fn choose(
+        &mut self,
+        index: usize,
+        kind: CandidateKind,
+    ) -> Result<Vec<Event>, ChooseError> {
         let Some(analysis) = self.analyses.get(index) else {
             return Err(ChooseError::NoSuchConflict(index + 1));
         };
@@ -364,14 +407,17 @@ impl MergeSession {
                 candidate: kind.id(),
             });
         }
-        self.apply(vec![(index, Some(Choice::Candidate(kind)))]);
-        Ok(())
+        let command = Command::Choose {
+            conflict: index,
+            candidate: kind,
+        };
+        Ok(self.record(command, vec![(index, Some(Choice::Candidate(kind)))]))
     }
 
     /// Resolves a conflict with text written by hand, checked by parsing
     /// like a candidate. A text without a final line break gets one, so the
     /// line after the conflict stays on its own line.
-    pub fn edit(&mut self, index: usize, text: &str) -> Result<(), ChooseError> {
+    pub(crate) fn edit(&mut self, index: usize, text: &str) -> Result<Vec<Event>, ChooseError> {
         let Some(conflict) = self.conflicts.get(index) else {
             return Err(ChooseError::NoSuchConflict(index + 1));
         };
@@ -382,8 +428,14 @@ impl MergeSession {
             text.push_str(if crlf { "\r\n" } else { "\n" });
         }
         let parse = self.check_in_place(index, &text);
-        self.apply(vec![(index, Some(Choice::Edited(Edit { text, parse })))]);
-        Ok(())
+        let command = Command::Edit {
+            conflict: index,
+            text: text.clone(),
+        };
+        Ok(self.record(
+            command,
+            vec![(index, Some(Choice::Edited(Edit { text, parse })))],
+        ))
     }
 
     /// What Return does while editing conflict `index` by hand, with
@@ -479,8 +531,8 @@ impl MergeSession {
     }
 
     /// Chooses the rule suggestion for every conflict that has one and no
-    /// choice yet, as one step of the history. Returns how many were chosen.
-    pub fn apply_suggestions(&mut self) -> usize {
+    /// choice yet, as one step of the history.
+    fn apply_suggestions(&mut self) -> Vec<Event> {
         let mut changes = Vec::new();
         for (index, analysis) in self.analyses.iter().enumerate() {
             if self.choices[index].is_none()
@@ -489,18 +541,32 @@ impl MergeSession {
                 changes.push((index, Some(Choice::Candidate(suggestion))));
             }
         }
-        let applied = changes.len();
-        if applied > 0 {
-            self.apply(changes);
-        }
-        applied
+        self.record(Command::ApplySuggestions, changes)
     }
 
-    /// Sets choices as one step of the history.
-    fn apply(&mut self, changes: Change) {
+    /// Sets choices as one step of the history, made by `command`. Choices
+    /// already in place are left out, so choosing the chosen candidate
+    /// again adds no empty step to undo.
+    fn record(&mut self, command: Command, changes: Change) -> Vec<Event> {
+        let changes: Change = changes
+            .into_iter()
+            .filter(|(index, choice)| self.choices[*index] != *choice)
+            .collect();
+        if changes.is_empty() {
+            return Vec::new();
+        }
+        let conflicts = changes.iter().map(|(index, _)| *index).collect();
         let previous = self.swap(changes);
-        self.undo_history.push(previous);
+        self.undo_history.push(Step { command, previous });
         self.redo_history.clear();
+        vec![Event::ChoicesChanged { conflicts }, self.history_changed()]
+    }
+
+    fn history_changed(&self) -> Event {
+        Event::HistoryChanged {
+            can_undo: self.can_undo(),
+            can_redo: self.can_redo(),
+        }
     }
 
     /// Puts each choice in place and returns the ones it replaced.
@@ -514,24 +580,46 @@ impl MergeSession {
             .collect()
     }
 
-    /// Undoes the last step; false when there is none.
-    pub fn undo(&mut self) -> bool {
-        let Some(change) = self.undo_history.pop() else {
-            return false;
+    /// Undoes the last step; no event when there is none.
+    fn undo(&mut self) -> Vec<Event> {
+        let Some(step) = self.undo_history.pop() else {
+            return Vec::new();
         };
-        let redo = self.swap(change);
-        self.redo_history.push(redo);
-        true
+        let (command, conflicts, previous) = self.revert(step);
+        self.redo_history.push(Step {
+            command: command.clone(),
+            previous,
+        });
+        vec![
+            Event::Undone { command },
+            Event::ChoicesChanged { conflicts },
+            self.history_changed(),
+        ]
     }
 
-    /// Redoes the last step undone; false when there is none.
-    pub fn redo(&mut self) -> bool {
-        let Some(change) = self.redo_history.pop() else {
-            return false;
+    /// Redoes the last step undone; no event when there is none.
+    fn redo(&mut self) -> Vec<Event> {
+        let Some(step) = self.redo_history.pop() else {
+            return Vec::new();
         };
-        let undo = self.swap(change);
-        self.undo_history.push(undo);
-        true
+        let (command, conflicts, previous) = self.revert(step);
+        self.undo_history.push(Step {
+            command: command.clone(),
+            previous,
+        });
+        vec![
+            Event::Redone { command },
+            Event::ChoicesChanged { conflicts },
+            self.history_changed(),
+        ]
+    }
+
+    /// Puts a step's choices back: its command, the conflicts it touches,
+    /// and the choices it replaced, which make the opposite step.
+    fn revert(&mut self, step: Step) -> (Command, Vec<usize>, Change) {
+        let conflicts = step.previous.iter().map(|(index, _)| *index).collect();
+        let previous = self.swap(step.previous);
+        (step.command, conflicts, previous)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -731,33 +819,27 @@ pub fn load(
         conflicts.peek().is_none() || conflicts.all(|conflict| conflict.base.is_some())
     };
     if has_base {
-        return Ok(MergeSession::from_segments(
-            segments,
-            Origin::File,
-            merged,
-            language,
-        ));
+        return Ok(
+            MergeSession::from_segments(segments, Origin::File, merged, language)
+                .with_file(files.merged.clone()),
+        );
     }
 
     let as_git_wrote = merge_file(git, files, ours, theirs, None)?;
     let unchanged = conflict::parse(&as_git_wrote)
         .is_ok_and(|written| same_ignoring_labels(&segments, &written));
     if !unchanged {
-        return Ok(MergeSession::from_segments(
-            segments,
-            Origin::EditedFile,
-            merged,
-            language,
-        ));
+        return Ok(
+            MergeSession::from_segments(segments, Origin::EditedFile, merged, language)
+                .with_file(files.merged.clone()),
+        );
     }
     let text = merge_file(git, files, ours, theirs, Some("--zdiff3"))?;
     let rebuilt = conflict::parse(&text).map_err(LoadError::Parse)?;
-    Ok(MergeSession::from_segments(
-        rebuilt,
-        Origin::Rebuilt,
-        merged,
-        language,
-    ))
+    Ok(
+        MergeSession::from_segments(rebuilt, Origin::Rebuilt, merged, language)
+            .with_file(files.merged.clone()),
+    )
 }
 
 /// Whether two parsed files have the same text and the same conflict
@@ -916,6 +998,8 @@ impl std::error::Error for LoadError {}
 /// Why a session could not be saved.
 #[derive(Debug)]
 pub enum SaveError {
+    /// The session was not read from a file.
+    NoFile,
     /// Conflicts still without a resolution.
     Unresolved(usize),
     /// The file changed on disk since it was read.
@@ -926,6 +1010,7 @@ pub enum SaveError {
 impl fmt::Display for SaveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            SaveError::NoFile => write!(f, "no file to write to"),
             SaveError::Unresolved(count) => write!(f, "{count} conflict(s) left"),
             SaveError::ChangedOnDisk(path) => {
                 write!(f, "{} changed on disk since Scry read it", path.display())
@@ -1022,19 +1107,19 @@ mod tests {
     #[test]
     fn undo_and_redo_walk_the_history() {
         let mut session = MergeSession::from_text(TEXT, None).unwrap();
-        assert!(!session.can_undo() && !session.undo());
+        assert!(!session.can_undo() && session.undo().is_empty());
         session.choose(0, CandidateKind::Ours).unwrap();
         session.edit(0, "mine").unwrap();
-        assert!(session.undo());
+        assert!(!session.undo().is_empty());
         assert_eq!(session.chosen_text(0), Some("a\n"));
-        assert!(session.undo());
+        assert!(!session.undo().is_empty());
         assert_eq!(session.choice(0), None);
         assert!(session.can_redo());
-        assert!(session.redo());
+        assert!(!session.redo().is_empty());
         assert_eq!(session.chosen_text(0), Some("a\n"));
         session.choose(0, CandidateKind::Theirs).unwrap();
         assert!(!session.can_redo());
-        assert!(session.undo());
+        assert!(!session.undo().is_empty());
         assert_eq!(session.chosen_text(0), Some("a\n"));
     }
 
@@ -1082,14 +1167,17 @@ mod tests {
     #[test]
     fn suggestions_undo_in_one_step() {
         let mut session = MergeSession::from_text(TEXT, None).unwrap();
-        assert_eq!(session.apply_suggestions(), 1);
-        assert!(session.undo());
+        assert_eq!(
+            session.apply_suggestions()[0],
+            Event::ChoicesChanged { conflicts: vec![1] }
+        );
+        assert!(!session.undo().is_empty());
         assert_eq!(session.unresolved(), 2);
         assert!(!session.can_undo());
         // Nothing to suggest: no empty step in the history.
         session.choose(1, CandidateKind::Ours).unwrap();
-        assert_eq!(session.apply_suggestions(), 0);
-        assert!(session.undo());
+        assert!(session.apply_suggestions().is_empty());
+        assert!(!session.undo().is_empty());
         assert!(!session.can_undo());
     }
 
@@ -1133,7 +1221,10 @@ mod tests {
     #[test]
     fn suggestions_fill_only_open_conflicts_that_have_one() {
         let mut session = MergeSession::from_text(TEXT, None).unwrap();
-        assert_eq!(session.apply_suggestions(), 1);
+        assert_eq!(
+            session.apply_suggestions()[0],
+            Event::ChoicesChanged { conflicts: vec![1] }
+        );
         assert_eq!(session.choice(0), None);
         assert_eq!(
             session.choice(1),
@@ -1261,5 +1352,91 @@ mod tests {
         );
         session.choose(0, CandidateKind::Ours).unwrap();
         assert_eq!(session.merged_check(), ParseCheck::NotChecked);
+    }
+
+    /// Every change returns what changed and what undo can do, so a UI
+    /// refreshes from the events rather than guessing; undo names the
+    /// command it undoes, since the history keeps commands.
+    #[test]
+    fn commands_return_what_changed() {
+        let mut session = MergeSession::from_text(TEXT, None).unwrap();
+        let choose = Command::Choose {
+            conflict: 0,
+            candidate: CandidateKind::Theirs,
+        };
+
+        assert_eq!(
+            session.apply(choose.clone()).unwrap(),
+            vec![
+                Event::ChoicesChanged { conflicts: vec![0] },
+                Event::HistoryChanged {
+                    can_undo: true,
+                    can_redo: false
+                },
+            ]
+        );
+        assert_eq!(
+            session.apply(Command::Undo).unwrap(),
+            vec![
+                Event::Undone {
+                    command: choose.clone()
+                },
+                Event::ChoicesChanged { conflicts: vec![0] },
+                Event::HistoryChanged {
+                    can_undo: false,
+                    can_redo: true
+                },
+            ]
+        );
+        assert_eq!(
+            session.apply(Command::Redo).unwrap()[0],
+            Event::Redone { command: choose }
+        );
+    }
+
+    /// A command that changes nothing returns no event and adds no step:
+    /// choosing the chosen candidate again must not need two undos.
+    #[test]
+    fn choosing_the_chosen_candidate_changes_nothing() {
+        let mut session = MergeSession::from_text(TEXT, None).unwrap();
+        let choose = Command::Choose {
+            conflict: 0,
+            candidate: CandidateKind::Ours,
+        };
+        session.apply(choose.clone()).unwrap();
+
+        assert!(session.apply(choose).unwrap().is_empty());
+        session.apply(Command::Undo).unwrap();
+        assert!(!session.can_undo());
+        assert!(session.apply(Command::Undo).unwrap().is_empty());
+    }
+
+    /// A refused command leaves the session as it was, and saving a
+    /// session that was not read from a file says so instead of writing
+    /// somewhere.
+    #[test]
+    fn refused_commands_change_nothing() {
+        let mut session = MergeSession::from_text(TEXT, None).unwrap();
+        let refused = session.apply(Command::Choose {
+            conflict: 9,
+            candidate: CandidateKind::Ours,
+        });
+        assert!(matches!(
+            refused,
+            Err(CommandError::Choose(ChooseError::NoSuchConflict(10)))
+        ));
+        assert!(!session.can_undo());
+
+        session.apply(Command::ApplySuggestions).unwrap();
+        session
+            .apply(Command::Choose {
+                conflict: 0,
+                candidate: CandidateKind::Ours,
+            })
+            .unwrap();
+        assert!(matches!(
+            session.apply(Command::Save { overwrite: false }),
+            Err(CommandError::Save(SaveError::NoFile))
+        ));
     }
 }

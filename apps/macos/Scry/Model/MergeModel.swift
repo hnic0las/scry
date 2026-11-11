@@ -4,8 +4,9 @@ import Observation
 /// The open merge: the model every view model shares. Every fact comes from
 /// the Rust core (`MergeDocument`); this keeps the latest snapshot, the
 /// state shared across screens (the focused conflict, the one being edited)
-/// and forwards actions. Views never use it directly: they go through their
-/// view model.
+/// and sends the user's actions to the core as commands, reading the
+/// snapshot again when the events say the choices changed. Views never use
+/// it directly: they go through their view model.
 @MainActor
 @Observable
 final class MergeModel {
@@ -68,15 +69,15 @@ final class MergeModel {
     // MARK: Resolution
 
     func choose(_ candidate: String, conflict index: Int) {
-        run { try document.choose(conflict: UInt32(index), candidate: candidate) }
+        send(.choose(conflict: UInt32(index), candidate: candidate))
     }
 
     func undo() {
-        if document.undo() { changed() }
+        send(.undo)
     }
 
     func redo() {
-        if document.redo() { changed() }
+        send(.redo)
     }
 
     /// How a save ended.
@@ -92,8 +93,7 @@ final class MergeModel {
     @discardableResult
     func save(overwrite: Bool = false) -> SaveOutcome {
         do {
-            try document.save(overwrite: overwrite)
-            written = true
+            try apply(.save(overwrite: overwrite))
             return .written
         } catch let error as ScryError {
             if case .ChangedOnDisk = error { return .changedOnDisk }
@@ -124,7 +124,7 @@ final class MergeModel {
     /// Tells whether the core took it.
     @discardableResult
     func edit(_ index: Int, text: String) -> Bool {
-        run { try document.edit(conflict: UInt32(index), text: text) }
+        send(.edit(conflict: UInt32(index), text: text))
     }
 
     /// Spans per line of a draft, coloured in place in the file.
@@ -146,11 +146,12 @@ final class MergeModel {
 
     // MARK: Private
 
+    /// Sends a command, keeping the reason when the core refuses it.
+    /// Tells whether the core took it.
     @discardableResult
-    private func run(_ action: () throws -> Void) -> Bool {
+    private func send(_ command: Command) -> Bool {
         do {
-            try action()
-            changed()
+            try apply(command)
             return true
         } catch {
             failure = "\(error)"
@@ -158,9 +159,21 @@ final class MergeModel {
         }
     }
 
-    private func changed() {
-        written = false
-        refresh()
+    /// Sends a command and follows what it changed. A command that changes
+    /// nothing returns no event, and nothing is read again.
+    private func apply(_ command: Command) throws {
+        for event in try document.apply(command: command) {
+            switch event {
+            case .choicesChanged:
+                written = false
+                refresh()
+            case .saved:
+                written = true
+            case .undone, .redone, .historyChanged:
+                // The status read with the choices says what undo can do.
+                break
+            }
+        }
     }
 
     private func refresh() {
