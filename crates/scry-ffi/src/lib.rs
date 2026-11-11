@@ -14,6 +14,7 @@ use scry_core::conflict;
 use scry_core::git::GitCli;
 use scry_core::highlight;
 use scry_core::layout;
+use scry_core::mergetool;
 use scry_core::operation;
 use scry_core::presentation;
 use scry_core::resolution::CandidateKind;
@@ -580,6 +581,53 @@ fn lens_badge(badge: theme::Badge) -> LensBadge {
         text: badge.text,
         role,
     }
+}
+
+/// What git's global configuration says about the merge tool.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum MergetoolSetup {
+    NotSet,
+    Other {
+        tool: String,
+    },
+    /// `current` when its command runs this app, not one moved since.
+    Scry {
+        current: bool,
+    },
+}
+
+/// The merge tool command that runs `cli` (the app's `git-scry`) to open
+/// `app` (the app bundle).
+#[uniffi::export]
+pub fn mergetool_command(cli: String, app: String) -> String {
+    mergetool::command(Path::new(&cli), Path::new(&app))
+}
+
+/// Reads the merge tool from git's global configuration.
+#[uniffi::export]
+pub fn mergetool_setup(cli: String, app: String) -> Result<MergetoolSetup, ScryError> {
+    let command = mergetool_command(cli, app);
+    Ok(
+        match mergetool::setup(&global_git(), &command).map_err(failed)? {
+            mergetool::Setup::NotSet => MergetoolSetup::NotSet,
+            mergetool::Setup::Other { tool } => MergetoolSetup::Other { tool },
+            mergetool::Setup::Scry { current } => MergetoolSetup::Scry { current },
+        },
+    )
+}
+
+/// Makes Scry git's merge tool for every repository, in git's global
+/// configuration.
+#[uniffi::export]
+pub fn install_mergetool(cli: String, app: String) -> Result<(), ScryError> {
+    let command = mergetool_command(cli, app);
+    mergetool::install(&global_git(), &command).map_err(failed)
+}
+
+/// Git for the global configuration, run from the home folder.
+fn global_git() -> GitCli {
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
+    GitCli::with_program(git_program(), home)
 }
 
 /// Git, run from the directory of the file at `path`.

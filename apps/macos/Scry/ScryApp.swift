@@ -18,6 +18,10 @@ struct ScryApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
+
+        Settings {
+            SettingsView()
+        }
     }
 
     static let window = "merge"

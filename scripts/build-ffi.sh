@@ -5,6 +5,8 @@
 #
 #   apps/macos/Generated/include/   C header and module map (module scry_ffiFFI)
 #   apps/macos/Scry/Generated/      scry_ffi.swift, compiled with the app
+#   Scry.app/Contents/Helpers/      git-scry, which the app's merge-tool
+#                                   setting points git at (from Xcode only)
 #
 # The app links target/<profile>/libscry_ffi.a by its full path (see the
 # Xcode project's OTHER_LDFLAGS).
@@ -18,10 +20,21 @@ export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
 
 if [ "${CONFIGURATION:-Debug}" = "Release" ]; then
   profile=release
-  cargo build --quiet -p scry-ffi --release
+  cargo build --quiet -p scry-ffi -p git-scry --release
 else
   profile=debug
-  cargo build --quiet -p scry-ffi
+  cargo build --quiet -p scry-ffi -p git-scry
+fi
+
+# The app carries its command-line tool, so the merge-tool setting can
+# point git at a git-scry that exists, whatever the PATH.
+if [ -n "${TARGET_BUILD_DIR:-}" ] && [ -n "${CONTENTS_FOLDER_PATH:-}" ]; then
+  helpers="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
+  mkdir -p "$helpers"
+  if ! cmp -s "target/$profile/git-scry" "$helpers/git-scry"; then
+    cp "target/$profile/git-scry" "$helpers/git-scry"
+    codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY:--}" "$helpers/git-scry"
+  fi
 fi
 
 out=apps/macos/Generated
