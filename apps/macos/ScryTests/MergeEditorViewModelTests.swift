@@ -76,6 +76,16 @@ struct MergeEditorViewModelTests {
         #expect(editor.chosen(0) == "theirs")
     }
 
+    /// The panes scroll as far as the widest line as drawn: tabs reach
+    /// their stop and wide characters count double, or the end of such a
+    /// line could not be scrolled to.
+    @Test func measuresLinesAsDrawn() throws {
+        let editor = try ConflictFile(text: ConflictFile.text + "\t\tlet 名前 = 1\n").editor()
+
+        // Eight spaces, "let ", two wide characters, " = 1".
+        #expect(editor.longestLine == 8 + 4 + 4 + 4)
+    }
+
     /// Taking the side already taken changes nothing: one undo takes the
     /// choice back, rather than an undo that seems to do nothing.
     @Test func takingTheSameSideTwiceIsOneStep() throws {

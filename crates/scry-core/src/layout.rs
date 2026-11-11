@@ -4,10 +4,17 @@
 //! Common lines appear on one row in all three panes. A conflict takes as
 //! many rows as its longest pane; shorter panes get spacer rows.
 
+use std::ops::Range;
+
+use unicode_width::UnicodeWidthChar;
+
 use crate::conflict::Segment;
 use crate::highlight::Span;
 use crate::session::MergeSession;
 use crate::words::{self, LineChange};
+
+/// Tab stops every this many columns, as most editors show code.
+pub const TAB_WIDTH: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellKind {
@@ -30,7 +37,14 @@ pub struct Cell {
     /// The line number in this pane's own file; `None` for rows without a
     /// line (spacer, unresolved, removed).
     pub number: Option<usize>,
+    /// The line as shown: tabs are expanded to spaces up to the next tab
+    /// stop, so every UI lines it up the same way, and spans and changed
+    /// words are in bytes of this text.
     pub text: String,
+    /// How wide `text` is in a monospaced font, in columns: characters
+    /// that are wide in East Asian text (CJK, most emoji) count 2. A UI
+    /// multiplies it by one column's width instead of measuring the line.
+    pub columns: usize,
     pub kind: CellKind,
     /// Syntax highlighting of `text`; empty for plain text or without a
     /// grammar.
@@ -71,22 +85,96 @@ struct Highlights<'a> {
     theirs: &'a [Vec<Span>],
 }
 
-fn line(number: &mut usize, text: &str, kind: CellKind, spans: &[Vec<Span>]) -> Cell {
+fn line(
+    number: &mut usize,
+    text: &str,
+    kind: CellKind,
+    spans: &[Vec<Span>],
+    change: LineChange,
+) -> Cell {
+    let shown = Shown::new(text);
     let cell = Cell {
         number: Some(*number),
-        text: text.to_string(),
+        text: shown.text.clone(),
+        columns: shown.columns,
         kind,
-        spans: spans.get(*number - 1).cloned().unwrap_or_default(),
-        change: LineChange::Unchanged,
+        spans: spans
+            .get(*number - 1)
+            .map(|line| {
+                line.iter()
+                    .map(|span| Span {
+                        start: shown.offset(span.start),
+                        end: shown.offset(span.end),
+                        role: span.role,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        change: match change {
+            LineChange::Edited { words } => LineChange::Edited {
+                words: words.into_iter().map(|range| shown.range(range)).collect(),
+            },
+            other => other,
+        },
     };
     *number += 1;
     cell
+}
+
+/// A line with its tabs expanded, and where each original byte went.
+struct Shown {
+    text: String,
+    columns: usize,
+    /// Byte offset of each tab in the original line, with the bytes
+    /// inserted for it (its spaces minus the tab itself).
+    tabs: Vec<(usize, usize)>,
+}
+
+impl Shown {
+    fn new(line: &str) -> Shown {
+        let mut text = String::with_capacity(line.len());
+        let mut columns = 0;
+        let mut tabs = Vec::new();
+        for (offset, character) in line.char_indices() {
+            if character == '\t' {
+                let spaces = TAB_WIDTH - columns % TAB_WIDTH;
+                text.extend(std::iter::repeat_n(' ', spaces));
+                columns += spaces;
+                tabs.push((offset, spaces - 1));
+            } else {
+                text.push(character);
+                columns += character.width().unwrap_or(0);
+            }
+        }
+        Shown {
+            text,
+            columns,
+            tabs,
+        }
+    }
+
+    /// Where byte `offset` of the original line is in the shown text: after
+    /// the spaces of every tab before it.
+    fn offset(&self, offset: usize) -> usize {
+        let inserted: usize = self
+            .tabs
+            .iter()
+            .take_while(|(tab, _)| *tab < offset)
+            .map(|(_, extra)| extra)
+            .sum();
+        offset + inserted
+    }
+
+    fn range(&self, range: Range<usize>) -> Range<usize> {
+        self.offset(range.start)..self.offset(range.end)
+    }
 }
 
 fn empty(kind: CellKind) -> Cell {
     Cell {
         number: None,
         text: String::new(),
+        columns: 0,
         kind,
         spans: Vec::new(),
         change: LineChange::Unchanged,
@@ -113,18 +201,26 @@ impl MergeSession {
                 Segment::Common(text) => {
                     for text in text.lines() {
                         rows.push(Row::Code {
-                            ours: line(&mut numbers.ours, text, CellKind::Common, highlights.ours),
+                            ours: line(
+                                &mut numbers.ours,
+                                text,
+                                CellKind::Common,
+                                highlights.ours,
+                                LineChange::Unchanged,
+                            ),
                             result: line(
                                 &mut numbers.result,
                                 text,
                                 CellKind::Common,
                                 highlights.result,
+                                LineChange::Unchanged,
                             ),
                             theirs: line(
                                 &mut numbers.theirs,
                                 text,
                                 CellKind::Common,
                                 highlights.theirs,
+                                LineChange::Unchanged,
                             ),
                             conflict: None,
                         });
@@ -176,26 +272,23 @@ impl MergeSession {
 
         for row in 0..count {
             let ours_cell = match ours.get(row) {
-                Some(text) => {
-                    let mut cell =
-                        line(&mut numbers.ours, text, CellKind::Conflict, highlights.ours);
-                    cell.change = std::mem::replace(&mut ours_changes[row], LineChange::Unchanged);
-                    cell
-                }
+                Some(text) => line(
+                    &mut numbers.ours,
+                    text,
+                    CellKind::Conflict,
+                    highlights.ours,
+                    std::mem::replace(&mut ours_changes[row], LineChange::Unchanged),
+                ),
                 None => empty(CellKind::Spacer),
             };
             let theirs_cell = match theirs.get(row) {
-                Some(text) => {
-                    let mut cell = line(
-                        &mut numbers.theirs,
-                        text,
-                        CellKind::Conflict,
-                        highlights.theirs,
-                    );
-                    cell.change =
-                        std::mem::replace(&mut theirs_changes[row], LineChange::Unchanged);
-                    cell
-                }
+                Some(text) => line(
+                    &mut numbers.theirs,
+                    text,
+                    CellKind::Conflict,
+                    highlights.theirs,
+                    std::mem::replace(&mut theirs_changes[row], LineChange::Unchanged),
+                ),
                 None => empty(CellKind::Spacer),
             };
             let result_cell = match (chosen_text, result.get(row)) {
@@ -204,6 +297,7 @@ impl MergeSession {
                     text,
                     CellKind::Chosen,
                     highlights.result,
+                    LineChange::Unchanged,
                 ),
                 (Some(_), None) if row == 0 => empty(CellKind::Removed),
                 (None, _) if row == 0 => empty(CellKind::Unresolved),
@@ -360,5 +454,52 @@ mod tests {
         session.choose(0, CandidateKind::Neither).unwrap();
         let rows = session.rows();
         assert_eq!(kinds(&rows)[2], "Conflict Removed Conflict");
+    }
+
+    /// Tabs become spaces up to the next stop of four columns, and wide
+    /// characters count two: the UI sizes lines from `columns`, and a line
+    /// measured short could not be scrolled to its end.
+    #[test]
+    fn lines_are_measured_in_columns() {
+        let tabbed = Shown::new("\tif a {\tb");
+        assert_eq!(tabbed.text, "    if a {  b");
+        assert_eq!(tabbed.columns, 13);
+        // "if" after the first tab, "b" after both.
+        assert_eq!(tabbed.offset(1), 4);
+        assert_eq!(tabbed.offset(8), 12);
+        assert_eq!(&tabbed.text[tabbed.range(8..9)], "b");
+
+        let wide = Shown::new("let 名前 = 1 🚀");
+        assert_eq!(wide.text, "let 名前 = 1 🚀");
+        assert_eq!(wide.columns, 4 + 4 + 5 + 2);
+    }
+
+    /// Colours and changed words follow the expanded text, so a keyword
+    /// after a tab stays coloured where it is drawn.
+    #[test]
+    fn spans_and_changed_words_follow_expanded_tabs() {
+        let text = "package a\n\nfunc f() {\n<<<<<<< ours\n\treturn 1\n||||||| base\n\treturn 0\n=======\n\treturn 2\n>>>>>>> theirs\n}\n";
+        let session = MergeSession::from_text(text, Some(Language::Go)).unwrap();
+        let rows = session.rows();
+        let ours = rows
+            .iter()
+            .find_map(|row| match row {
+                Row::Code { ours, .. } if ours.kind == CellKind::Conflict => Some(ours),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(ours.text, "    return 1");
+        assert_eq!(ours.columns, 12);
+        let keyword = ours
+            .spans
+            .iter()
+            .find(|span| span.role == SyntaxRole::Keyword)
+            .unwrap();
+        assert_eq!(&ours.text[keyword.start..keyword.end], "return");
+        let LineChange::Edited { words } = &ours.change else {
+            panic!("expected an edited line, got {:?}", ours.change);
+        };
+        assert_eq!(&ours.text[words[0].clone()], "1");
     }
 }

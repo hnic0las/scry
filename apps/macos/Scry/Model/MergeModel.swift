@@ -12,7 +12,7 @@ import Observation
 final class MergeModel {
     let header: Header
     private(set) var rows: [Row] = []
-    /// The longest line of any pane, in characters: how far the panes can
+    /// The widest line of any pane, in columns: how far the panes can
     /// scroll sideways.
     private(set) var longestLine = 0
     private(set) var conflicts: [ConflictInfo] = []
@@ -181,7 +181,7 @@ final class MergeModel {
         rows = document.rows()
         longestLine = rows.reduce(0) { longest, row in
             guard case .code(let ours, let result, let theirs, _) = row else { return longest }
-            return max(longest, ours.text.count, result.text.count, theirs.text.count)
+            return max(longest, Int(ours.columns), Int(result.columns), Int(theirs.columns))
         }
         conflicts = document.conflicts()
         status = document.status()

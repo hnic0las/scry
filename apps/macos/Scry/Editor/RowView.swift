@@ -105,7 +105,7 @@ struct CellView: View {
 
     /// Whether the line goes on past the pane's right edge.
     private var clipped: Bool {
-        CGFloat(cell.text.count) * Metrics.codeCharacterWidth - scroll.clamped > codeWidth
+        CGFloat(cell.columns) * Metrics.codeCharacterWidth - scroll.clamped > codeWidth
     }
 
     /// An opaque tab on the pane's edge, with the cell's own background and a

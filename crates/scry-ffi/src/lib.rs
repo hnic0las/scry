@@ -137,7 +137,11 @@ pub struct Newline {
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Cell {
     pub number: Option<u32>,
+    /// The line as shown, tabs expanded.
     pub text: String,
+    /// Its width in columns of the monospaced font; wide characters count
+    /// 2. The app multiplies it by one column's width.
+    pub columns: u32,
     pub kind: CellKind,
     pub spans: Vec<Span>,
     pub change: LineChange,
@@ -614,6 +618,7 @@ fn cell(cell: layout::Cell) -> Cell {
     Cell {
         number: cell.number.map(|number| number as u32),
         text: cell.text,
+        columns: cell.columns as u32,
         kind: match cell.kind {
             layout::CellKind::Common => CellKind::Common,
             layout::CellKind::Conflict => CellKind::Conflict,

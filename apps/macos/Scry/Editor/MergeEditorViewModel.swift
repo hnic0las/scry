@@ -122,7 +122,7 @@ final class MergeEditorViewModel {
         }
     }
 
-    /// The longest line of any pane, in characters: how far the panes can
+    /// The widest line of any pane, in columns: how far the panes can
     /// scroll sideways.
     var longestLine: Int { model.longestLine }
 
