@@ -1,11 +1,14 @@
 import Foundation
 import Observation
 
-/// The window's content: the merge editor once a file is open.
+/// The window's content: the merge editor once a file is open, or the
+/// overview of a repository's operation, from which files open.
 @MainActor
 @Observable
 final class RootViewModel {
     private(set) var editor: MergeEditorViewModel?
+    /// The repository's operation (S1); the editor goes back to it.
+    private(set) var overview: OverviewViewModel?
     /// Why the last file could not be opened.
     private(set) var openError: String?
     /// The name of the file being opened, while it is.
@@ -19,15 +22,59 @@ final class RootViewModel {
     /// The user agreed to lose the unwritten choices.
     @ObservationIgnored private var closeConfirmed = false
 
-    /// Opens what the command line gives: the files of `git mergetool`, or
-    /// a file.
+    /// Opens what the command line gives: the files of `git mergetool`, a
+    /// repository's folder, or a file.
     func openLaunchFile(arguments: [String] = CommandLine.arguments) async {
-        guard editor == nil else { return }
+        guard editor == nil, overview == nil else { return }
         if let files = Self.mergetoolFiles(in: arguments) {
             await open(mergetool: files)
         } else if let path = Self.launchPath(in: arguments) {
-            await open(path)
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue {
+                await openRepository(path)
+            } else {
+                await open(path)
+            }
         }
+    }
+
+    /// Shows the operation in progress in the repository holding `path`.
+    func openRepository(_ path: String) async {
+        opening = URL(fileURLWithPath: path).lastPathComponent
+        defer { opening = nil }
+        do {
+            let repository = try await Task.detached { try RepositoryOverview.open(path: path) }.value
+            await open(overview: repository)
+            openError = nil
+        } catch {
+            openError = "\(error)"
+        }
+    }
+
+    /// Shows an overview read from `source`.
+    func open(overview source: OverviewSource) async {
+        editor = nil
+        overview = OverviewViewModel(source: source) { [weak self] file in
+            Task { await self?.open(fromOverview: file) }
+        }
+    }
+
+    /// Opens a file of the overview in the editor, with a way back.
+    private func open(fromOverview file: OverviewFile) async {
+        await open(file.absolutePath)
+        editor?.onBack = { [weak self] in self?.leaveEditor() }
+    }
+
+    /// Back from the editor to the overview, read again.
+    func leaveEditor() {
+        guard overview != nil else { return }
+        editor = nil
+        overview?.refresh()
+    }
+
+    /// The file opened from the overview is written: back to the list.
+    var returnsToOverview: Bool {
+        overview != nil && !isMergetool && editor?.written == true
     }
 
     func open(_ path: String) async {
@@ -58,6 +105,13 @@ final class RootViewModel {
     var exitStatus: Int32 {
         guard isMergetool else { return 0 }
         return editor?.everWritten == true ? 0 : 1
+    }
+
+    /// Whether File > Open can replace what the window shows: not over a
+    /// file in the editor, whose choices may not be written, nor under
+    /// `git mergetool`, which gave the window its file.
+    var canOpen: Bool {
+        !isMergetool && editor == nil && opening == nil
     }
 
     /// The merge tool's file is written: the window closes, and `git

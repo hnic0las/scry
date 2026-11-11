@@ -202,6 +202,29 @@ final class MergeEditorViewModel {
 
     var language: String? { model.status.language }
     var written: Bool { model.written }
+
+    /// Back to the overview the file was opened from; `nil` when it was
+    /// opened on its own.
+    @ObservationIgnored var onBack: (() -> Void)?
+    var canGoBack: Bool { onBack != nil }
+    /// Asking before going back with choices not written.
+    var confirmingLeave = false
+
+    /// Goes back to the overview, after asking when choices are not
+    /// written.
+    func back() {
+        guard let onBack else { return }
+        if hasUnwrittenWork {
+            confirmingLeave = true
+        } else {
+            onBack()
+        }
+    }
+
+    /// Goes back, losing the choices not written, once the user agreed.
+    func leaveWithoutWriting() {
+        onBack?()
+    }
     /// Written at least once since the file was opened.
     var everWritten: Bool { model.everWritten }
 

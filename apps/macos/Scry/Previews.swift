@@ -93,7 +93,7 @@ private struct DemoEditor: View {
         if let viewModel {
             MergeEditorView(viewModel: viewModel, scrollX: scrollX)
         } else {
-            EmptyStateView(error: "Run scripts/make-conflicts.sh first.", open: {})
+            EmptyStateView(error: "Run scripts/make-conflicts.sh first.", open: {}, openRepository: {})
         }
     }
 }

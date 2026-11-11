@@ -57,6 +57,8 @@ pub trait Git {
 pub struct GitCli {
     program: PathBuf,
     dir: PathBuf,
+    /// Set for every command, such as a configuration of its own for tests.
+    environment: Vec<(String, String)>,
 }
 
 impl GitCli {
@@ -68,7 +70,17 @@ impl GitCli {
     /// Runs `program` as git, as if started in `dir`: a front end that
     /// knows better than the `PATH` it was given which git the user runs.
     pub fn with_program(program: PathBuf, dir: PathBuf) -> GitCli {
-        GitCli { program, dir }
+        GitCli {
+            program,
+            dir,
+            environment: Vec::new(),
+        }
+    }
+
+    /// Sets `key` to `value` in every command's environment.
+    pub fn with_env(mut self, key: &str, value: &str) -> GitCli {
+        self.environment.push((key.to_string(), value.to_string()));
+        self
     }
 }
 
@@ -84,7 +96,8 @@ impl GitCli {
             .args(args)
             // Scry reads while the user's own git commands may run: never take
             // the index lock just to refresh it.
-            .env("GIT_OPTIONAL_LOCKS", "0");
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .envs(self.environment.iter().map(|(key, value)| (key, value)));
         command
     }
 }

@@ -16,7 +16,9 @@ use scry_core::highlight;
 use scry_core::layout;
 use scry_core::mergetool;
 use scry_core::operation;
+use scry_core::overview;
 use scry_core::presentation;
+use scry_core::rebase_plan;
 use scry_core::resolution::CandidateKind;
 use scry_core::session::{self, MergeSession, MergetoolFiles};
 use scry_core::syntax::{Language, ParseCheck};
@@ -580,6 +582,205 @@ fn lens_badge(badge: theme::Badge) -> LensBadge {
     LensBadge {
         text: badge.text,
         role,
+    }
+}
+
+/// One file of the operation overview.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct OverviewFile {
+    /// From the repository root.
+    pub path: String,
+    /// On disk, to open in the merge editor.
+    pub absolute_path: String,
+    pub name: String,
+    /// Empty at the repository root.
+    pub directory: String,
+    pub kind: String,
+    pub state: ConflictState,
+    pub conflicts: Option<u32>,
+    pub openable: bool,
+}
+
+/// The operation in progress and its files.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct OverviewSnapshot {
+    /// The repository folder's name.
+    pub repository: String,
+    pub root: String,
+    /// "rebase", "merge", "cherry-pick" or "revert"; `None` when no
+    /// operation is in progress.
+    pub operation: Option<String>,
+    /// The operation in plain words.
+    pub summary: Option<String>,
+    /// Rebase only: the commit being applied, from 1, and how many.
+    pub step: Option<u32>,
+    pub steps: Option<u32>,
+    /// A rebase's todo list and where git stands in it.
+    pub plan: Option<RebasePlan>,
+    /// The steps git applied on its own, without conflicts, before the one
+    /// it stopped on.
+    pub applied: Vec<u32>,
+    pub files: Vec<OverviewFile>,
+    pub can_continue: bool,
+    pub can_skip: bool,
+}
+
+/// The commit a rebase replays onto, and its todo list.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RebasePlan {
+    /// The branch replayed onto, such as "main", or the commit's id.
+    pub onto_name: String,
+    /// The branch being rebased; `None` on a detached HEAD.
+    pub branch: Option<String>,
+    pub onto_short_id: String,
+    pub onto_subject: String,
+    pub steps: Vec<RebaseStep>,
+}
+
+/// One line of a rebase's todo list.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RebaseStep {
+    pub number: u32,
+    /// Git's word: "pick", "reword", "fixup", "drop", "exec"…
+    pub action: String,
+    pub short_id: Option<String>,
+    /// The commit's subject, or an `exec`'s command.
+    pub subject: String,
+    pub state: RebaseStepState,
+    /// A fixup or squash joins the commit of this step.
+    pub joins: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum RebaseStepState {
+    Done,
+    /// The step git stopped on.
+    Current,
+    Pending,
+}
+
+/// What the user asks of the operation.
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum OverviewAction {
+    StageResolved,
+    Continue,
+    Skip,
+    Abort,
+}
+
+/// The operation overview of one repository (S1).
+#[derive(uniffi::Object)]
+pub struct RepositoryOverview {
+    git: GitCli,
+    overview: Mutex<overview::Overview>,
+}
+
+#[uniffi::export]
+impl RepositoryOverview {
+    /// The overview of the repository holding `path`, any folder in it.
+    #[uniffi::constructor]
+    pub fn open(path: String) -> Result<Arc<RepositoryOverview>, ScryError> {
+        let probe = GitCli::with_program(git_program(), PathBuf::from(&path));
+        let root = overview::root(&probe)
+            .map_err(|_| failed(format!("{path} is not in a git repository")))?;
+        Ok(Arc::new(RepositoryOverview {
+            git: GitCli::with_program(git_program(), root.clone()),
+            overview: Mutex::new(overview::Overview::new(root)),
+        }))
+    }
+
+    /// Reads the operation and its files again.
+    pub fn snapshot(&self) -> Result<OverviewSnapshot, ScryError> {
+        let mut overview = self.lock();
+        let snapshot = overview.refresh(&self.git).map_err(failed)?;
+        let root = overview.root().to_path_buf();
+        let operation = snapshot.operation.as_ref();
+        Ok(OverviewSnapshot {
+            repository: root
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            root: root.display().to_string(),
+            operation: operation.map(|operation| {
+                match operation.kind {
+                    operation::OperationKind::Merge => "merge",
+                    operation::OperationKind::Rebase => "rebase",
+                    operation::OperationKind::CherryPick => "cherry-pick",
+                    operation::OperationKind::Revert => "revert",
+                }
+                .to_string()
+            }),
+            summary: operation.map(|operation| operation.summary()),
+            step: operation
+                .and_then(|operation| operation.progress)
+                .map(|progress| progress.current as u32),
+            steps: operation
+                .and_then(|operation| operation.progress)
+                .map(|progress| progress.total as u32),
+            can_continue: snapshot.can_continue(),
+            can_skip: snapshot.can_skip(),
+            applied: snapshot.applied.iter().map(|step| *step as u32).collect(),
+            plan: snapshot.plan.as_ref().map(|plan| RebasePlan {
+                onto_name: operation
+                    .map(|operation| operation.ours.name.clone())
+                    .unwrap_or_else(|| plan.onto_short_id.clone()),
+                branch: operation.and_then(|operation| operation.branch.clone()),
+                onto_short_id: plan.onto_short_id.clone(),
+                onto_subject: plan.onto_subject.clone(),
+                steps: plan
+                    .steps
+                    .iter()
+                    .map(|step| RebaseStep {
+                        number: step.number as u32,
+                        action: step.action.name().to_string(),
+                        short_id: step.short_id.clone(),
+                        subject: step.subject.clone(),
+                        state: match step.state {
+                            rebase_plan::StepState::Done => RebaseStepState::Done,
+                            rebase_plan::StepState::Current => RebaseStepState::Current,
+                            rebase_plan::StepState::Pending => RebaseStepState::Pending,
+                        },
+                        joins: step.joins.map(|number| number as u32),
+                    })
+                    .collect(),
+            }),
+            files: snapshot
+                .files
+                .into_iter()
+                .map(|file| OverviewFile {
+                    absolute_path: root.join(&file.path).display().to_string(),
+                    path: file.path,
+                    name: file.name,
+                    directory: file.directory,
+                    kind: file.kind,
+                    state: conflict_state(file.state),
+                    conflicts: file.conflicts.map(|count| count as u32),
+                    openable: file.openable,
+                })
+                .collect(),
+        })
+    }
+
+    /// Runs one of the operation's steps; the UI asks before `Abort`.
+    pub fn apply(&self, action: OverviewAction) -> Result<(), ScryError> {
+        let command = match action {
+            OverviewAction::StageResolved => overview::OverviewCommand::StageResolved,
+            OverviewAction::Continue => overview::OverviewCommand::Continue,
+            OverviewAction::Skip => overview::OverviewCommand::Skip,
+            OverviewAction::Abort => overview::OverviewCommand::Abort,
+        };
+        self.lock()
+            .apply(&self.git, command)
+            .map(|_| ())
+            .map_err(failed)
+    }
+}
+
+impl RepositoryOverview {
+    fn lock(&self) -> MutexGuard<'_, overview::Overview> {
+        self.overview
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 

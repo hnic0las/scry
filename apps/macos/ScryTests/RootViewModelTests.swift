@@ -115,4 +115,53 @@ struct RootViewModelTests {
         #expect(!root.finished)
         #expect(root.exitStatus == 0)
     }
+
+    /// A file opened from the overview has a way back; once written it goes
+    /// back to the list, read again, so the file shows as resolved.
+    @Test func filesOpenFromTheOverviewAndComeBack() async throws {
+        let conflicted = try ConflictFile()
+        let source = FakeOverview(files: [file("Sample.swift", .unresolved, absolutePath: conflicted.url.path)])
+        let root = RootViewModel()
+        await root.open(overview: source)
+        let overview = try #require(root.overview)
+        let readsBefore = source.reads
+
+        overview.open("Sample.swift")
+        // Opening goes through a task: wait for the editor.
+        for _ in 0..<100 where root.editor == nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let editor = try #require(root.editor)
+        #expect(editor.canGoBack)
+        #expect(!root.returnsToOverview)
+
+        editor.take("theirs")
+        editor.next()
+        editor.take("ours")
+        editor.markResolved()
+        #expect(root.returnsToOverview)
+
+        root.leaveEditor()
+        #expect(root.editor == nil)
+        #expect(source.reads > readsBefore)
+    }
+
+    /// File > Open works from the empty window and the overview, but never
+    /// over a file in the editor, whose choices may not be written, nor
+    /// under `git mergetool`, which owns the window's file.
+    @Test func fileOpenOnlyWhereNothingIsLost() async throws {
+        let root = RootViewModel()
+        #expect(root.canOpen)
+
+        let conflicted = try ConflictFile()
+        await root.open(overview: FakeOverview(files: [file("Sample.swift", .unresolved, absolutePath: conflicted.url.path)]))
+        #expect(root.canOpen)
+
+        await root.open(conflicted.url.path)
+        #expect(!root.canOpen)
+
+        let mergetool = RootViewModel()
+        await mergetool.open(mergetool: try ConflictFile.mergetool())
+        #expect(!mergetool.canOpen)
+    }
 }

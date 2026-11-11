@@ -5,6 +5,13 @@ import SwiftUI
 struct ScryApp: App {
     @NSApplicationDelegateAdaptor private var delegate: ScryAppDelegate
 
+    init() {
+        // A path on the command line is the file to merge, which the window
+        // opens itself (`RootViewModel.launchPath`). AppKit would take it
+        // for a document to open instead, and SwiftUI then opens no window.
+        UserDefaults.standard.register(defaults: ["NSTreatUnknownArgumentsAsOpen": "NO"])
+    }
+
     /// One window per merge: a second window on the same file would be a
     /// second session, each writing over the other's choices. A
     /// `WindowGroup` without New Window rather than a `Window` scene, which
@@ -16,7 +23,9 @@ struct ScryApp: App {
         .windowToolbarStyle(.unified)
         .restorationBehavior(.disabled)
         .commands {
-            CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .newItem) {
+                OpenCommands()
+            }
         }
 
         Settings {
@@ -64,6 +73,32 @@ final class ScryAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// What the File menu's Open items do in the window that has the focus.
+struct OpenActions {
+    /// No while a file is in the editor, or under `git mergetool`.
+    let enabled: Bool
+    let repository: () -> Void
+    let file: () -> Void
+}
+
+extension FocusedValues {
+    @Entry var openActions: OpenActions?
+}
+
+/// File > Open Repository… (⌘O) and Open Conflicted File… (⇧⌘O).
+struct OpenCommands: View {
+    @FocusedValue(\.openActions) private var actions
+
+    var body: some View {
+        Button("Open Repository…") { actions?.repository() }
+            .keyboardShortcut("o")
+            .disabled(actions?.enabled != true)
+        Button("Open Conflicted File…") { actions?.file() }
+            .keyboardShortcut("o", modifiers: [.command, .shift])
+            .disabled(actions?.enabled != true)
+    }
+}
+
 /// Opens the file given on the command line, or asks for one.
 struct RootView: View {
     @State private var viewModel = RootViewModel()
@@ -75,11 +110,18 @@ struct RootView: View {
                 MergeEditorView(viewModel: editor)
             } else if let opening = viewModel.opening {
                 OpeningView(fileName: opening)
+            } else if let overview = viewModel.overview {
+                OverviewView(viewModel: overview)
             } else {
-                EmptyStateView(error: viewModel.openError, open: chooseFile)
+                EmptyStateView(error: viewModel.openError, open: chooseFile, openRepository: chooseRepository)
             }
         }
         .frame(minWidth: 900, minHeight: 600)
+        .focusedSceneValue(\.openActions, OpenActions(
+            enabled: viewModel.canOpen,
+            repository: chooseRepository,
+            file: chooseFile
+        ))
         .background { WindowCloseGuard { viewModel.shouldClose() } }
         .alert("Close without writing?", isPresented: $viewModel.confirmingClose) {
             Button("Close Without Writing", role: .destructive) {
@@ -93,9 +135,23 @@ struct RootView: View {
         .onChange(of: viewModel.finished) { _, finished in
             if finished { dismissWindow(id: ScryApp.window) }
         }
+        .onChange(of: viewModel.returnsToOverview) { _, returns in
+            if returns { viewModel.leaveEditor() }
+        }
         .task {
             ScryAppDelegate.exitStatus = { [viewModel] in viewModel.exitStatus }
             await viewModel.openLaunchFile()
+        }
+    }
+
+    private func chooseRepository() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a repository with a merge, rebase, cherry-pick or revert in progress"
+        if panel.runModal() == .OK, let url = panel.url {
+            Task { await viewModel.openRepository(url.path) }
         }
     }
 
@@ -131,6 +187,7 @@ struct OpeningView: View {
 struct EmptyStateView: View {
     let error: String?
     let open: () -> Void
+    let openRepository: () -> Void
 
     var body: some View {
         VStack(spacing: 12) {
@@ -139,10 +196,14 @@ struct EmptyStateView: View {
                 .foregroundStyle(Theme.Surfaces.textTertiary)
             Text("No file open")
                 .font(.title3.weight(.semibold))
-            Text("Open a file with conflict markers, or run Scry from git mergetool.")
+            Text("Open a repository with an operation in progress, a file with conflict markers, or run Scry from git mergetool.")
                 .foregroundStyle(Theme.Surfaces.textSecondary)
-            Button("Open Conflicted File…", action: open)
-                .keyboardShortcut("o")
+            HStack {
+                // ⌘O and ⇧⌘O are the File menu's (`OpenCommands`), which
+                // work whatever the window shows.
+                Button("Open Repository…", action: openRepository)
+                Button("Open Conflicted File…", action: open)
+            }
             if let error {
                 Text(error)
                     .foregroundStyle(Theme.Severity.error)
@@ -156,11 +217,11 @@ struct EmptyStateView: View {
 }
 
 #Preview("Empty state", traits: .fixedLayout(width: 900, height: 600)) {
-    EmptyStateView(error: nil, open: {})
+    EmptyStateView(error: nil, open: {}, openRepository: {})
 }
 
 #Preview("Empty state, file not opened", traits: .fixedLayout(width: 900, height: 600)) {
-    EmptyStateView(error: "Uploader.swift has no conflict markers.", open: {})
+    EmptyStateView(error: "Uploader.swift has no conflict markers.", open: {}, openRepository: {})
 }
 
 #Preview("Opening a file", traits: .fixedLayout(width: 900, height: 600)) {

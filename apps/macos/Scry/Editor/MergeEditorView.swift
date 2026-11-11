@@ -56,6 +56,12 @@ struct MergeEditorView: View {
         } message: {
             Text(viewModel.invalidWriteMessage)
         }
+        .alert("Go back without writing?", isPresented: $viewModel.confirmingLeave) {
+            Button("Go Back Without Writing", role: .destructive) { viewModel.leaveWithoutWriting() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(viewModel.resolvedSummary). Your choices are not written to \(viewModel.title) and will be lost.")
+        }
         .alert("The file changed on disk", isPresented: $viewModel.confirmingOverwrite) {
             Button("Overwrite", role: .destructive) { viewModel.overwrite() }
             Button("Cancel", role: .cancel) {}
@@ -119,6 +125,14 @@ struct MergeEditorView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
+        if viewModel.canGoBack {
+            ToolbarItem(placement: .navigation) {
+                Button { viewModel.back() } label: {
+                    Label("Files", systemImage: "chevron.left")
+                }
+                .help("Back to the operation's files")
+            }
+        }
         ToolbarItemGroup {
             Button(action: { viewModel.previous() }) {
                 Image(systemName: "chevron.up")
