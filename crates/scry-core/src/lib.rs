@@ -11,6 +11,7 @@ pub mod git;
 pub mod highlight;
 pub mod indent;
 pub mod layout;
+pub mod merge_graph;
 pub mod mergetool;
 pub mod operation;
 pub mod overview;

@@ -617,12 +617,40 @@ pub struct OverviewSnapshot {
     pub steps: Option<u32>,
     /// A rebase's todo list and where git stands in it.
     pub plan: Option<RebasePlan>,
+    /// A merge's two branches since their merge base.
+    pub merge: Option<MergeHistory>,
     /// The steps git applied on its own, without conflicts, before the one
     /// it stopped on.
     pub applied: Vec<u32>,
     pub files: Vec<OverviewFile>,
     pub can_continue: bool,
     pub can_skip: bool,
+}
+
+/// A commit of the merge's history.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct HistoryCommit {
+    pub short_id: String,
+    pub subject: String,
+}
+
+/// One branch of a merge since the merge base, newest commit first.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct HistoryLane {
+    pub name: String,
+    pub commits: Vec<HistoryCommit>,
+    /// Commits past those listed.
+    pub more: u32,
+}
+
+/// The two branches a merge joins, since their merge base.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MergeHistory {
+    /// The branch checked out (git's "ours").
+    pub ours: HistoryLane,
+    /// The branch merged in (git's "theirs").
+    pub theirs: HistoryLane,
+    pub base: HistoryCommit,
 }
 
 /// The commit a rebase replays onto, and its todo list.
@@ -720,6 +748,22 @@ impl RepositoryOverview {
             can_continue: snapshot.can_continue(),
             can_skip: snapshot.can_skip(),
             applied: snapshot.applied.iter().map(|step| *step as u32).collect(),
+            merge: snapshot.merge.as_ref().map(|graph| {
+                let commit = |commit: &scry_core::merge_graph::GraphCommit| HistoryCommit {
+                    short_id: commit.short_id.clone(),
+                    subject: commit.subject.clone(),
+                };
+                let lane = |lane: &scry_core::merge_graph::Lane| HistoryLane {
+                    name: lane.name.clone(),
+                    commits: lane.commits.iter().map(commit).collect(),
+                    more: lane.more as u32,
+                };
+                MergeHistory {
+                    ours: lane(&graph.ours),
+                    theirs: lane(&graph.theirs),
+                    base: commit(&graph.base),
+                }
+            }),
             plan: snapshot.plan.as_ref().map(|plan| RebasePlan {
                 onto_name: operation
                     .map(|operation| operation.ours.name.clone())

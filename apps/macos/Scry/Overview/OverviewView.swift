@@ -3,6 +3,8 @@ import SwiftUI
 /// S1: the operation in progress and its conflicted files.
 struct OverviewView: View {
     @Bindable var viewModel: OverviewViewModel
+    /// The table's selected row, by path: purely visual.
+    @State private var selection: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,7 +21,16 @@ struct OverviewView: View {
                     .frame(width: 210)
                 Divider()
                 table
-                if let base = viewModel.planBase {
+                if let names = viewModel.historyNames {
+                    Divider()
+                    MergeHistoryView(
+                        ours: names.ours,
+                        theirs: names.theirs,
+                        caption: viewModel.historyCaption,
+                        rows: viewModel.historyRows
+                    )
+                    .frame(width: 340)
+                } else if let base = viewModel.planBase {
                     Divider()
                     RebasePlanView(
                         caption: viewModel.planCaption,
@@ -54,7 +65,19 @@ struct OverviewView: View {
     }
 
     private var table: some View {
-        Table(viewModel.rows) {
+        Table(viewModel.rows, selection: $selection) {
+            TableColumn("") { row in
+                if row.canOpen {
+                    Button { viewModel.open(row.path) } label: {
+                        Image(systemName: "square.and.pencil")
+                            .foregroundStyle(Theme.Interaction.accent)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Resolve \(row.name) in the merge editor (double-click the row)")
+                    .accessibilityLabel("Resolve \(row.name)")
+                }
+            }
+            .width(28)
             TableColumn("State") { row in
                 Label(row.stateLabel, systemImage: row.state.symbol)
                     .foregroundStyle(row.state.color)
@@ -83,13 +106,14 @@ struct OverviewView: View {
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
             .width(70)
-            TableColumn("") { row in
-                if let action = row.action {
-                    Button(action) { viewModel.open(row.path) }
-                        .controlSize(.small)
-                }
+        }
+        .contextMenu(forSelectionType: String.self) { paths in
+            if let path = paths.first, viewModel.rows.first(where: { $0.path == path })?.canOpen == true {
+                Button("Resolve in Merge Editor") { viewModel.open(path) }
             }
-            .width(70)
+        } primaryAction: { paths in
+            // Double-click, or Return on the selected row.
+            if let path = paths.first { viewModel.open(path) }
         }
         .overlay {
             if viewModel.rows.isEmpty {
@@ -252,6 +276,7 @@ private struct PreviewOverview: OverviewSource {
                     return step
                 }
             ),
+            merge: nil,
             applied: operation == nil ? [] : applied,
             files: files,
             canContinue: operation != nil && files.allSatisfy { $0.state == .staged },
@@ -260,6 +285,43 @@ private struct PreviewOverview: OverviewSource {
     }
 
     func apply(action: OverviewAction) throws {}
+
+    /// The same files, in a merge of main into the branch.
+    struct Merge: OverviewSource {
+        var files: [OverviewFile]
+
+        func snapshot() throws -> OverviewSnapshot {
+            let commit = { (id: String, subject: String) in HistoryCommit(shortId: id, subject: subject) }
+            return OverviewSnapshot(
+                repository: "atlas",
+                root: "/Users/you/Code/atlas",
+                operation: "merge",
+                summary: "Merging main into feature/sync-v2",
+                step: nil,
+                steps: nil,
+                plan: nil,
+                merge: MergeHistory(
+                    ours: HistoryLane(name: "feature/sync-v2", commits: PreviewOverview.steps.filter { $0.shortId != nil }.reversed().prefix(4).map {
+                        commit($0.shortId ?? "", $0.subject)
+                    }, more: 3),
+                    theirs: HistoryLane(name: "main", commits: [
+                        commit("9f3e2c1", "Serve the sync status as JSON, reword French strings"),
+                        commit("71ab09e", "Patch dependencies, Xcode 15.4, thread-safe OldCache"),
+                        commit("4c2d8f0", "Rename name to displayName and add avatars (API v2)"),
+                        commit("b81e6a2", "Send changes in batches, with a bounded queue"),
+                        commit("3e9f1c7", "Add a 30 s upload timeout and a forecast cache (#412)"),
+                    ], more: 0),
+                    base: commit("a40c2d1", "Initial Atlas app")
+                ),
+                applied: [],
+                files: files,
+                canContinue: files.allSatisfy { $0.state == .staged },
+                canSkip: false
+            )
+        }
+
+        func apply(action: OverviewAction) throws {}
+    }
 
     static func file(_ path: String, _ kind: String, _ state: ConflictState, _ conflicts: UInt32?) -> OverviewFile {
         let parts = path.split(separator: "/")
@@ -324,4 +386,8 @@ private struct PreviewOverview: OverviewSource {
         rows: viewModel.planRows,
         base: viewModel.planBase!
     )
+}
+
+#Preview("Overview, merge", traits: .fixedLayout(width: 1300, height: 640)) {
+    OverviewView(viewModel: OverviewViewModel(source: PreviewOverview.Merge(files: PreviewOverview.mixed)) { _ in })
 }

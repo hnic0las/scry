@@ -301,3 +301,34 @@ fn an_interactive_rebase_shows_its_plan_and_what_git_applied() {
     // Read again without moving: the message stays.
     assert_eq!(overview.refresh(&git).unwrap().applied, [2, 3, 4]);
 }
+
+/// A merge shows both branches since their merge base, newest first, so
+/// the user sees what each side brings before resolving.
+#[test]
+fn a_merge_shows_both_branches_since_their_base() {
+    let repo = Repo::stopped_rebase();
+    repo.ok(&["rebase", "--abort"]);
+    repo.ok(&["switch", "--quiet", "main"]);
+    repo.commit("a main 2\n", "let b = 1\n", "second main change");
+    repo.ok(&["switch", "--quiet", "feature"]);
+    assert!(!repo.git(&["merge", "main"]));
+
+    let snapshot = Overview::new(repo.path()).refresh(&repo.cli()).unwrap();
+    assert!(snapshot.plan.is_none());
+    let graph = snapshot.merge.unwrap();
+    assert_eq!(graph.ours.name, "feature");
+    assert_eq!(graph.theirs.name, "main");
+    let subjects = |lane: &scry_core::merge_graph::Lane| -> Vec<String> {
+        lane.commits
+            .iter()
+            .map(|commit| commit.subject.clone())
+            .collect()
+    };
+    assert_eq!(subjects(&graph.ours), ["feature change"]);
+    assert_eq!(
+        subjects(&graph.theirs),
+        ["second main change", "main change"]
+    );
+    assert_eq!((graph.ours.more, graph.theirs.more), (0, 0));
+    assert_eq!(graph.base.subject, "base");
+}

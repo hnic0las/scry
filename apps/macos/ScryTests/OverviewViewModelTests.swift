@@ -7,6 +7,7 @@ final class FakeOverview: OverviewSource {
     var operation: String? = "rebase"
     var files: [OverviewFile]
     var plan: RebasePlan?
+    var merge: MergeHistory?
     var applied: [UInt32] = []
     private(set) var actions: [OverviewAction] = []
     private(set) var reads = 0
@@ -25,6 +26,7 @@ final class FakeOverview: OverviewSource {
             step: operation == nil ? nil : 2,
             steps: operation == nil ? nil : 3,
             plan: operation == nil ? nil : plan,
+            merge: operation == nil ? nil : merge,
             applied: applied,
             files: files,
             canContinue: operation != nil && files.allSatisfy { $0.state == .staged },
@@ -123,7 +125,7 @@ struct OverviewViewModelTests {
             file("A.swift", .unresolved), file("Gone.swift", .unresolved, openable: false), file("C.swift", .staged),
         ])) { opened.append($0.path) }
 
-        #expect(overview.rows.map(\.action) == ["Open", nil, nil])
+        #expect(overview.rows.map(\.canOpen) == [true, false, false])
         overview.open("Gone.swift")
         overview.open("A.swift")
         #expect(opened == ["A.swift"])
@@ -199,5 +201,26 @@ struct OverviewViewModelTests {
                 )
             }
         )
+    }
+
+    /// A merge lists the merge commit to come, each branch's commits in its
+    /// own lane, those past the limit as a count, then the merge base.
+    @Test func mergeShowsBothBranchesDownToTheirBase() {
+        let source = FakeOverview(files: [file("A.swift", .unresolved)])
+        source.operation = "merge"
+        source.merge = MergeHistory(
+            ours: HistoryLane(name: "feature", commits: [HistoryCommit(shortId: "aaa0001", subject: "change b")], more: 2),
+            theirs: HistoryLane(name: "main", commits: [HistoryCommit(shortId: "bbb0001", subject: "main change")], more: 0),
+            base: HistoryCommit(shortId: "ccc0001", subject: "base")
+        )
+        let overview = OverviewViewModel(source: source) { _ in }
+
+        #expect(overview.historyNames?.ours == "feature")
+        #expect(overview.historyRows.map(\.kind) == [.mergeCommit, .commit(.ours), .more(.ours), .commit(.theirs), .base])
+        #expect(overview.historyRows.first?.title == "Merge main into feature")
+        #expect(overview.historyRows[2].title == "2 more commits")
+        #expect(overview.historyRows.last?.detail == "ccc0001 · merge base")
+        #expect(overview.historyCaption == "3 commits on feature · 1 on main since they split")
+        #expect(overview.planRows.isEmpty)
     }
 }

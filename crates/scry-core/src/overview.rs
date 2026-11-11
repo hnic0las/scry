@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::conflict;
 use crate::git::{Git, GitError};
+use crate::merge_graph::{self, MergeGraph};
 use crate::operation::{self, Operation, OperationKind};
 use crate::rebase_plan::{self, Plan};
 use crate::syntax::Language;
@@ -45,6 +46,8 @@ pub struct Snapshot {
     pub operation: Option<Operation>,
     /// A rebase's todo list and where git stands in it.
     pub plan: Option<Plan>,
+    /// A merge's two branches since their merge base.
+    pub merge: Option<MergeGraph>,
     /// The steps git applied on its own, without conflicts, before the
     /// one it stopped on: kept until it stops elsewhere.
     pub applied: Vec<usize>,
@@ -188,6 +191,15 @@ impl Overview {
             Some(operation) if operation.kind == OperationKind::Rebase => rebase_plan::read(git)?,
             _ => None,
         };
+        let merge = match &operation {
+            Some(Operation {
+                kind: OperationKind::Merge,
+                ours,
+                theirs: Some(theirs),
+                ..
+            }) => merge_graph::read(git, &ours.name, &theirs.commit.id, &theirs.name)?,
+            _ => None,
+        };
         let current = plan.as_ref().and_then(Plan::current);
         if current != self.last_step {
             // Git ran every line between the one it stopped on before
@@ -201,6 +213,7 @@ impl Overview {
         Ok(Snapshot {
             operation,
             plan,
+            merge,
             applied: self.applied.clone(),
             files,
         })

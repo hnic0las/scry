@@ -54,6 +54,29 @@ final class OverviewViewModel {
         var id: Int { number }
     }
 
+    /// A row of a merge's history: the merge commit to come, a commit of
+    /// either branch, or their merge base.
+    struct HistoryRow: Identifiable, Equatable {
+        enum Side: Equatable {
+            case ours
+            case theirs
+        }
+
+        enum Kind: Equatable {
+            case mergeCommit
+            case commit(Side)
+            /// Commits not listed on that side.
+            case more(Side)
+            case base
+        }
+
+        let id: String
+        let kind: Kind
+        let title: String
+        let detail: String
+        let help: String
+    }
+
     /// The commit the branch is replayed onto.
     struct PlanBase: Equatable {
         /// "main", or the commit's id.
@@ -73,8 +96,9 @@ final class OverviewViewModel {
         let stateLabel: String
         /// "2", or "—" when the file cannot be read.
         let conflicts: String
-        /// "Open", or `nil` when there is nothing to do from here.
-        let action: String?
+        /// Whether the merge editor can open it from here: a text file
+        /// not staged yet.
+        let canOpen: Bool
         var id: String { path }
     }
 
@@ -104,6 +128,63 @@ final class OverviewViewModel {
     }
 
     var hasOperation: Bool { snapshot?.operation != nil }
+
+    // MARK: Merge history
+
+    /// The branch checked out and the branch merged in; `nil` outside a
+    /// merge.
+    var historyNames: (ours: String, theirs: String)? {
+        snapshot?.merge.map { ($0.ours.name, $0.theirs.name) }
+    }
+
+    /// "4 commits on feature/sync-v2 · 5 on main since they split".
+    var historyCaption: String {
+        guard let merge = snapshot?.merge else { return "" }
+        let ours = merge.ours.commits.count + Int(merge.ours.more)
+        let theirs = merge.theirs.commits.count + Int(merge.theirs.more)
+        return "\(Self.commits(ours)) on \(merge.ours.name) · \(theirs) on \(merge.theirs.name) since they split"
+    }
+
+    /// The merge as `git log --graph` lists it: the merge commit to come,
+    /// the branch checked out, the branch merged in, then their base.
+    var historyRows: [HistoryRow] {
+        guard let merge = snapshot?.merge else { return [] }
+        var rows = [HistoryRow(
+            id: "merge",
+            kind: .mergeCommit,
+            title: "Merge \(merge.theirs.name) into \(merge.ours.name)",
+            detail: "To come, once every file is staged",
+            help: "The merge commit Continue creates: it joins both branches."
+        )]
+        for (side, lane, role) in [(HistoryRow.Side.ours, merge.ours, "your branch"), (.theirs, merge.theirs, "the branch merged in")] {
+            rows += lane.commits.map { commit in
+                HistoryRow(
+                    id: "\(side)-\(commit.shortId)",
+                    kind: .commit(side),
+                    title: commit.subject,
+                    detail: "\(commit.shortId) · \(lane.name)",
+                    help: "On \(lane.name), \(role), since the merge base."
+                )
+            }
+            if lane.more > 0 {
+                rows.append(HistoryRow(
+                    id: "\(side)-more",
+                    kind: .more(side),
+                    title: "\(lane.more) more \(lane.more == 1 ? "commit" : "commits")",
+                    detail: lane.name,
+                    help: "Older commits of \(lane.name) since the merge base."
+                ))
+            }
+        }
+        rows.append(HistoryRow(
+            id: "base",
+            kind: .base,
+            title: merge.base.subject,
+            detail: "\(merge.base.shortId) · merge base",
+            help: "The last commit both branches share: each side's changes are measured from it."
+        ))
+        return rows
+    }
 
     // MARK: Rebase plan
 
@@ -205,7 +286,7 @@ final class OverviewViewModel {
                     state: file.state,
                     stateLabel: Self.label(file.state),
                     conflicts: file.conflicts.map(String.init) ?? "—",
-                    action: file.openable && file.state != .staged ? "Open" : nil
+                    canOpen: file.openable && file.state != .staged
                 )
             }
     }
@@ -290,6 +371,10 @@ final class OverviewViewModel {
             self.error = "\(error)"
         }
         refresh()
+    }
+
+    private static func commits(_ count: Int) -> String {
+        "\(count) \(count == 1 ? "commit" : "commits")"
     }
 
     private static func detail(_ step: RebaseStep) -> String {
