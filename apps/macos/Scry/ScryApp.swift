@@ -6,12 +6,18 @@ struct ScryApp: App {
     @NSApplicationDelegateAdaptor private var delegate: ScryAppDelegate
 
     /// One window per merge: a second window on the same file would be a
-    /// second session, each writing over the other's choices.
+    /// second session, each writing over the other's choices. A
+    /// `WindowGroup` without New Window rather than a `Window` scene, which
+    /// does not open at launch once it was closed.
     var body: some Scene {
-        Window("Scry", id: ScryApp.window) {
+        WindowGroup(id: ScryApp.window) {
             RootView()
         }
         .windowToolbarStyle(.unified)
+        .restorationBehavior(.disabled)
+        .commands {
+            CommandGroup(replacing: .newItem) {}
+        }
     }
 
     static let window = "merge"
