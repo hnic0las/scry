@@ -116,8 +116,18 @@ impl MergeSession {
     /// will be saved to. With a language, every candidate is checked by
     /// parsing.
     pub fn from_text(text: &str, language: Option<Language>) -> Result<MergeSession, ParseError> {
+        MergeSession::from_text_with_marker_size(text, language, conflict::DEFAULT_MARKER_SIZE)
+    }
+
+    /// Like `from_text`, for a file whose markers have `marker_size`
+    /// characters (`conflict::marker_size`).
+    pub fn from_text_with_marker_size(
+        text: &str,
+        language: Option<Language>,
+        marker_size: usize,
+    ) -> Result<MergeSession, ParseError> {
         Ok(MergeSession::from_segments(
-            conflict::parse(text)?,
+            conflict::parse_with_marker_size(text, marker_size)?,
             Origin::File,
             text.to_string(),
             language,
@@ -375,7 +385,7 @@ impl MergeSession {
     }
 
     /// The index of a conflict given by its number ("2") or its ID
-    /// ("cb5d1a4").
+    /// ("cb5d1a4e2").
     pub fn find(&self, reference: &str) -> Option<usize> {
         if let Ok(number) = reference.parse::<usize>() {
             return (1..=self.conflicts.len())
@@ -810,9 +820,10 @@ pub fn load(
 ) -> Result<MergeSession, LoadError> {
     let language = Language::from_path(&files.merged);
     let merged = read_text(&files.merged)?;
+    let marker_size = conflict::marker_size(git, &files.merged);
     // Markers git did not write are refused, rather than rebuilt over
     // whatever the user did to the file.
-    let segments = conflict::parse(&merged)
+    let segments = conflict::parse_with_marker_size(&merged, marker_size)
         .map_err(|error| LoadError::Malformed(files.merged.clone(), error))?;
     let has_base = {
         let mut conflicts = conflict::conflicts(&segments).peekable();
@@ -825,8 +836,8 @@ pub fn load(
         );
     }
 
-    let as_git_wrote = merge_file(git, files, ours, theirs, None)?;
-    let unchanged = conflict::parse(&as_git_wrote)
+    let as_git_wrote = merge_file(git, files, ours, theirs, marker_size, None)?;
+    let unchanged = conflict::parse_with_marker_size(&as_git_wrote, marker_size)
         .is_ok_and(|written| same_ignoring_labels(&segments, &written));
     if !unchanged {
         return Ok(
@@ -834,8 +845,8 @@ pub fn load(
                 .with_file(files.merged.clone()),
         );
     }
-    let text = merge_file(git, files, ours, theirs, Some("--zdiff3"))?;
-    let rebuilt = conflict::parse(&text).map_err(LoadError::Parse)?;
+    let text = merge_file(git, files, ours, theirs, marker_size, Some("--zdiff3"))?;
+    let rebuilt = conflict::parse_with_marker_size(&text, marker_size).map_err(LoadError::Parse)?;
     Ok(
         MergeSession::from_segments(rebuilt, Origin::Rebuilt, merged, language)
             .with_file(files.merged.clone()),
@@ -862,12 +873,14 @@ fn merge_file(
     files: &MergetoolFiles,
     ours: &str,
     theirs: &str,
+    marker_size: usize,
     style: Option<&str>,
 ) -> Result<String, LoadError> {
     let local = path_text(&files.local)?;
     let base = path_text(&files.base)?;
     let remote = path_text(&files.remote)?;
-    let mut args = vec!["merge-file", "--stdout"];
+    let marker_size = marker_size.to_string();
+    let mut args = vec!["merge-file", "--stdout", "--marker-size", &marker_size];
     args.extend(style);
     args.extend(["-L", ours, "-L", "base", "-L", theirs, local, base, remote]);
     let output = git.output(&args)?;
@@ -898,34 +911,82 @@ fn path_text(path: &Path) -> Result<&str, LoadError> {
 /// Replaces the file at `path` with `text` in one step: written to a
 /// temporary file next to it, flushed to disk, then renamed over it, so a
 /// crash never leaves a half-written file. Keeps the file's permissions.
+///
+/// A symbolic link is followed: the file it points to is replaced, and the
+/// link stays a link. The temporary file has a name of its own, never an
+/// existing file's, and the directory is flushed once the rename is done,
+/// so the new name survives a crash too.
 pub fn write_atomically(path: &Path, text: &str) -> io::Result<()> {
-    let Some(name) = path.file_name() else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "not a file path",
-        ));
+    let is_link =
+        fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink());
+    let target = if is_link {
+        fs::canonicalize(path)?
+    } else {
+        path.to_path_buf()
     };
-    let mut temporary_name = OsString::from(".");
-    temporary_name.push(name);
-    temporary_name.push(".scry-tmp");
-    let temporary = path.with_file_name(temporary_name);
-
-    let result = write_then_rename(path, &temporary, text);
+    let (mut file, temporary) = create_temporary(&target)?;
+    let result = write_then_rename(&mut file, &target, &temporary, text);
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
 }
 
-fn write_then_rename(path: &Path, temporary: &Path, text: &str) -> io::Result<()> {
-    let mut file = File::create(temporary)?;
+/// A new file next to `path`, named after it, that did not exist before.
+fn create_temporary(path: &Path) -> io::Result<(File, PathBuf)> {
+    let Some(name) = path.file_name() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a file path",
+        ));
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    for attempt in 0..100 {
+        let mut temporary_name = OsString::from(".");
+        temporary_name.push(name);
+        temporary_name.push(format!(
+            ".scry-{}-{stamp}-{attempt}.tmp",
+            std::process::id()
+        ));
+        let temporary = path.with_file_name(temporary_name);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => return Ok((file, temporary)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free temporary name",
+    ))
+}
+
+fn write_then_rename(file: &mut File, path: &Path, temporary: &Path, text: &str) -> io::Result<()> {
     file.write_all(text.as_bytes())?;
     file.sync_all()?;
-    drop(file);
     if let Ok(metadata) = fs::metadata(path) {
         fs::set_permissions(temporary, metadata.permissions())?;
     }
-    fs::rename(temporary, path)
+    fs::rename(temporary, path)?;
+    // Some systems (Windows) cannot open a directory: the rename is then
+    // as durable as they make it.
+    if let Some(directory) = path.parent()
+        && let Ok(directory) = File::open(if directory.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            directory
+        })
+    {
+        let _ = directory.sync_all();
+    }
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1242,7 +1303,7 @@ mod tests {
         assert_eq!(session.find("3"), None);
         assert_eq!(session.find("0"), None);
         assert_eq!(session.find(&session.analysis(1).id.clone()), Some(1));
-        assert_eq!(session.find("cffffff"), None);
+        assert_eq!(session.find("cffffffff"), None);
     }
 
     /// Writing replaces the file in one step and leaves no temporary file behind.
@@ -1255,6 +1316,49 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
         let names: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(names.len(), 1);
+    }
+
+    /// A file of the same name as the temporary one is never written over:
+    /// the temporary file gets a name of its own.
+    #[test]
+    fn atomic_write_leaves_other_files_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        let old_temporary = dir.path().join(".file.txt.scry-tmp");
+        fs::write(&path, "old\n").unwrap();
+        fs::write(&old_temporary, "someone else's\n").unwrap();
+
+        write_atomically(&path, "new\n").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
+        assert_eq!(
+            fs::read_to_string(&old_temporary).unwrap(),
+            "someone else's\n"
+        );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    /// A conflicted file reached through a symbolic link (a dotfiles
+    /// repository, a shared config) is written where the link points, and
+    /// the link stays a link.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_follows_a_symbolic_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.txt");
+        let link = dir.path().join("link.txt");
+        fs::write(&target, "old\n").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_atomically(&link, "new\n").unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
     }
 
     /// The demo's second conflict: zdiff3 moved the closing brace both added

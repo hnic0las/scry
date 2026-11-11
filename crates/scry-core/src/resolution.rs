@@ -254,7 +254,8 @@ fn without_whitespace(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// "c" and six hex digits of a 64-bit FNV-1a hash of the three sides. Written
+/// "c" and eight hex digits (32 bits, so two conflicts of a file almost
+/// never share one) of a 64-bit FNV-1a hash of the three sides. Written
 /// out rather than taken from the standard library, whose hash may change
 /// between Rust versions: IDs must stay the same across builds.
 fn content_id(conflict: &Conflict) -> String {
@@ -271,7 +272,7 @@ fn content_id(conflict: &Conflict) -> String {
             hash = hash.wrapping_mul(0x0100_0000_01b3);
         }
     }
-    format!("c{:06x}", hash >> 40)
+    format!("c{:08x}", hash >> 32)
 }
 
 #[cfg(test)]
@@ -395,7 +396,7 @@ mod tests {
         assert_eq!(both[1].id, only_second[0].id);
         assert_eq!(both[1].number, 2);
         assert_eq!(only_second[0].number, 1);
-        assert!(both[0].id.starts_with('c') && both[0].id.len() == 7);
+        assert!(both[0].id.starts_with('c') && both[0].id.len() == 9);
     }
 
     /// IDs ignore the marker labels, which change when a file is rebuilt, and must never
@@ -407,7 +408,7 @@ mod tests {
         assert_eq!(analysis.id, analyze_one("a\n", Some("x\n"), "b\n").id);
         // A fixed value, computed independently: IDs must not change between
         // builds or Rust versions.
-        assert_eq!(analysis.id, "c660efd");
+        assert_eq!(analysis.id, "c660efd40");
     }
 
     /// Two identical conflicts in a file still get distinct IDs.

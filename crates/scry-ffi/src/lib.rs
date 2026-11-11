@@ -5,11 +5,12 @@
 //! core's, so the core stays free of UniFFI.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use scry_core::blame;
 use scry_core::command::{self as core, CommandError};
+use scry_core::conflict;
 use scry_core::git::GitCli;
 use scry_core::highlight;
 use scry_core::layout;
@@ -334,14 +335,18 @@ impl MergeDocument {
         let text = std::fs::read_to_string(&path)
             .map_err(|error| failed(format!("cannot read {}: {error}", path.display())))?;
         let language = Language::from_path(&path);
-        let session = MergeSession::from_text(&text, language)
-            .map_err(failed)?
-            .with_file(path.clone());
         let directory = match path.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
             _ => PathBuf::from("."),
         };
-        let git = GitCli::new(directory);
+        let git = GitCli::with_program(git_program(), directory);
+        let marker_size = match path.file_name() {
+            Some(name) => conflict::marker_size(&git, Path::new(name)),
+            None => conflict::DEFAULT_MARKER_SIZE,
+        };
+        let session = MergeSession::from_text_with_marker_size(&text, language, marker_size)
+            .map_err(failed)?
+            .with_file(path.clone());
         let operation = operation::current(&git).ok().flatten();
         let header = header(presentation::header(&path, &session, operation.as_ref()));
         let commits = match (&operation, path.file_name()) {
@@ -545,6 +550,32 @@ fn lens_badge(badge: theme::Badge) -> LensBadge {
         text: badge.text,
         role,
     }
+}
+
+/// The git the user runs. Opened from the Finder, the app gets launchd's
+/// `PATH`, where `git` is Apple's `/usr/bin/git`: without Xcode or its
+/// command-line tools, it asks to install them instead of running. A git
+/// elsewhere on the `PATH`, or else Homebrew's, is the one the user's
+/// terminal runs.
+fn git_program() -> PathBuf {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    choose_git(std::env::split_paths(&path).collect(), |candidate| {
+        candidate.is_file()
+    })
+}
+
+fn choose_git(path: Vec<PathBuf>, exists: impl Fn(&Path) -> bool) -> PathBuf {
+    let apple = Path::new("/usr/bin/git");
+    let homebrew = [
+        PathBuf::from("/opt/homebrew/bin/git"),
+        PathBuf::from("/usr/local/bin/git"),
+    ];
+    path.into_iter()
+        .map(|directory| directory.join("git"))
+        .filter(|candidate| candidate != apple)
+        .chain(homebrew)
+        .find(|candidate| exists(candidate))
+        .unwrap_or_else(|| PathBuf::from("git"))
 }
 
 fn core_command(command: Command) -> Result<core::Command, ScryError> {
@@ -819,5 +850,36 @@ mod tests {
         document.newline(7, String::from("{"), String::new());
         document.typed_indent(7, String::from("{\n"), String::from("}"));
         assert!(!document.status().can_undo);
+    }
+
+    /// Opened from the Finder, the app must not pick Apple's `/usr/bin/git`
+    /// over the git the user installed, which may ask to install Xcode's
+    /// tools; a git on the user's own `PATH` comes first.
+    #[test]
+    fn picks_the_users_git() {
+        let installed = |found: &'static [&'static str]| {
+            move |candidate: &Path| found.iter().any(|path| candidate == Path::new(path))
+        };
+        let launchd = vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")];
+
+        assert_eq!(
+            choose_git(
+                launchd.clone(),
+                installed(&["/usr/bin/git", "/opt/homebrew/bin/git"])
+            ),
+            PathBuf::from("/opt/homebrew/bin/git")
+        );
+        assert_eq!(
+            choose_git(
+                vec![PathBuf::from("/nix/bin"), PathBuf::from("/usr/bin")],
+                installed(&["/nix/bin/git", "/opt/homebrew/bin/git"])
+            ),
+            PathBuf::from("/nix/bin/git")
+        );
+        // Only Apple's: plain `git`, found on the PATH as before.
+        assert_eq!(
+            choose_git(launchd, installed(&["/usr/bin/git"])),
+            PathBuf::from("git")
+        );
     }
 }

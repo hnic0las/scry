@@ -273,25 +273,47 @@ fn error_row(node: Node<'_>) -> usize {
 
 /// The first node, in text order, that is an error or a token the parser
 /// had to invent (such as a missing closing brace).
+///
+/// Walks the tree with a cursor rather than by recursion: a deeply nested
+/// file (JSON arrays thousands deep) would overflow the stack.
 fn first_error(node: Node<'_>) -> Option<Node<'_>> {
-    if node.is_error() || node.is_missing() {
-        return Some(node);
-    }
-    if !node.has_error() {
-        return None;
-    }
     let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if let Some(error) = first_error(child) {
-            return Some(error);
+    loop {
+        let current = cursor.node();
+        if current.is_error() || current.is_missing() {
+            return Some(current);
+        }
+        // Only a subtree with an error is worth going into.
+        if current.has_error() && cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return None;
+            }
         }
     }
-    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deeply nested file is checked without overflowing the stack, even
+    /// on a thread with a small one: a recursive walk would crash the app.
+    #[test]
+    fn deeply_nested_files_are_checked() {
+        let depth = 100_000;
+        // One closing bracket short.
+        let text = format!("{}1{}", "[".repeat(depth), "]".repeat(depth - 1));
+        let check = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || check(Language::Json, &text))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(matches!(check, ParseCheck::DoesNotParse { .. }));
+    }
 
     /// A file reparsed incrementally after edits must give the same tree,
     /// and so the same verdict, as parsing the edited text from scratch:

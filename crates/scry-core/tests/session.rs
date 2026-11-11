@@ -202,3 +202,36 @@ fn save_refuses_a_file_changed_on_disk() {
     // What Scry wrote is now the file as read: saving again is fine.
     save(&mut session, false).unwrap();
 }
+
+/// A file whose `conflict-marker-size` attribute is set (it holds lines of
+/// `=======` itself) is read with that size, and its conflicts are rebuilt
+/// with it; read with the default size, it would have no conflict at all.
+#[test]
+fn marker_size_comes_from_the_attributes() {
+    let dir = tempfile::tempdir().unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(init.success());
+    fs::write(
+        dir.path().join(".gitattributes"),
+        "*.txt conflict-marker-size=10\n",
+    )
+    .unwrap();
+    let merged = "<<<<<<<<<< ours\nours\n==========\ntheirs\n>>>>>>>>>> theirs\nend\n";
+    let files = files(
+        dir.path(),
+        "base\nend\n",
+        "ours\nend\n",
+        "theirs\nend\n",
+        merged,
+    );
+
+    let git = GitCli::new(dir.path().to_path_buf());
+    let session = session::load(&git, &files, "ours", "theirs").unwrap();
+    assert_eq!(session.conflict_count(), 1);
+    assert_eq!(session.origin(), Origin::Rebuilt);
+    assert_eq!(session.conflict(0).base.as_ref().unwrap().text, "base\n");
+}

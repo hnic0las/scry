@@ -52,24 +52,35 @@ pub trait Git {
     }
 }
 
-/// Runs the `git` executable found on the `PATH`.
+/// Runs the `git` executable, the one found on the `PATH` unless another is
+/// given.
 pub struct GitCli {
+    program: PathBuf,
     dir: PathBuf,
 }
 
 impl GitCli {
     /// Runs git as if started in `dir`.
     pub fn new(dir: PathBuf) -> GitCli {
-        GitCli { dir }
+        GitCli::with_program(PathBuf::from("git"), dir)
+    }
+
+    /// Runs `program` as git, as if started in `dir`: a front end that
+    /// knows better than the `PATH` it was given which git the user runs.
+    pub fn with_program(program: PathBuf, dir: PathBuf) -> GitCli {
+        GitCli { program, dir }
     }
 }
 
 impl GitCli {
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new("git");
+        let mut command = Command::new(&self.program);
         command
             .arg("-C")
             .arg(&self.dir)
+            // A file-system monitor daemon would be started, or asked, for
+            // every command Scry runs; reads stay correct without it.
+            .args(["-c", "core.fsmonitor=false"])
             .args(args)
             // Scry reads while the user's own git commands may run: never take
             // the index lock just to refresh it.

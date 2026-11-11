@@ -8,6 +8,9 @@
 //! rebuilt exactly; CRLF files from Windows stay CRLF.
 
 use std::fmt;
+use std::path::Path;
+
+use crate::git::Git;
 
 /// Marker length git uses unless the `conflict-marker-size` attribute says otherwise.
 pub const DEFAULT_MARKER_SIZE: usize = 7;
@@ -89,6 +92,24 @@ impl fmt::Display for ParseError {
 }
 
 impl std::error::Error for ParseError {}
+
+/// The marker size git writes in `file`: its `conflict-marker-size`
+/// attribute (set for files that hold lines of `=======` themselves), or
+/// the default when it is unset or git cannot tell.
+pub fn marker_size(git: &dyn Git, file: &Path) -> usize {
+    let file = file.to_string_lossy();
+    git.run(&["check-attr", "conflict-marker-size", "--", &file])
+        .ok()
+        .and_then(|output| marker_size_in(&output))
+        .unwrap_or(DEFAULT_MARKER_SIZE)
+}
+
+/// The size in `git check-attr` output, `<path>: conflict-marker-size: 10`;
+/// `None` for `unspecified`, `unset` or anything that is not a size.
+fn marker_size_in(output: &str) -> Option<usize> {
+    let value = output.trim_end().rsplit(": ").next()?;
+    value.parse().ok().filter(|size| *size > 0)
+}
 
 /// Parses `text` with the default marker size.
 pub fn parse(text: &str) -> Result<Vec<Segment>, ParseError> {
@@ -392,6 +413,25 @@ mod tests {
             parse(text).unwrap(),
             vec![Segment::Common(text.to_string())]
         );
+    }
+
+    /// The size comes from the attribute as git prints it, and anything
+    /// but a size leaves the default.
+    #[test]
+    fn marker_size_is_read_from_check_attr() {
+        assert_eq!(
+            marker_size_in("a.txt: conflict-marker-size: 10\n"),
+            Some(10)
+        );
+        assert_eq!(
+            marker_size_in("a: b.txt: conflict-marker-size: 12\n"),
+            Some(12)
+        );
+        assert_eq!(
+            marker_size_in("a.txt: conflict-marker-size: unspecified\n"),
+            None
+        );
+        assert_eq!(marker_size_in("a.txt: conflict-marker-size: 0\n"), None);
     }
 
     /// With `conflict-marker-size` set, markers have another length; the parser follows the

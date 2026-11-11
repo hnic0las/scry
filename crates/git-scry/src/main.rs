@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use scry_core::conflict;
 use scry_core::git::GitCli;
 use scry_core::operation;
 use scry_core::session::MergeSession;
@@ -113,7 +114,12 @@ fn list_conflicts(file: &PathBuf) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let session = match MergeSession::from_text(&text, Language::from_path(file)) {
+    let marker_size = conflict::marker_size(&GitCli::new(PathBuf::from(".")), file);
+    let session = match MergeSession::from_text_with_marker_size(
+        &text,
+        Language::from_path(file),
+        marker_size,
+    ) {
         Ok(session) => session,
         Err(error) => {
             eprintln!("git-scry: {}: {error}", file.display());
