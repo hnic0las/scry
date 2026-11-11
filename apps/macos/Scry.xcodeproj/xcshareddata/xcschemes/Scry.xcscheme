@@ -62,8 +62,8 @@
       </BuildableProductRunnable>
       <CommandLineArguments>
          <CommandLineArgument
-            argument = "$(SRCROOT)/../../conflicts/rebase/SyncEngine.swift"
-            isEnabled = "YES">
+            argument = "$(SRCROOT)/../../conflicts/rebase"
+            isEnabled = "NO">
          </CommandLineArgument>
       </CommandLineArguments>
    </LaunchAction>

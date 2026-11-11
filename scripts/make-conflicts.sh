@@ -6,6 +6,8 @@
 #   cd conflicts/rebase && git scry session
 #   cd conflicts/rebase && git mergetool
 #
+# It also builds conflicts/interactive-rebase (make-interactive-rebase.sh).
+#
 # git mergetool opens the Scry app when Scry is your merge tool (Scry ›
 # Settings), and otherwise runs this checkout's git-scry in the terminal.
 # The repositories ignore the rest of your git configuration (no signing,
@@ -78,3 +80,6 @@ echo "Repositories stopped on a conflict, in $root:"
 for dir in rebase merge cherry-pick revert; do
   echo "  conflicts/$dir"
 done
+
+# An interactive rebase over many languages, stopping at several steps.
+"$workspace/scripts/make-interactive-rebase.sh"
