@@ -25,36 +25,51 @@ pub struct ConflictCommits {
 
 /// For every conflict of `session`, the commit that last touched its lines
 /// on each side. `file` is the file's path as git in `git`'s directory sees
-/// it. Lines are taken from each side's own version of the file, at the
-/// revision that side holds.
+/// it.
+///
+/// Each side's text (the common text with that side of every conflict) is
+/// blamed against the revision that side holds. The common text also has
+/// the other side's clean changes, so its line numbers are not the
+/// revision's: git matches the lines itself, and the other side's lines
+/// count as not committed.
 pub fn conflict_commits(
     git: &dyn Git,
     operation: &Operation,
     file: &str,
     session: &MergeSession,
 ) -> Vec<ConflictCommits> {
+    let ours = session.side_text(Pane::Ours);
+    let theirs = session.side_text(Pane::Theirs);
     (0..session.conflict_count())
         .map(|index| ConflictCommits {
             ours: side_commit(
                 git,
                 &operation.ours,
                 file,
+                &ours,
                 session.side_lines(index, Pane::Ours),
             ),
             theirs: operation.theirs.as_ref().and_then(|side| {
-                side_commit(git, side, file, session.side_lines(index, Pane::Theirs))
+                side_commit(
+                    git,
+                    side,
+                    file,
+                    &theirs,
+                    session.side_lines(index, Pane::Theirs),
+                )
             }),
         })
         .collect()
 }
 
-/// The last commit to touch `lines` (first and last, from 1) at the side's
-/// revision; for a side with no line there (it deleted them), the last
-/// commit to touch the file on that side.
+/// The last commit to touch `lines` (first and last, from 1) of `text`, the
+/// side's text, blamed from the side's revision; for a side with no line
+/// there (it deleted them), the last commit to touch the file on that side.
 fn side_commit(
     git: &dyn Git,
     side: &Side,
     file: &str,
+    text: &str,
     lines: Option<(usize, usize)>,
 ) -> Option<LineCommit> {
     // A revert's "theirs" holds the content before the reverted commit.
@@ -63,23 +78,35 @@ fn side_commit(
         _ => side.commit.id.clone(),
     };
     let id = match lines {
-        Some((first, last)) => last_commit_of_lines(git, &revision, file, first, last),
+        Some((first, last)) => last_commit_of_lines(git, &revision, file, text, first, last),
         None => last_commit_of_file(git, &revision, file),
     };
     read_commit(git, &id.ok()??).ok()
 }
 
 /// The newest commit, by committer time, among those `git blame` gives for
-/// the lines.
+/// lines `first` to `last` of `text`, blamed from `revision`.
 fn last_commit_of_lines(
     git: &dyn Git,
     revision: &str,
     file: &str,
+    text: &str,
     first: usize,
     last: usize,
 ) -> Result<Option<String>, GitError> {
     let range = format!("{first},{last}");
-    let output = git.run(&["blame", "--porcelain", "-L", &range, revision, "--", file])?;
+    let args = [
+        "blame",
+        "--porcelain",
+        "--contents",
+        "-",
+        "-L",
+        &range,
+        revision,
+        "--",
+        file,
+    ];
+    let output = git.run_with_input(&args, text.as_bytes())?;
     Ok(newest_in_porcelain(&output))
 }
 
@@ -113,7 +140,9 @@ fn newest_in_porcelain(output: &str) -> Option<String> {
             // A group header starts with the full commit ID.
             let first = line.split(' ').next().unwrap_or("");
             if first.len() >= 40 && first.chars().all(|c| c.is_ascii_hexdigit()) {
-                current = Some(first.to_string());
+                // Lines not in the revision ("Not Committed Yet") have an
+                // all-zero ID: no commit to show.
+                current = first.chars().any(|c| c != '0').then(|| first.to_string());
             }
         }
     }

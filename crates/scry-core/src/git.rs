@@ -4,9 +4,9 @@
 //! (portability rule 3), so tests and other front ends can supply their own.
 
 use std::fmt;
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// What a git command produced.
 pub struct GitOutput {
@@ -22,10 +22,26 @@ pub trait Git {
     /// Runs git with these arguments, whatever its exit code.
     fn output(&self, args: &[&str]) -> Result<GitOutput, GitError>;
 
+    /// Runs git with `input` on its standard input, whatever its exit
+    /// code.
+    fn output_with_input(&self, args: &[&str], input: &[u8]) -> Result<GitOutput, GitError>;
+
     /// Runs git with these arguments and returns its standard output, or an
     /// error when git reports a failure.
     fn run(&self, args: &[&str]) -> Result<String, GitError> {
         let output = self.output(args)?;
+        if output.status != Some(0) {
+            return Err(GitError::Failed {
+                command: args.join(" "),
+                stderr: output.stderr,
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// Like `run`, with `input` on git's standard input.
+    fn run_with_input(&self, args: &[&str], input: &[u8]) -> Result<String, GitError> {
+        let output = self.output_with_input(args, input)?;
         if output.status != Some(0) {
             return Err(GitError::Failed {
                 command: args.join(" "),
@@ -48,22 +64,55 @@ impl GitCli {
     }
 }
 
-impl Git for GitCli {
-    fn output(&self, args: &[&str]) -> Result<GitOutput, GitError> {
-        let output = Command::new("git")
+impl GitCli {
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new("git");
+        command
             .arg("-C")
             .arg(&self.dir)
             .args(args)
             // Scry reads while the user's own git commands may run: never take
             // the index lock just to refresh it.
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .output()
+            .env("GIT_OPTIONAL_LOCKS", "0");
+        command
+    }
+}
+
+impl Git for GitCli {
+    fn output(&self, args: &[&str]) -> Result<GitOutput, GitError> {
+        let output = self.command(args).output().map_err(GitError::Spawn)?;
+        Ok(git_output(output))
+    }
+
+    fn output_with_input(&self, args: &[&str], input: &[u8]) -> Result<GitOutput, GitError> {
+        let mut child = self
+            .command(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(GitError::Spawn)?;
-        Ok(GitOutput {
-            status: output.status.code(),
-            stdout: output.stdout,
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        let mut stdin = child.stdin.take();
+        // Written from another thread while the output is read, so neither
+        // side waits on a full pipe. Git stopping early only closes the pipe.
+        let output = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                if let Some(stdin) = stdin.as_mut() {
+                    let _ = stdin.write_all(input);
+                }
+            });
+            child.wait_with_output()
         })
+        .map_err(GitError::Spawn)?;
+        Ok(git_output(output))
+    }
+}
+
+fn git_output(output: std::process::Output) -> GitOutput {
+    GitOutput {
+        status: output.status.code(),
+        stdout: output.stdout,
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
     }
 }
 

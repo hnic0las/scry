@@ -113,6 +113,49 @@ fn each_side_shows_the_commit_that_changed_its_lines() {
     assert!(short_id.len() >= 7 && short_id.chars().all(|c| c.is_ascii_hexdigit()));
 }
 
+/// The common text of the conflicted file holds both sides' clean
+/// changes: lines theirs added above the conflict are not in ours' file.
+/// Ours must still show the commit of its own conflicting line, not of
+/// the line that many lines below it.
+#[test]
+fn lines_added_above_by_the_other_side_do_not_shift_the_blame() {
+    let repo = Repo::new();
+    let base = "h1\nh2\nh3\nh4\nline\nk1\nk2\nk3\nk4\n";
+    repo.commit(base, "base", "Scry Test");
+    assert!(repo.git(&["switch", "--quiet", "-c", "feature"], "Scry Test"));
+    repo.commit(
+        "new1\nnew2\nnew3\nh1\nh2\nh3\nh4\nfeature line\nk1\nk2\nk3\nk4\n",
+        "Retry failed uploads",
+        "You",
+    );
+    assert!(repo.git(&["switch", "--quiet", "main"], "Scry Test"));
+    repo.commit(
+        "h1\nh2\nh3\nh4\nmain line\nk1\nk2\nk3\nk4\n",
+        "Add a timeout",
+        "Alex Martin",
+    );
+    // Three lines below the conflict in main's file: where the conflict
+    // would be if the lines feature added were counted.
+    repo.commit(
+        "h1\nh2\nh3\nh4\nmain line\nk1\nk2\nk3 renamed\nk4\n",
+        "Rename k3",
+        "Priya Shah",
+    );
+    assert!(repo.git(&["switch", "--quiet", "feature"], "Scry Test"));
+    assert!(!repo.git(&["rebase", "main"], "Scry Test"));
+
+    let commits = repo.conflict_commits();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(
+        subject_and_author(&commits[0].ours),
+        Some(("Add a timeout", "Alex Martin"))
+    );
+    assert_eq!(
+        subject_and_author(&commits[0].theirs),
+        Some(("Retry failed uploads", "You"))
+    );
+}
+
 /// A side that deleted the lines has none to blame; it shows the last commit
 /// that touched the file on that side, here the deletion itself.
 #[test]
