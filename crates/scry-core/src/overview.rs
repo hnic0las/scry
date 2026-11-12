@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{self, CatalogMerge};
+use crate::commit_changes::{self, ChangedFile};
 use crate::conflict;
 use crate::git::{Git, GitError};
 use crate::lockfile::{self, PackageChange};
@@ -168,6 +169,22 @@ pub struct Reword {
     /// Continue amends it. Otherwise the step stopped on conflicts, and
     /// git makes the commit with this message once they are staged.
     pub committed: bool,
+    /// The commit git made, once `committed`: what it changes, to read
+    /// while writing its message.
+    pub commit: Option<RewordCommit>,
+}
+
+/// The commit a reword stopped on, as git replayed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewordCommit {
+    /// The full id, to ask for a file's diff.
+    pub id: String,
+    pub author: String,
+    /// The author's email is the repository's `user.email`.
+    pub by_you: bool,
+    /// When it was authored, in seconds since 1970.
+    pub authored_at: i64,
+    pub files: Vec<ChangedFile>,
 }
 
 impl Snapshot {
@@ -946,10 +963,47 @@ fn reword(git: &dyn Git, plan: Option<&Plan>, merged: bool) -> Result<Option<Rew
     // The commit's own message: git's `message` file adds comments
     // listing the conflicts.
     let message = message_of(git, if committed { "HEAD" } else { stopped })?;
+    let commit = if committed {
+        Some(reword_commit(git)?)
+    } else {
+        None
+    };
     Ok(Some(Reword {
         message: message.trim_end().to_string(),
         committed,
+        commit,
     }))
+}
+
+/// HEAD, the commit git made of a reword, and what it changes.
+fn reword_commit(git: &dyn Git) -> Result<RewordCommit, GitError> {
+    let output = git.run(&[
+        "show",
+        "--no-patch",
+        "--no-show-signature",
+        "--format=%H%x00%an%x00%ae%x00%at",
+        "HEAD",
+        "--",
+    ])?;
+    let mut fields = output.trim_end().split('\0');
+    let id = fields.next().unwrap_or("").to_string();
+    let author = fields.next().unwrap_or("").to_string();
+    let email = fields.next().unwrap_or("");
+    let authored_at = fields
+        .next()
+        .and_then(|time| time.parse().ok())
+        .unwrap_or(0);
+    // No `user.email` makes git fail: then nobody is "you".
+    let by_you = git
+        .run(&["config", "user.email"])
+        .is_ok_and(|you| !email.is_empty() && you.trim().eq_ignore_ascii_case(email));
+    Ok(RewordCommit {
+        files: commit_changes::files(git, &id)?,
+        id,
+        author,
+        by_you,
+        authored_at,
+    })
 }
 
 fn message_of(git: &dyn Git, commit: &str) -> Result<String, GitError> {

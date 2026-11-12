@@ -86,6 +86,18 @@ final class FakeOverview: OverviewSource {
 
     func lockfile(path: String) throws -> LockfileInfo { lockfileInfo }
 
+    /// The paths whose diff was asked for, in order.
+    private(set) var diffs: [String] = []
+
+    func commitDiff(commit: String, path: String) throws -> [CommitDiffLine] {
+        diffs.append(path)
+        return [
+            CommitDiffLine(kind: .hunk, oldNumber: nil, newNumber: nil, text: "final class SyncEngine"),
+            CommitDiffLine(kind: .removed, oldNumber: 13, newNumber: nil, text: "var pending"),
+            CommitDiffLine(kind: .added, oldNumber: nil, newNumber: 13, text: "var outbox \(path)"),
+        ]
+    }
+
     func apply(action: OverviewAction) throws {
         actions.append(action)
         switch action {
@@ -238,7 +250,7 @@ struct OverviewViewModelTests {
     /// point of a reword.
     @Test func continuesARewordWithTheMessageWritten() {
         let source = FakeOverview(files: [])
-        source.reword = RewordInfo(message: "Retry uploads", committed: true)
+        source.reword = RewordInfo(message: "Retry uploads", committed: true, commit: nil)
         let overview = OverviewViewModel(source: source) { _ in }
         #expect(overview.isRewording)
         #expect(overview.rewordOnly)
@@ -261,10 +273,13 @@ struct OverviewViewModelTests {
     /// failing in git.
     @Test func anEmptyRewordMessageCannotContinue() {
         let source = FakeOverview(files: [])
-        source.reword = RewordInfo(message: "Retry uploads", committed: true)
+        source.reword = RewordInfo(message: "Retry uploads", committed: true, commit: nil)
         let overview = OverviewViewModel(source: source) { _ in }
         overview.rewordMessage = "  \n"
         #expect(!overview.canContinue)
+        // Said under the editor and, once, beside the disabled Continue.
+        #expect(overview.rewordNote == .init(text: "Continue needs a message.", warning: true))
+        #expect(overview.continueReason == "Write a message to continue")
         overview.continueOperation()
         #expect(source.actions.isEmpty)
     }
@@ -273,14 +288,98 @@ struct OverviewViewModelTests {
     /// for instance, keeps the message being typed.
     @Test func aRefreshKeepsTheMessageBeingTyped() {
         let source = FakeOverview(files: [file("A.swift", .unresolved)])
-        source.reword = RewordInfo(message: "Retry uploads", committed: false)
+        source.reword = RewordInfo(message: "Retry uploads", committed: false, commit: nil)
         let overview = OverviewViewModel(source: source) { _ in }
         overview.rewordMessage = "Retry uploads, reworded"
         overview.refresh()
         #expect(overview.rewordMessage == "Retry uploads, reworded")
         // Files to resolve first: the list stays, the message goes below.
         #expect(!overview.rewordOnly)
-        #expect(overview.rewordHelp.hasPrefix("Once its files are staged"))
+        #expect(overview.rewordStatus == .init(text: "Edited", warning: false))
+        #expect(overview.showsStage)
+    }
+
+    /// The subject's length is advice: past 72 the note and the docked
+    /// status say so, text on line 2 is pointed out, and Continue stays
+    /// enabled, since git takes such a message.
+    @Test func longSubjectsAndLineTwoAreAdviceOnly() {
+        let source = FakeOverview(files: [])
+        source.reword = RewordInfo(message: "Retry uploads", committed: true, commit: nil)
+        let overview = OverviewViewModel(source: source) { _ in }
+        #expect(overview.rewordNote == .init(text: "Original message, unchanged.", warning: false))
+
+        overview.rewordMessage = String(repeating: "a", count: 89) + "\n\nBody"
+        #expect(overview.subjectLength == 89)
+        #expect(overview.subjectTooLong)
+        #expect(overview.rewordNote.text.hasPrefix("The subject is 89 characters."))
+        #expect(overview.rewordStatus == .init(text: "Subject: 89 of 72", warning: true))
+        #expect(overview.canContinue)
+
+        overview.rewordMessage = "Retry uploads\nwith a body on line 2"
+        #expect(overview.rewordNote.text.hasPrefix("Leave line 2 empty"))
+        #expect(overview.canContinue)
+
+        overview.rewordMessage = "Retry uploads, again"
+        #expect(overview.rewordNote == .init(text: "Edited.", warning: false))
+    }
+
+    /// While writing the message the user reads what the commit changes:
+    /// its files, the first selected, and the selected file's diff, with
+    /// who wrote it and when. Nothing to stage at such a step.
+    @Test func aCommittedRewordShowsWhatTheCommitChanges() {
+        let source = FakeOverview(files: [])
+        source.plan = Self.plan(current: 2)
+        source.reword = RewordInfo(
+            message: "add notes", committed: true,
+            commit: RewordCommitInfo(
+                id: "6b7c8d9", author: "Ada", byYou: true, authoredAt: 1_000_000,
+                files: [
+                    ChangedFileInfo(path: "Sources/SyncQueue.swift", name: "SyncQueue.swift", directory: "Sources/", added: 54, removed: 0),
+                    ChangedFileInfo(path: "icon.png", name: "icon.png", directory: "", added: nil, removed: nil),
+                ]
+            )
+        )
+        let now = Date(timeIntervalSince1970: 1_000_000 + 3 * 86_400)
+        let overview = OverviewViewModel(source: source, now: { now }) { _ in }
+
+        #expect(overview.rewordTitle == "Commit message · abc0002")
+        #expect(overview.rewordFiles.map(\.added) == ["+54", "binary"])
+        #expect(overview.rewordFiles.map(\.removed) == [nil, nil])
+        #expect(overview.rewordFiles[1].directory == "repository root")
+        #expect(overview.rewordSelection == "Sources/SyncQueue.swift")
+        #expect(overview.rewordDiff.map(\.text) == ["@@ final class SyncEngine", "var pending", "var outbox Sources/SyncQueue.swift"])
+        #expect(overview.rewordDiff.map(\.number) == ["", "13", "13"])
+        #expect(overview.rewordCommitDetail.hasPrefix("You · "))
+        #expect(overview.rewordCommitDetail.hasSuffix(" · replayed without conflicts"))
+        #expect(!overview.showsStage)
+
+        overview.selectRewordFile("icon.png")
+        #expect(overview.rewordDiff.last?.text == "var outbox icon.png")
+        // A refresh keeps the file being read.
+        overview.refresh()
+        #expect(overview.rewordSelection == "icon.png")
+        #expect(source.diffs == ["Sources/SyncQueue.swift", "icon.png"])
+    }
+
+    /// The plan keeps the id the user wrote in the todo list, with the
+    /// replayed commit's id in a tooltip, and a reworded step tells its old
+    /// subject; the header names the step git stopped on.
+    @Test func planKeepsTheTodoIdsAndTellsAReword() {
+        let source = FakeOverview(files: [file("A.swift", .unresolved)])
+        var plan = Self.plan(current: 3)
+        plan.steps[1].replayedId = "6b7c8d9"
+        plan.steps[1].was = "add notes"
+        plan.steps[1].subject = "Add the notes"
+        source.plan = plan
+        let overview = OverviewViewModel(source: source) { _ in }
+
+        let reworded = overview.planRows.first { $0.number == 2 }
+        #expect(reworded?.shortId == "abc0002")
+        #expect(reworded?.idHelp == "Replayed as 6b7c8d9")
+        #expect(reworded?.was == "was “add notes”")
+        #expect(overview.planRows.first { $0.number == 1 }?.was == nil)
+        #expect(overview.stepLine == "Step 3 of 5 · fixup abc0003 “fixup! add notes”")
+        #expect(overview.summary == "Rebasing feature onto main")
     }
 
     /// Abort only runs once confirmed: the view asks, then calls abort.
@@ -348,6 +447,8 @@ struct OverviewViewModelTests {
                     action: line.0,
                     shortId: "abc000\(number)",
                     subject: line.1,
+                    replayedId: nil,
+                    was: nil,
                     state: number < current ? .done : number == current ? .current : .pending,
                     joins: line.2
                 )

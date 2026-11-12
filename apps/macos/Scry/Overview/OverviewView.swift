@@ -10,6 +10,7 @@ struct OverviewView: View {
         VStack(spacing: 0) {
             OverviewHeader(
                 summary: viewModel.summary,
+                step: viewModel.stepLine,
                 applied: viewModel.appliedNote,
                 progress: viewModel.hasOperation && !viewModel.rewordOnly ? viewModel.progress : nil,
                 detail: viewModel.progressDetail,
@@ -18,7 +19,18 @@ struct OverviewView: View {
             Divider()
             HStack(spacing: 0) {
                 if viewModel.rewordOnly {
-                    rewordPanel
+                    RewordPanel(
+                        title: viewModel.rewordTitle,
+                        message: $viewModel.rewordMessage,
+                        note: viewModel.rewordNote,
+                        edited: viewModel.rewordEdited,
+                        files: viewModel.rewordFiles,
+                        selection: viewModel.rewordSelection,
+                        diff: viewModel.rewordDiff,
+                        commitDetail: viewModel.rewordCommitDetail,
+                        select: { viewModel.selectRewordFile($0) },
+                        reset: { viewModel.resetRewordMessage() }
+                    )
                 } else {
                     OverviewSidebar(filters: viewModel.filters) { viewModel.select($0) }
                         .frame(width: 210)
@@ -47,8 +59,14 @@ struct OverviewView: View {
             }
             if viewModel.isRewording && !viewModel.rewordOnly {
                 Divider()
-                rewordPanel
-                    .frame(height: 170)
+                RewordDock(
+                    title: viewModel.rewordDockTitle,
+                    message: $viewModel.rewordMessage,
+                    status: viewModel.rewordStatus,
+                    edited: viewModel.rewordEdited,
+                    reset: { viewModel.resetRewordMessage() }
+                )
+                .frame(height: 176)
             }
             Divider()
             footer
@@ -79,16 +97,6 @@ struct OverviewView: View {
         } message: {
             Text(viewModel.abortMessage)
         }
-    }
-
-    private var rewordPanel: some View {
-        RewordPanel(
-            title: viewModel.rewordTitle,
-            help: viewModel.rewordHelp,
-            message: $viewModel.rewordMessage,
-            edited: viewModel.rewordEdited,
-            reset: { viewModel.resetRewordMessage() }
-        )
     }
 
     private var table: some View {
@@ -169,14 +177,16 @@ struct OverviewView: View {
                     .lineLimit(2)
             }
             Spacer()
-            Text(viewModel.unresolvedSummary)
+            Text(viewModel.continueReason ?? viewModel.unresolvedSummary)
                 .font(Metrics.callout)
                 .foregroundStyle(Theme.Surfaces.textSecondary)
             if viewModel.canSkip {
                 Button("Skip commit") { viewModel.skip() }
             }
-            Button(viewModel.stageTitle) { viewModel.stageResolved() }
-                .disabled(!viewModel.canStage)
+            if viewModel.showsStage {
+                Button(viewModel.stageTitle) { viewModel.stageResolved() }
+                    .disabled(!viewModel.canStage)
+            }
             Button(viewModel.continueTitle) { viewModel.continueOperation() }
                 .keyboardShortcut(Shortcut.continueOperation)
                 .shortcutHint(Shortcut.continueOperation, edge: .top)
@@ -190,53 +200,11 @@ struct OverviewView: View {
     }
 }
 
-/// The message of the commit a `reword` line stopped on, written before
-/// continuing.
-struct RewordPanel: View {
-    let title: String
-    let help: String
-    @Binding var message: String
-    /// The message differs from the commit's own.
-    let edited: Bool
-    let reset: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Label(title, systemImage: "text.cursor")
-                    .font(Metrics.captionBold)
-                Text(help)
-                    .font(Metrics.caption)
-                    .foregroundStyle(Theme.Surfaces.textSecondary)
-                Spacer()
-                Button("Revert to Original", action: reset)
-                    .disabled(!edited)
-                    .help("The commit's own message")
-            }
-            TextEditor(text: $message)
-                .font(Metrics.code)
-                .scrollContentBackground(.hidden)
-                .padding(6)
-                .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Theme.Surfaces.window)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(Theme.Surfaces.textSecondary.opacity(0.3))
-                )
-                .accessibilityLabel("Commit message")
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Theme.Surfaces.chrome)
-    }
-}
-
 /// The operation, its commits and how many files are ready.
 struct OverviewHeader: View {
     let summary: String
+    /// "Step 2 of 7 · reword 351410c “wip upload queue”".
+    let step: String?
     /// What git ran on its own since it last stopped.
     let applied: String?
     /// "2 of 6 files ready"; `nil` without an operation.
@@ -246,8 +214,17 @@ struct OverviewHeader: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(summary)
-                .font(Metrics.headline)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(summary)
+                    .font(Metrics.headline)
+                if let step {
+                    Text(step)
+                        .font(Metrics.callout)
+                        .foregroundStyle(Theme.Surfaces.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
             if let applied {
                 AppliedNote(text: applied)
             }
@@ -355,6 +332,13 @@ private struct PreviewOverview: OverviewSource {
                 steps: Self.steps.map { step in
                     var step = step
                     step.state = step.number < current ? .done : step.number == current ? .current : .pending
+                    if step.state == .done, step.shortId != nil, step.action != "drop" {
+                        step.replayedId = "6b7c8d\(step.number)"
+                        if step.action == "reword" {
+                            step.was = step.subject
+                            step.subject = "Document the sync queue"
+                        }
+                    }
                     return step
                 }
             ),
@@ -363,7 +347,8 @@ private struct PreviewOverview: OverviewSource {
             reword: operation == nil ? nil : reword,
             files: files,
             canContinue: operation != nil && files.allSatisfy { $0.state == .staged },
-            canSkip: operation != nil
+            // As the core: no skipping a reword git already committed.
+            canSkip: operation != nil && reword?.committed != true
         )
     }
 
@@ -374,6 +359,7 @@ private struct PreviewOverview: OverviewSource {
     func catalog(path: String) throws -> CatalogInfo { try SpecialSamples().catalog(path: path) }
     func packages(path: String) throws -> PackagesInfo { try SpecialSamples().packages(path: path) }
     func lockfile(path: String) throws -> LockfileInfo { try SpecialSamples().lockfile(path: path) }
+    func commitDiff(commit: String, path: String) throws -> [CommitDiffLine] { Self.diff }
 
     /// The same files, in a merge of main into the branch.
     struct Merge: OverviewSource {
@@ -417,6 +403,7 @@ private struct PreviewOverview: OverviewSource {
         func catalog(path: String) throws -> CatalogInfo { try SpecialSamples().catalog(path: path) }
         func packages(path: String) throws -> PackagesInfo { try SpecialSamples().packages(path: path) }
         func lockfile(path: String) throws -> LockfileInfo { try SpecialSamples().lockfile(path: path) }
+        func commitDiff(commit: String, path: String) throws -> [CommitDiffLine] { [] }
     }
 
     static func file(_ path: String, _ kind: String, _ state: ConflictState, _ conflicts: UInt32?) -> OverviewFile {
@@ -438,8 +425,38 @@ private struct PreviewOverview: OverviewSource {
     }
 
     static func step(_ number: UInt32, _ action: String, _ id: String?, _ subject: String, joins: UInt32? = nil) -> RebaseStep {
-        RebaseStep(number: number, action: action, shortId: id, subject: subject, state: .pending, joins: joins)
+        RebaseStep(
+            number: number, action: action, shortId: id, subject: subject, replayedId: nil, was: nil,
+            state: .pending, joins: joins
+        )
     }
+
+    /// The commit a reword stopped on, as git replayed it.
+    static let rewordCommit = RewordCommitInfo(
+        id: "6b7c8d9e0f", author: "You", byYou: true,
+        authoredAt: Int64(Date().addingTimeInterval(-3 * 86_400).timeIntervalSince1970),
+        files: [
+            ChangedFileInfo(path: "README.md", name: "README.md", directory: "", added: 14, removed: 2),
+            ChangedFileInfo(path: "docs/sync-queue.md", name: "sync-queue.md", directory: "docs/", added: 40, removed: 0),
+            ChangedFileInfo(path: "docs/queue.png", name: "queue.png", directory: "docs/", added: nil, removed: nil),
+        ]
+    )
+
+    static let diff: [CommitDiffLine] = {
+        let line = { (kind: DiffLineKind, old: UInt32?, new: UInt32?, text: String) in
+            CommitDiffLine(kind: kind, oldNumber: old, newNumber: new, text: text)
+        }
+        return [
+            line(.hunk, nil, nil, "## Offline sync"),
+            line(.context, 12, 12, "Uploads made offline wait in a queue."),
+            line(.removed, 13, nil, "They are sent later."),
+            line(.added, nil, 13, "They are sent when the network returns, oldest first,"),
+            line(.added, nil, 14, "in batches of 20; a failed batch is retried with backoff."),
+            line(.context, 14, 15, ""),
+            line(.hunk, nil, nil, "## Settings"),
+            line(.added, nil, 31, "Settings › Sync lists the uploads still waiting."),
+        ]
+    }()
 
     static let steps = [
         step(1, "pick", "0572f71", "Queue uploads while offline"),
@@ -481,7 +498,11 @@ private struct PreviewOverview: OverviewSource {
             files: [],
             current: 2,
             applied: [],
-            reword: RewordInfo(message: "Explain the sync queue in the README", committed: true)
+            reword: RewordInfo(
+                message: "Explain the sync queue in the README while the device is offline and how it drains\n\nUploads wait in a queue until the network returns.",
+                committed: true,
+                commit: PreviewOverview.rewordCommit
+            )
         )
     ) { _ in })
 }
@@ -492,7 +513,7 @@ private struct PreviewOverview: OverviewSource {
             files: Array(PreviewOverview.mixed.prefix(2)),
             current: 2,
             applied: [],
-            reword: RewordInfo(message: "Explain the sync queue in the README", committed: false)
+            reword: RewordInfo(message: "Explain the sync queue in the README", committed: false, commit: nil)
         )
     ) { _ in })
 }

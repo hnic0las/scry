@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use scry_core::blame;
 use scry_core::command::{self as core, CommandError};
+use scry_core::commit_changes;
 use scry_core::conflict;
 use scry_core::git::GitCli;
 use scry_core::highlight;
@@ -787,6 +788,52 @@ pub struct RewordInfo {
     /// Git made the commit already, and stopped for its message; otherwise
     /// it makes it once the conflicts are staged.
     pub committed: bool,
+    /// The commit git made, once `committed`.
+    pub commit: Option<RewordCommitInfo>,
+}
+
+/// The commit a reword stopped on, as git replayed it.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RewordCommitInfo {
+    /// The full id, for `commit_diff`.
+    pub id: String,
+    pub author: String,
+    /// The author is the repository's `user.email`.
+    pub by_you: bool,
+    /// Seconds since 1970.
+    pub authored_at: i64,
+    pub files: Vec<ChangedFileInfo>,
+}
+
+/// A file a commit changes.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ChangedFileInfo {
+    pub path: String,
+    pub name: String,
+    /// With a trailing slash; empty at the root.
+    pub directory: String,
+    /// `None` for a binary file.
+    pub added: Option<u32>,
+    pub removed: Option<u32>,
+}
+
+/// What a line of a diff is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum DiffLineKind {
+    /// A hunk's start: its text is the enclosing function or the ranges.
+    Hunk,
+    Context,
+    Added,
+    Removed,
+}
+
+/// One line of a file's diff in a commit.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CommitDiffLine {
+    pub kind: DiffLineKind,
+    pub old_number: Option<u32>,
+    pub new_number: Option<u32>,
+    pub text: String,
 }
 
 /// A commit of the merge's history.
@@ -833,9 +880,15 @@ pub struct RebaseStep {
     pub number: u32,
     /// Git's word: "pick", "reword", "fixup", "drop", "exec"…
     pub action: String,
+    /// The todo list's commit, which stays once the step is done.
     pub short_id: Option<String>,
-    /// The commit's subject, or an `exec`'s command.
+    /// The commit's subject, or an `exec`'s command; once done, the
+    /// subject of the commit made.
     pub subject: String,
+    /// Once done, the commit git made of the step.
+    pub replayed_id: Option<String>,
+    /// A reword's subject before it.
+    pub was: Option<String>,
     pub state: RebaseStepState,
     /// A fixup or squash joins the commit of this step.
     pub joins: Option<u32>,
@@ -955,6 +1008,23 @@ impl RepositoryOverview {
             reword: snapshot.reword.as_ref().map(|reword| RewordInfo {
                 message: reword.message.clone(),
                 committed: reword.committed,
+                commit: reword.commit.as_ref().map(|commit| RewordCommitInfo {
+                    id: commit.id.clone(),
+                    author: commit.author.clone(),
+                    by_you: commit.by_you,
+                    authored_at: commit.authored_at,
+                    files: commit
+                        .files
+                        .iter()
+                        .map(|file| ChangedFileInfo {
+                            path: file.path.clone(),
+                            name: file.name.clone(),
+                            directory: file.directory.clone(),
+                            added: file.added.map(|count| count as u32),
+                            removed: file.removed.map(|count| count as u32),
+                        })
+                        .collect(),
+                }),
             }),
             merge: snapshot.merge.as_ref().map(|graph| {
                 let commit = |commit: &scry_core::merge_graph::GraphCommit| HistoryCommit {
@@ -987,6 +1057,8 @@ impl RepositoryOverview {
                         action: step.action.name().to_string(),
                         short_id: step.short_id.clone(),
                         subject: step.subject.clone(),
+                        replayed_id: step.replayed_id.clone(),
+                        was: step.was.clone(),
                         state: match step.state {
                             rebase_plan::StepState::Done => RebaseStepState::Done,
                             rebase_plan::StepState::Current => RebaseStepState::Current,
@@ -1071,6 +1143,29 @@ impl RepositoryOverview {
             .apply(&self.git, command)
             .map(|_| ())
             .map_err(failed)
+    }
+
+    /// The diff `commit` makes to `path`, read only.
+    pub fn commit_diff(
+        &self,
+        commit: String,
+        path: String,
+    ) -> Result<Vec<CommitDiffLine>, ScryError> {
+        let lines = commit_changes::diff(&self.git, &commit, &path).map_err(failed)?;
+        Ok(lines
+            .into_iter()
+            .map(|line| CommitDiffLine {
+                kind: match line.kind {
+                    commit_changes::LineKind::Hunk => DiffLineKind::Hunk,
+                    commit_changes::LineKind::Context => DiffLineKind::Context,
+                    commit_changes::LineKind::Added => DiffLineKind::Added,
+                    commit_changes::LineKind::Removed => DiffLineKind::Removed,
+                },
+                old_number: line.old_number.map(|number| number as u32),
+                new_number: line.new_number.map(|number| number as u32),
+                text: line.text,
+            })
+            .collect())
     }
 
     /// Who deleted a file the other side changed.

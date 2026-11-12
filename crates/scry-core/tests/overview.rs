@@ -5,9 +5,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+use scry_core::commit_changes;
 use scry_core::git::GitCli;
 use scry_core::overview::{
-    Overview, OverviewCommand, OverviewError, OverviewEvent, Reword, Special, Version,
+    Overview, OverviewCommand, OverviewError, OverviewEvent, Special, Version,
 };
 use scry_core::rebase_plan::{Action, StepState};
 use scry_core::theme::State;
@@ -93,6 +94,17 @@ impl Repo {
             .unwrap()
             .trim_end()
             .to_string()
+    }
+
+    /// The full id of `commit`.
+    fn rev(&self, commit: &str) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(self.path())
+            .args(["rev-parse", commit])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
     fn commit(&self, a: &str, b: &str, message: &str) {
@@ -316,13 +328,17 @@ fn an_interactive_rebase_shows_its_plan_and_what_git_applied() {
     let snapshot = overview.refresh(&git).unwrap();
     assert_eq!(snapshot.plan.as_ref().unwrap().current(), Some(2));
     assert!(snapshot.applied.is_empty());
-    assert_eq!(
-        snapshot.reword,
-        Some(Reword {
-            message: String::from("add notes"),
-            committed: true
-        })
-    );
+    let reword = snapshot.reword.clone().unwrap();
+    assert_eq!(reword.message, "add notes");
+    assert!(reword.committed);
+    // The commit git made, to read while writing its message.
+    let commit = reword.commit.unwrap();
+    assert_eq!(commit.id, repo.rev("HEAD"));
+    let paths: Vec<&str> = commit.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, ["notes.txt"]);
+    assert_eq!(commit.files[0].added, Some(1));
+    let lines = commit_changes::diff(&git, &commit.id, "notes.txt").unwrap();
+    assert_eq!(lines.last().unwrap().text, "notes");
     // Skipping would keep the commit made, so it is not offered.
     assert!(!snapshot.can_skip());
     // Step 1 kept its message through the commit after its conflict.
@@ -343,10 +359,17 @@ fn an_interactive_rebase_shows_its_plan_and_what_git_applied() {
     assert_eq!(repo.message("HEAD"), "Add the notes\n\nWith a body.");
     let plan = snapshot.plan.unwrap();
     assert_eq!(plan.current(), Some(5));
-    // The plan shows the commit git made of the reword, not the original
-    // line of the todo list.
+    // The plan keeps the todo list's id, the one the user wrote, and shows
+    // the reword's new subject with the old one.
+    assert_eq!(plan.steps[1].short_id.as_deref(), Some(&notes[..7]));
     assert_eq!(plan.steps[1].subject, "Add the notes");
-    assert_ne!(plan.steps[1].short_id.as_deref(), Some(&notes[..7]));
+    assert_eq!(plan.steps[1].was.as_deref(), Some("add notes"));
+    let replayed = plan.steps[1].replayed_id.clone().unwrap();
+    assert_ne!(replayed, notes[..7]);
+    assert!(repo.rev("HEAD").starts_with(&replayed));
+    // A pick keeps its subject: nothing to say it was another.
+    assert_eq!(plan.steps[0].was, None);
+    assert!(plan.steps[0].replayed_id.is_some());
     assert_eq!(plan.steps[2].subject, "fixup! add notes");
     assert!(
         plan.steps[..4]
@@ -377,13 +400,11 @@ fn a_conflicted_reword_commits_with_the_message_written() {
     let git = repo.cli();
     let mut overview = Overview::new(repo.path());
     let snapshot = overview.refresh(&git).unwrap();
-    assert_eq!(
-        snapshot.reword,
-        Some(Reword {
-            message: String::from("feature change"),
-            committed: false
-        })
-    );
+    let reword = snapshot.reword.clone().unwrap();
+    assert_eq!(reword.message, "feature change");
+    assert!(!reword.committed);
+    // No commit yet: the file table shows what is in it.
+    assert!(reword.commit.is_none());
     fs::write(repo.path().join("a.txt"), "a both\n").unwrap();
     fs::write(repo.path().join("Sources/b.swift"), "let b = 3\n").unwrap();
     overview

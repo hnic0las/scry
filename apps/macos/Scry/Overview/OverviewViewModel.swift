@@ -13,6 +13,7 @@ protocol OverviewSource {
     func catalog(path: String) throws -> CatalogInfo
     func packages(path: String) throws -> PackagesInfo
     func lockfile(path: String) throws -> LockfileInfo
+    func commitDiff(commit: String, path: String) throws -> [CommitDiffLine]
 }
 
 extension RepositoryOverview: OverviewSource {}
@@ -47,8 +48,13 @@ final class OverviewViewModel {
         let number: Int
         /// Git's word: "pick", "reword", "fixup", "drop"…
         let action: String
+        /// The todo list's id, the one the user wrote.
         let shortId: String?
         let subject: String
+        /// "Replayed as 6b7c8d9", the id's tooltip once done.
+        let idHelp: String?
+        /// "was “wip upload queue”" under a reworded step.
+        let was: String?
         let state: RebaseStepState
         /// A fixup or squash, drawn beside the commit it joins.
         let joined: Bool
@@ -113,6 +119,35 @@ final class OverviewViewModel {
         var id: String { path }
     }
 
+    /// A file of the reworded commit, in "In this commit".
+    struct ChangedFileRow: Identifiable, Equatable {
+        let path: String
+        let name: String
+        let directory: String
+        /// "+54", or "binary"; `nil` when nothing was added.
+        let added: String?
+        /// "−2"; `nil` when nothing was removed.
+        let removed: String?
+        var id: String { path }
+    }
+
+    /// A line of the selected file's diff.
+    struct DiffRow: Identifiable, Equatable {
+        let id: Int
+        let kind: DiffLineKind
+        /// The line in the new file, or in the old one for a removed line.
+        let number: String
+        /// "@@ final class SyncEngine" for a hunk, else the line.
+        let text: String
+    }
+
+    /// A remark under the message editor; `warning` draws it in the
+    /// warning colour.
+    struct MessageNote: Equatable {
+        let text: String
+        let warning: Bool
+    }
+
     private(set) var snapshot: OverviewSnapshot?
     private(set) var error: String?
     private(set) var filter: Filter = .all
@@ -126,13 +161,19 @@ final class OverviewViewModel {
     /// The reword step the message was started for, so a refresh keeps
     /// what the user typed and a new step starts from its own message.
     @ObservationIgnored private var rewordStep: String?
+    /// The file of the reworded commit whose diff shows.
+    private(set) var rewordSelection: String?
+    private(set) var rewordDiff: [DiffRow] = []
+    /// Gives "3 days ago"; tests pass a fixed date.
+    @ObservationIgnored private let now: () -> Date
 
     @ObservationIgnored private let source: OverviewSource
     @ObservationIgnored private let openFile: (OverviewFile) -> Void
 
     /// `openFile` opens a file in the merge editor; the root screen owns it.
-    init(source: OverviewSource, openFile: @escaping (OverviewFile) -> Void) {
+    init(source: OverviewSource, now: @escaping () -> Date = Date.init, openFile: @escaping (OverviewFile) -> Void) {
         self.source = source
+        self.now = now
         self.openFile = openFile
         refresh()
     }
@@ -143,27 +184,103 @@ final class OverviewViewModel {
 
     /// The operation in plain words, or that there is none.
     var summary: String {
-        snapshot?.summary ?? "No merge, rebase, cherry-pick or revert in progress."
+        guard let summary = snapshot?.summary else { return "No merge, rebase, cherry-pick or revert in progress." }
+        // The step line under it names the commit: "Rebasing feature onto
+        // main", without the core's " · commit 2 of 7: …".
+        if stepLine != nil, let cut = summary.range(of: " · commit ") {
+            return String(summary[..<cut.lowerBound])
+        }
+        return summary
     }
 
     var hasOperation: Bool { snapshot?.operation != nil }
+
+    /// The step git stopped on: "Step 2 of 7 · reword 351410c “wip upload
+    /// queue”"; `nil` outside a rebase.
+    var stepLine: String? {
+        guard let steps = snapshot?.plan?.steps, let step = currentStep else { return nil }
+        let id = step.shortId.map { " \($0)" } ?? ""
+        return "Step \(step.number) of \(steps.count) · \(step.action)\(id) “\(step.subject)”"
+    }
 
     // MARK: Reword
 
     /// Whether git stopped on a `reword` line, for its message.
     var isRewording: Bool { snapshot?.reword != nil }
 
-    /// "Reword e076115 · step 2".
+    /// The subject's length that git log, GitHub and the plan show whole.
+    static let subjectLimit = 72
+
+    /// "Commit message · 351410c", over the editor in place of the files.
     var rewordTitle: String {
-        guard let step = currentStep else { return "Reword" }
-        return "Reword \(step.shortId ?? "") · step \(step.number)"
+        "Commit message" + (currentStep?.shortId.map { " · \($0)" } ?? "")
     }
 
-    var rewordHelp: String {
-        guard let reword = snapshot?.reword else { return "" }
-        return reword.committed
-            ? "Git replayed this commit and stopped for its message. Continue gives it the message below."
-            : "Once its files are staged, Continue makes this commit with the message below."
+    /// "Message for 351410c · used when you continue", over the editor
+    /// docked under the files.
+    var rewordDockTitle: String {
+        "Message for \(currentStep?.shortId ?? "this commit") · used when you continue"
+    }
+
+    /// The first line, which git takes as the subject.
+    private var subject: String {
+        String(rewordMessage.prefix { $0 != "\n" })
+    }
+
+    var subjectLength: Int { subject.count }
+    var subjectTooLong: Bool { subjectLength > Self.subjectLimit }
+
+    /// What the editor's note says: a problem first, then whether the
+    /// message is the commit's own.
+    var rewordNote: MessageNote {
+        if rewordMessageIsEmpty {
+            return MessageNote(text: "Continue needs a message.", warning: true)
+        }
+        if subjectTooLong {
+            return MessageNote(
+                text: "The subject is \(subjectLength) characters. git log, GitHub and the rebase plan cut it at about \(Self.subjectLimit); consider moving the end to the body.",
+                warning: true
+            )
+        }
+        if secondLineIsText {
+            return MessageNote(
+                text: "Leave line 2 empty: git takes everything before the first blank line as the subject.",
+                warning: true
+            )
+        }
+        return MessageNote(text: rewordEdited ? "Edited." : "Original message, unchanged.", warning: false)
+    }
+
+    /// The docked editor's short status, beside Revert to Original.
+    var rewordStatus: MessageNote {
+        if rewordMessageIsEmpty { return MessageNote(text: "No message", warning: true) }
+        if subjectTooLong { return MessageNote(text: "Subject: \(subjectLength) of \(Self.subjectLimit)", warning: true) }
+        if secondLineIsText { return MessageNote(text: "Line 2 not empty", warning: true) }
+        return MessageNote(text: rewordEdited ? "Edited" : "Original message", warning: false)
+    }
+
+    /// The files the reworded commit changes, once git made it.
+    var rewordFiles: [ChangedFileRow] {
+        (snapshot?.reword?.commit?.files ?? []).map { file in
+            let binary = file.added == nil
+            return ChangedFileRow(
+                path: file.path,
+                name: file.name,
+                directory: file.directory.isEmpty ? "repository root" : file.directory,
+                added: binary ? "binary" : file.added.flatMap { $0 > 0 ? "+\($0)" : nil },
+                removed: file.removed.flatMap { $0 > 0 ? "−\($0)" : nil }
+            )
+        }
+    }
+
+    /// "You · 3 days ago · replayed without conflicts".
+    var rewordCommitDetail: String {
+        guard let commit = snapshot?.reword?.commit else { return "" }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        let date = Date(timeIntervalSince1970: TimeInterval(commit.authoredAt))
+        let who = commit.byYou ? "You" : commit.author
+        return "\(who) · \(formatter.localizedString(for: date, relativeTo: now())) · replayed without conflicts"
     }
 
     /// Git made the commit and left no files: the message is all there is
@@ -248,11 +365,13 @@ final class OverviewViewModel {
                 action: step.action,
                 shortId: step.shortId,
                 subject: step.subject,
+                idHelp: step.replayedId.map { "Replayed as \($0)" },
+                was: step.was.map { "was “\($0)”" },
                 state: step.state,
                 joined: joined,
                 note: joined ? step.joins.map { "into \($0)" } : nil,
                 dropped: step.action == "drop",
-                detail: Self.detail(step)
+                detail: detail(step)
             )
         }
     }
@@ -358,6 +477,15 @@ final class OverviewViewModel {
         return left == 0 ? "" : "\(left) \(left == 1 ? "file" : "files") still unresolved"
     }
 
+    /// Why Continue is disabled, when the message is the reason: the
+    /// only sentence the footer has beside it.
+    var continueReason: String? {
+        isRewording && rewordMessageIsEmpty ? "Write a message to continue" : nil
+    }
+
+    /// A reword git committed has nothing to stage or skip.
+    var showsStage: Bool { !rewordOnly }
+
     var stageTitle: String { "Stage resolved (\(count(.resolved)))" }
     var canStage: Bool { count(.resolved) > 0 }
     var continueTitle: String { "Continue \(verb)" }
@@ -376,7 +504,7 @@ final class OverviewViewModel {
 
     var canContinue: Bool {
         (snapshot?.canContinue ?? false)
-            && (!isRewording || !rewordMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            && (!isRewording || !rewordMessageIsEmpty)
     }
     var canSkip: Bool { snapshot?.canSkip ?? false }
 
@@ -395,6 +523,32 @@ final class OverviewViewModel {
         if step != rewordStep {
             rewordStep = step
             rewordMessage = snapshot?.reword?.message ?? ""
+        }
+        let files = rewordFiles
+        if !files.contains(where: { $0.path == rewordSelection }) {
+            selectRewordFile(files.first?.path)
+        }
+    }
+
+    /// Shows a file of the reworded commit in the diff.
+    func selectRewordFile(_ path: String?) {
+        rewordSelection = path
+        guard let path, let commit = snapshot?.reword?.commit else {
+            rewordDiff = []
+            return
+        }
+        do {
+            rewordDiff = try source.commitDiff(commit: commit.id, path: path).enumerated().map { index, line in
+                DiffRow(
+                    id: index,
+                    kind: line.kind,
+                    number: (line.kind == .removed ? line.oldNumber : line.newNumber).map(String.init) ?? "",
+                    text: line.kind == .hunk ? "@@ \(line.text)" : line.text
+                )
+            }
+        } catch {
+            rewordDiff = []
+            self.error = "\(error)"
         }
     }
 
@@ -473,6 +627,16 @@ final class OverviewViewModel {
         snapshot?.plan?.steps.first { $0.state == .current }
     }
 
+    private var rewordMessageIsEmpty: Bool {
+        rewordMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Text on line 2, where git expects the blank line after the subject.
+    private var secondLineIsText: Bool {
+        let lines = rewordMessage.split(separator: "\n", omittingEmptySubsequences: false)
+        return lines.count > 1 && !lines[1].trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
     /// Without the trailing blank lines and spaces git drops anyway.
     private static func trimmed(_ message: String) -> String {
         var message = message
@@ -498,13 +662,15 @@ final class OverviewViewModel {
         "\(count) \(count == 1 ? "commit" : "commits")"
     }
 
-    private static func detail(_ step: RebaseStep) -> String {
+    private func detail(_ step: RebaseStep) -> String {
         let target = step.joins.map { "step \($0)" } ?? "the commit before"
         switch step.state {
         case .current:
             switch step.action {
             case "edit", "break": return "Git stopped here, as the plan asks. Continue when ready."
-            case "reword": return "Git stopped here: write the commit's message, then continue."
+            case "reword" where snapshot?.reword?.committed == false:
+                return "Git stopped on conflicts: resolve and stage the files, write the commit’s message, then continue."
+            case "reword": return "Git stopped here: write the commit’s message, then continue."
             default: return "Git stopped here: resolve its files, then continue."
             }
         case .done:

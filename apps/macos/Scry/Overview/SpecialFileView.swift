@@ -717,6 +717,8 @@ struct SpecialSamples: OverviewSource {
         )
     }
 
+    func commitDiff(commit: String, path: String) throws -> [CommitDiffLine] { [] }
+
     static func file(_ path: String, _ kind: SpecialKind) -> OverviewFile {
         OverviewFile(
             path: path,

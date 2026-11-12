@@ -84,10 +84,17 @@ pub struct Step {
     /// From 1, as git counts them.
     pub number: usize,
     pub action: Action,
-    /// The commit replayed, abbreviated; `None` for `exec` and `break`.
+    /// The commit of the todo list, abbreviated: the one the user wrote,
+    /// which stays once the step is done. `None` for `exec` and `break`.
     pub short_id: Option<String>,
-    /// The commit's subject, or the command of an `exec`.
+    /// The commit's subject, or the command of an `exec`; once done, the
+    /// subject of the commit git made, a reword's new one.
     pub subject: String,
+    /// Once done, the commit git made of it, abbreviated.
+    pub replayed_id: Option<String>,
+    /// The subject before the step, when the commit made has another:
+    /// a reword.
+    pub was: Option<String>,
     pub state: StepState,
     /// A fixup or squash joins the commit of this step.
     pub joins: Option<usize>,
@@ -149,8 +156,8 @@ pub fn read(git: &dyn Git) -> Result<Option<Plan>, GitError> {
     }))
 }
 
-/// Shows the steps done as the commits git made of them: a reword's new
-/// message, and every replayed commit's new id. The todo list keeps the
+/// Tells, for the steps done, the commit git made of each: its id, and a
+/// reword's new subject with the old one kept. The todo list keeps the
 /// original lines; `rewritten-list` pairs each original commit with the
 /// one replayed, one pair per line. A fixup or squash keeps its own line:
 /// its commit no longer exists on its own.
@@ -190,8 +197,11 @@ fn show_rewritten(git: &dyn Git, steps: &mut [Step], rewritten: &str) -> Result<
     let output = git.run(&args)?;
     for ((index, _), line) in found.iter().zip(output.lines()) {
         if let Some((short_id, subject)) = line.split_once('\0') {
-            steps[*index].short_id = Some(short_id.to_string());
-            steps[*index].subject = subject.to_string();
+            let step = &mut steps[*index];
+            step.replayed_id = Some(short_id.to_string());
+            if step.subject != subject {
+                step.was = Some(std::mem::replace(&mut step.subject, subject.to_string()));
+            }
         }
     }
     Ok(())
@@ -264,6 +274,8 @@ fn step(number: usize, line: &str, state: StepState) -> Step {
         subject,
         state,
         joins: None,
+        replayed_id: None,
+        was: None,
     }
 }
 

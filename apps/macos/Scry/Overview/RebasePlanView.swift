@@ -88,9 +88,10 @@ struct PlanStepRow: View {
     let startsLine: Bool
 
     var body: some View {
-        HStack(alignment: .center, spacing: 8) {
-            gutter
+        HStack(alignment: .top, spacing: 8) {
+            Color.clear.frame(width: Lane.gutter, height: Lane.rowHeight)
             ActionPill(action: row.action)
+                .padding(.top, 4)
             VStack(alignment: .leading, spacing: 1) {
                 Text(row.subject)
                     .font(Metrics.callout.weight(row.state == .current ? .semibold : .regular))
@@ -100,41 +101,59 @@ struct PlanStepRow: View {
                     .truncationMode(.tail)
                 HStack(spacing: 4) {
                     if let shortId = row.shortId {
-                        Text(shortId).font(Metrics.codeSmall)
+                        Text(shortId)
+                            .font(Metrics.codeSmall)
+                            .help(row.idHelp ?? "")
                     }
                     if let note = row.note {
                         Text("↳ \(note)")
                     }
-                    if row.state == .current {
-                        Text("Stopped here")
-                            .fontWeight(.semibold)
-                            .foregroundStyle(Theme.Interaction.accent)
+                    if let was = row.was {
+                        Text(was)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                 }
                 .font(Metrics.caption)
                 .foregroundStyle(Theme.Surfaces.textTertiary)
+                if row.state == .current {
+                    // The instruction, said once, here.
+                    Text(row.detail)
+                        .font(Metrics.caption)
+                        .foregroundStyle(Theme.Surfaces.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
+                }
             }
+            .padding(.vertical, 5)
             Spacer(minLength: 0)
         }
-        .frame(height: Lane.rowHeight)
+        .frame(minHeight: Lane.rowHeight)
         .padding(.trailing, 6)
         .background(
             RoundedRectangle(cornerRadius: 6)
                 .fill(row.state == .current ? Theme.Interaction.accent.opacity(0.10) : Color.clear)
         )
+        .overlay(alignment: .topLeading) {
+            GeometryReader { geometry in
+                gutter(height: geometry.size.height)
+            }
+        }
         .contentShape(Rectangle())
         .help("\(row.number). \(row.action) · \(row.detail)")
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Step \(row.number), \(row.action), \(row.subject). \(row.detail)")
+        .accessibilityLabel("Step \(row.number), \(row.action), \(row.subject). \(row.was ?? "") \(row.detail)")
     }
 
-    private var gutter: some View {
+    /// The node sits by the subject; the line runs the row's full height,
+    /// taller where git stopped and says why.
+    private func gutter(height: CGFloat) -> some View {
         let middle = Lane.rowHeight / 2
         let x = row.joined ? Lane.branch + 12 : Lane.branch
         return ZStack {
             Path { path in
                 path.move(to: CGPoint(x: Lane.branch, y: startsLine ? middle : 0))
-                path.addLine(to: CGPoint(x: Lane.branch, y: Lane.rowHeight))
+                path.addLine(to: CGPoint(x: Lane.branch, y: height))
             }
             .stroke(lineColor, style: StrokeStyle(lineWidth: 2, dash: row.state == .pending ? [3, 3] : []))
             if row.joined {
@@ -152,7 +171,7 @@ struct PlanStepRow: View {
             PlanNode(state: row.state, dropped: row.dropped, joined: row.joined, action: row.action)
                 .position(x: x, y: middle)
         }
-        .frame(width: Lane.gutter, height: Lane.rowHeight)
+        .frame(width: Lane.gutter, height: height)
     }
 
     private var lineColor: Color {
