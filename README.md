@@ -1,6 +1,23 @@
-# Scry
+<p align="center">
+  <img src=".github/scry-icon.png" width="128" height="128" alt="Scry app icon">
+</p>
+
+<h1 align="center">Scry</h1>
+
+<p align="center">
+  <strong>See through your merge conflicts.</strong><br>
+  A local-first merge tool for git: a native macOS app and the <code>git scry</code> command.
+</p>
 
 Scry (`git-scry`) is a local-first tool, integrated with git, for merging and reviewing changes. It resolves conflicts through `git mergetool`, reviews branches and pull requests, runs built-in checks such as secret scanning, and takes proposals from agents through MCP that a human validates.
+
+What it does today:
+
+- **Understands the whole operation.** A merge, rebase, cherry-pick or revert opens on its overview: the conflicted files, who is on each side, and a rebase's plan as a graph, with where git stopped.
+- **Resolves conflict by conflict.** Pick ours, theirs, both or base with one key, or edit the result by hand, with undo and redo, word-level differences and syntax highlighting.
+- **Checks every candidate.** In 19 languages, Scry parses each resolution and marks the ones that would break the file before you write it.
+- **Handles the files text merges get wrong.** Xcode projects, String Catalogs, `Package.resolved`, lockfiles from 18 package managers, binary files and files deleted on one side each get their own view.
+- **Stays in your workflow.** It plugs into `git mergetool`, works in the terminal as well as in the app, and never stages, commits or pushes on its own.
 
 Status: early development. The core, the `git-scry` CLI (merge tool in the terminal) and a first macOS merge editor work; review, MCP and agents are not built yet.
 
