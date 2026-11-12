@@ -53,6 +53,11 @@ struct OverviewView: View {
             Divider()
             footer
         }
+        .overlay(alignment: .bottom) {
+            HintStrip(shortcuts: viewModel.hintStrip)
+                .padding(.bottom, 48)
+        }
+        .overlay(alignment: .top) { ToolbarHintRow(shortcuts: viewModel.toolbarHints) }
         .background(Theme.Surfaces.window)
         .navigationTitle(viewModel.title)
         .navigationSubtitle(viewModel.hasOperation ? viewModel.snapshot?.operation ?? "" : "")
@@ -61,8 +66,8 @@ struct OverviewView: View {
                 Button { viewModel.refresh() } label: {
                     Image(systemName: "arrow.clockwise")
                 }
-                .help("Read the files again (⌘R)")
-                .keyboardShortcut("r")
+                .help(Shortcut.refresh.help())
+                .keyboardShortcut(Shortcut.refresh)
             }
         }
         .sheet(item: Binding(get: { viewModel.special }, set: { if $0 == nil { viewModel.closeSpecial() } })) { special in
@@ -173,10 +178,11 @@ struct OverviewView: View {
             Button(viewModel.stageTitle) { viewModel.stageResolved() }
                 .disabled(!viewModel.canStage)
             Button(viewModel.continueTitle) { viewModel.continueOperation() }
-                .keyboardShortcut(.return, modifiers: [.shift, .command])
+                .keyboardShortcut(Shortcut.continueOperation)
+                .shortcutHint(Shortcut.continueOperation, edge: .top)
                 .buttonStyle(.borderedProminent)
                 .disabled(!viewModel.canContinue)
-                .help(viewModel.isRewording ? "With this message (⇧⌘↩)" : "Once every file is staged (⇧⌘↩)")
+                .help(Shortcut.continueOperation.help(viewModel.isRewording ? "With this message" : "Once every file is staged"))
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

@@ -319,6 +319,44 @@ extension Theme {
         )
     }
 
+    enum KeyboardHintsAndCommitMessage {
+        /// Hint badge and hint strip background (inverted from the window)
+        static let shortcutHint = Theme.color(
+            light: RGBA(0.1137, 0.1137, 0.1216, 0.9000),
+            dark: RGBA(0.9490, 0.9490, 0.9569, 0.9400),
+            colourBlindLight: RGBA(0.1137, 0.1137, 0.1216, 0.9000),
+            colourBlindDark: RGBA(0.9490, 0.9490, 0.9569, 0.9400)
+        )
+        /// Text on hint badges (16:1 / 15:1)
+        static let shortcutHintText = Theme.color(
+            light: RGBA(1.0000, 1.0000, 1.0000, 1.0000),
+            dark: RGBA(0.1137, 0.1137, 0.1216, 1.0000),
+            colourBlindLight: RGBA(1.0000, 1.0000, 1.0000, 1.0000),
+            colourBlindDark: RGBA(0.1137, 0.1137, 0.1216, 1.0000)
+        )
+        /// Dashed column-72 guide in the commit message editor
+        static let messageGuide = Theme.color(
+            light: RGBA(0.8118, 0.8118, 0.8314, 1.0000),
+            dark: RGBA(0.2824, 0.2824, 0.3059, 1.0000),
+            colourBlindLight: RGBA(0.8118, 0.8118, 0.8314, 1.0000),
+            colourBlindDark: RGBA(0.2824, 0.2824, 0.3059, 1.0000)
+        )
+        /// Subject characters past 72, with a warning underline
+        static let subjectOverflowTint = Theme.color(
+            light: RGBA(0.9843, 0.9373, 0.8510, 1.0000),
+            dark: RGBA(0.2275, 0.1804, 0.0784, 1.0000),
+            colourBlindLight: RGBA(0.9843, 0.9373, 0.8510, 1.0000),
+            colourBlindDark: RGBA(0.2275, 0.1804, 0.0784, 1.0000)
+        )
+        /// Highlighted menu item (system accent; white text)
+        static let menuHighlight = Theme.color(
+            light: RGBA(0.1843, 0.4353, 0.8588, 1.0000),
+            dark: RGBA(0.1765, 0.4157, 0.8392, 1.0000),
+            colourBlindLight: RGBA(0.1843, 0.4353, 0.8588, 1.0000),
+            colourBlindDark: RGBA(0.1765, 0.4157, 0.8392, 1.0000)
+        )
+    }
+
     enum Syntax {
         static let keyword = Theme.color(
             light: RGBA(0.6078, 0.1725, 0.6235, 1.0000),

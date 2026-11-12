@@ -363,6 +363,17 @@ final class OverviewViewModel {
     var continueTitle: String { "Continue \(verb)" }
     /// Every file staged, and a message when rewording: git refuses an
     /// empty one.
+    /// The toolbar's shortcuts, for the hint row under it while ⌘ is held.
+    var toolbarHints: [Shortcut] { [.refresh] }
+
+    /// The shortcuts with no visible control, for the hint strip while ⌘
+    /// is held.
+    var hintStrip: [Shortcut] {
+        var shortcuts: [Shortcut] = rows.contains(where: \.canOpen) ? [.openFile] : []
+        shortcuts += [.openRepository, .openConflictedFile, .keyboardShortcuts]
+        return shortcuts
+    }
+
     var canContinue: Bool {
         (snapshot?.canContinue ?? false)
             && (!isRewording || !rewordMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

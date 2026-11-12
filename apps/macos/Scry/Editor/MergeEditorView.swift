@@ -32,6 +32,8 @@ struct MergeEditorView: View {
                         rowsList(widths: widths)
                     }
                 }
+                .overlay(alignment: .bottom) { HintStrip(shortcuts: viewModel.hintStrip) }
+                .overlay(alignment: .top) { ToolbarHintRow(shortcuts: viewModel.toolbarHints) }
                 StatusBar(
                     resolved: viewModel.resolvedSummary,
                     verification: viewModel.verification,
@@ -137,15 +139,15 @@ struct MergeEditorView: View {
             Button(action: { viewModel.previous() }) {
                 Image(systemName: "chevron.up")
             }
-            .keyboardShortcut(.upArrow, modifiers: [.option, .command])
-            .help("Previous conflict (⌥⌘↑)")
+            .keyboardShortcut(Shortcut.previousConflict)
+            .help(Shortcut.previousConflict.help())
             .disabled(!viewModel.canGoToPrevious)
 
             Button(action: { viewModel.next() }) {
                 Image(systemName: "chevron.down")
             }
-            .keyboardShortcut(.downArrow, modifiers: [.option, .command])
-            .help("Next conflict (⌥⌘↓)")
+            .keyboardShortcut(Shortcut.nextConflict)
+            .help(Shortcut.nextConflict.help())
             .disabled(!viewModel.canGoToNext)
         }
 
@@ -169,7 +171,7 @@ struct MergeEditorView: View {
                         Text("Ours")
                     }
                 }
-                .help("Take ours (⌥⌘1)")
+                .help(Shortcut.takeOurs.help())
                 Button(action: { viewModel.takeBoth() }) {
                     HStack(spacing: 5) {
                         HStack(spacing: 2) {
@@ -179,14 +181,14 @@ struct MergeEditorView: View {
                         Text("Both")
                     }
                 }
-                .help("Take both, ours first; again for theirs first (⌥⌘3)")
+                .help(Shortcut.takeBoth.help("Take both, ours first; again for theirs first"))
                 Button { viewModel.take("theirs") } label: {
                     HStack(spacing: 5) {
                         Text("Theirs")
                         SideShape.theirs
                     }
                 }
-                .help("Take theirs (⌥⌘2)")
+                .help(Shortcut.takeTheirs.help())
             }
         }
 
@@ -194,8 +196,8 @@ struct MergeEditorView: View {
             Button { showInspector.toggle() } label: {
                 Image(systemName: "sidebar.right")
             }
-            .keyboardShortcut("i", modifiers: [.control, .command])
-            .help("Show or hide the inspector (⌃⌘I)")
+            .keyboardShortcut(Shortcut.toggleInspector)
+            .help(Shortcut.toggleInspector.help())
         }
 
         ToolbarItem(placement: .primaryAction) {
@@ -206,11 +208,11 @@ struct MergeEditorView: View {
                 }
                 .padding(.horizontal, 4)
             }
-            .keyboardShortcut(.return, modifiers: .command)
+            .keyboardShortcut(Shortcut.markAsResolved)
             .buttonStyle(.borderedProminent)
             // While editing, ⌘↩ applies the edit instead.
             .disabled(!viewModel.canMarkResolved)
-            .help("Write the result (⌘↩)")
+            .help(Shortcut.markAsResolved.help("Write the result"))
         }
     }
 
@@ -226,25 +228,25 @@ struct MergeEditorView: View {
     private var hiddenShortcuts: some View {
         Group {
             Button("Take ours") { viewModel.take("ours") }
-                .keyboardShortcut("1", modifiers: [.option, .command])
+                .keyboardShortcut(Shortcut.takeOurs)
             Button("Take theirs") { viewModel.take("theirs") }
-                .keyboardShortcut("2", modifiers: [.option, .command])
+                .keyboardShortcut(Shortcut.takeTheirs)
             Button("Take both", action: { viewModel.takeBoth() })
-                .keyboardShortcut("3", modifiers: [.option, .command])
+                .keyboardShortcut(Shortcut.takeBoth)
             Button("Take base") { viewModel.take("base") }
-                .keyboardShortcut("0", modifiers: [.option, .command])
+                .keyboardShortcut(Shortcut.takeBase)
             Button("Take none") { viewModel.take("neither") }
-                .keyboardShortcut("9", modifiers: [.option, .command])
+                .keyboardShortcut(Shortcut.takeNone)
             // Disabled while editing, so ↩ types a line break and ⌘Z undoes
             // typing in the editor.
             Button("Edit by hand") { viewModel.startEditing() }
-                .keyboardShortcut(.return, modifiers: [])
+                .keyboardShortcut(Shortcut.editByHand)
                 .disabled(viewModel.isEditing)
             Button("Undo", action: { viewModel.undo() })
-                .keyboardShortcut("z", modifiers: .command)
+                .keyboardShortcut(Shortcut.undo)
                 .disabled(!viewModel.canUndo)
             Button("Redo", action: { viewModel.redo() })
-                .keyboardShortcut("z", modifiers: [.shift, .command])
+                .keyboardShortcut(Shortcut.redo)
                 .disabled(!viewModel.canRedo)
         }
         .frame(width: 0, height: 0)

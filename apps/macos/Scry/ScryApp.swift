@@ -26,6 +26,9 @@ struct ScryApp: App {
             CommandGroup(replacing: .newItem) {
                 OpenCommands()
             }
+            CommandGroup(after: .help) {
+                KeyboardShortcutsCommand()
+            }
         }
 
         Settings {
@@ -83,6 +86,24 @@ struct OpenActions {
 
 extension FocusedValues {
     @Entry var openActions: OpenActions?
+    @Entry var shortcutActions: ShortcutActions?
+}
+
+/// What Help > Keyboard Shortcuts does in the window that has the focus;
+/// a struct, as SwiftUI cannot compare a bare closure.
+struct ShortcutActions {
+    let show: () -> Void
+}
+
+/// Help > Keyboard Shortcuts (⌘/), on the window that has the focus.
+struct KeyboardShortcutsCommand: View {
+    @FocusedValue(\.shortcutActions) private var actions
+
+    var body: some View {
+        Button(Shortcut.keyboardShortcuts.title) { actions?.show() }
+            .keyboardShortcut(Shortcut.keyboardShortcuts)
+            .disabled(actions == nil)
+    }
 }
 
 /// File > Open Repository… (⌘O) and Open Conflicted File… (⇧⌘O).
@@ -90,11 +111,11 @@ struct OpenCommands: View {
     @FocusedValue(\.openActions) private var actions
 
     var body: some View {
-        Button("Open Repository…") { actions?.repository() }
-            .keyboardShortcut("o")
+        Button(Shortcut.openRepository.title) { actions?.repository() }
+            .keyboardShortcut(Shortcut.openRepository)
             .disabled(actions?.enabled != true)
-        Button("Open Conflicted File…") { actions?.file() }
-            .keyboardShortcut("o", modifiers: [.command, .shift])
+        Button(Shortcut.openConflictedFile.title) { actions?.file() }
+            .keyboardShortcut(Shortcut.openConflictedFile)
             .disabled(actions?.enabled != true)
     }
 }
@@ -102,6 +123,9 @@ struct OpenCommands: View {
 /// Opens the file given on the command line, or asks for one.
 struct RootView: View {
     @State private var viewModel = RootViewModel()
+    /// ⌘ held alone, for the shortcut hints.
+    @State private var commandHold = CommandHold()
+    @Environment(\.controlActiveState) private var activeState
     @Environment(\.dismissWindow) private var dismissWindow
 
     var body: some View {
@@ -117,11 +141,19 @@ struct RootView: View {
             }
         }
         .frame(minWidth: 900, minHeight: 600)
+        // Only the window in front shows hints.
+        .environment(\.showsShortcutHints, commandHold.isHeld && activeState == .key)
+        .onAppear { commandHold.start() }
+        .onDisappear { commandHold.stop() }
         .focusedSceneValue(\.openActions, OpenActions(
             enabled: viewModel.canOpen,
             repository: chooseRepository,
             file: chooseFile
         ))
+        .focusedSceneValue(\.shortcutActions, ShortcutActions { viewModel.showShortcuts() })
+        .sheet(item: Binding(get: { viewModel.shortcuts }, set: { if $0 == nil { viewModel.closeShortcuts() } })) { shortcuts in
+            KeyboardShortcutsView(viewModel: shortcuts) { viewModel.closeShortcuts() }
+        }
         .background { WindowCloseGuard { viewModel.shouldClose() } }
         .alert("Close without writing?", isPresented: $viewModel.confirmingClose) {
             Button("Close Without Writing", role: .destructive) {

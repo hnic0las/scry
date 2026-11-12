@@ -18,9 +18,27 @@ final class RootViewModel {
     private(set) var isMergetool = false
     /// The window was asked to close with choices not written yet.
     var confirmingClose = false
+    /// The Keyboard Shortcuts sheet, while it is shown.
+    private(set) var shortcuts: KeyboardShortcutsViewModel?
 
     /// The user agreed to lose the unwritten choices.
     @ObservationIgnored private var closeConfirmed = false
+
+    /// Shows every shortcut, those of the screen on display first.
+    func showShortcuts() {
+        let current: Shortcut.Section? = if let editor {
+            editor.isEditing ? .editing : .editor
+        } else if overview != nil {
+            .overview
+        } else {
+            nil
+        }
+        shortcuts = KeyboardShortcutsViewModel(current: current)
+    }
+
+    func closeShortcuts() {
+        shortcuts = nil
+    }
 
     /// Opens what the command line gives: the files of `git mergetool`, a
     /// repository's folder, or a file.

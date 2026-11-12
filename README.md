@@ -78,7 +78,7 @@ xcodebuild test -project apps/macos/Scry.xcodeproj -scheme Scry -destination 'pl
 ```
 
 The CI's `app` job does the same on GitHub's `xcode-27` image, after `scripts/build-ffi.sh`, then builds the app in Release.
- Colours come from the design tokens: after a new export in `~/workspace/scry-ui`, run `scripts/generate-theme.py`.
+ Keyboard shortcuts are listed once, in `apps/macos/Scry/Shortcuts/Shortcut.swift`: menus, buttons, tooltips and Help › Keyboard Shortcuts (⌘/) read that list. Colours come from the design tokens: after a new export in `~/workspace/scry-ui`, run `scripts/generate-theme.py`.
 
 ## Layout
 

@@ -152,17 +152,17 @@ struct SpecialFileView: View {
                 Button("Open in Merge Editor") { viewModel.openEditor() }
             }
             Button("Cancel", role: .cancel) { close() }
-                .keyboardShortcut(.cancelAction)
+                .keyboardShortcut(Shortcut.cancelSheet)
             switch viewModel.kind {
             case .projectFile:
                 Button(viewModel.keepBothTitle) { viewModel.keepBoth() }
                     .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(Shortcut.confirmSheet)
                     .disabled(!viewModel.canKeepBoth)
             case .stringCatalog, .packageResolved:
                 Button(viewModel.writeTitle) { viewModel.writeChoices() }
                     .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(Shortcut.confirmSheet)
                     .disabled(!viewModel.canWriteChoices)
             case .lockfile:
                 if viewModel.canMergeLines && viewModel.taken == nil {
@@ -171,7 +171,7 @@ struct SpecialFileView: View {
                 if viewModel.taken != nil {
                     Button("Done") { viewModel.finish() }
                         .buttonStyle(.borderedProminent)
-                        .keyboardShortcut(.defaultAction)
+                        .keyboardShortcut(Shortcut.confirmSheet)
                 }
             case .deletedOnOneSide, .binary:
                 EmptyView()

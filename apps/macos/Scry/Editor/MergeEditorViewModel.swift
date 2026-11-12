@@ -171,6 +171,30 @@ final class MergeEditorViewModel {
     var canGoToPrevious: Bool { model.current > 0 }
     var canGoToNext: Bool { model.current + 1 < model.conflicts.count }
     var isEditing: Bool { model.editing != nil }
+
+    /// The toolbar's shortcuts that work now, in the toolbar's order, for
+    /// the hint row under it while ⌘ is held.
+    var toolbarHints: [Shortcut] {
+        var shortcuts: [Shortcut] = []
+        if canGoToPrevious { shortcuts.append(.previousConflict) }
+        if canGoToNext { shortcuts.append(.nextConflict) }
+        if !isEditing { shortcuts.append(contentsOf: [Shortcut.takeOurs, .takeBoth, .takeTheirs]) }
+        shortcuts.append(.toggleInspector)
+        if canMarkResolved { shortcuts.append(.markAsResolved) }
+        return shortcuts
+    }
+
+    /// The shortcuts with no visible control, for the hint strip while ⌘
+    /// is held: only those that work now. Editing by hand shows its own
+    /// buttons instead.
+    var hintStrip: [Shortcut] {
+        guard !isEditing else { return [] }
+        var shortcuts: [Shortcut] = [.editByHand, .takeBase, .takeNone]
+        if canUndo { shortcuts.append(.undo) }
+        if canRedo { shortcuts.append(.redo) }
+        shortcuts.append(.keyboardShortcuts)
+        return shortcuts
+    }
     var canUndo: Bool { model.status.canUndo && !isEditing }
     var canRedo: Bool { model.status.canRedo && !isEditing }
 

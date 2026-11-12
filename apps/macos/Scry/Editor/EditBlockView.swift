@@ -43,12 +43,14 @@ struct EditBlockView: View {
                 .foregroundStyle(Theme.Provenance.human)
             Spacer()
             Button("Cancel") { viewModel.cancel() }
-                .keyboardShortcut(.cancelAction)
-                .help("Discard this edit (Esc)")
+                .keyboardShortcut(Shortcut.cancelEdit)
+                .shortcutHint(Shortcut.cancelEdit)
+                .help(Shortcut.cancelEdit.help("Discard this edit"))
             Button("Apply") { viewModel.apply() }
-                .keyboardShortcut(.return, modifiers: .command)
+                .keyboardShortcut(Shortcut.applyEdit)
+                .shortcutHint(Shortcut.applyEdit)
                 .buttonStyle(.borderedProminent)
-                .help("Resolve the conflict with this text (⌘↩)")
+                .help(Shortcut.applyEdit.help("Resolve the conflict with this text"))
         }
     }
 

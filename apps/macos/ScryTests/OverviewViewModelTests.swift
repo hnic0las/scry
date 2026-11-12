@@ -210,6 +210,15 @@ struct OverviewViewModelTests {
         #expect(overview.rows.map(\.state) == [.staged, .resolved, .unresolved])
     }
 
+    /// The overview's hint strip offers ↩ only while a file can open, and
+    /// the app's own shortcuts always.
+    @Test func hintStripOffersOpeningOnlyWhenAFileCan() {
+        let open = OverviewViewModel(source: FakeOverview(files: [file("A.swift", .unresolved)])) { _ in }
+        #expect(open.hintStrip.map(\.id) == ["openFile", "openRepository", "openConflictedFile", "keyboardShortcuts"])
+        let staged = OverviewViewModel(source: FakeOverview(files: [file("A.swift", .staged)])) { _ in }
+        #expect(staged.hintStrip.map(\.id) == ["openRepository", "openConflictedFile", "keyboardShortcuts"])
+    }
+
     /// Only a file the editor can read opens, and staged files have
     /// nothing left to do from the list.
     @Test func opensOnlyWhatTheEditorCanRead() {

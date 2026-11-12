@@ -76,6 +76,32 @@ struct MergeEditorViewModelTests {
         #expect(editor.chosen(0) == "theirs")
     }
 
+    /// The hint strip lists only the shortcuts without a button that work
+    /// now: undo once there is a choice to undo, nothing while editing by
+    /// hand, whose own buttons carry their keys.
+    @Test func hintStripShowsWhatWorksNow() throws {
+        let editor = try ConflictFile().editor()
+        #expect(editor.hintStrip.map(\.id) == ["editByHand", "takeBase", "takeNone", "keyboardShortcuts"])
+        editor.take("theirs")
+        #expect(editor.hintStrip.map(\.id).contains("undo"))
+        #expect(!editor.hintStrip.map(\.id).contains("redo"))
+        editor.startEditing()
+        #expect(editor.hintStrip.isEmpty)
+    }
+
+    /// The row under the toolbar names only the toolbar's shortcuts that
+    /// work now, in the toolbar's order: no "previous" on the first
+    /// conflict, no sides while editing by hand.
+    @Test func toolbarHintsFollowTheButtons() throws {
+        let editor = try ConflictFile().editor()
+        #expect(editor.toolbarHints.map(\.id).first == "nextConflict")
+        #expect(!editor.toolbarHints.map(\.id).contains("previousConflict"))
+        #expect(editor.toolbarHints.map(\.id).contains("takeOurs"))
+        editor.startEditing()
+        #expect(!editor.toolbarHints.map(\.id).contains("takeOurs"))
+        #expect(editor.toolbarHints.map(\.id).contains("toggleInspector"))
+    }
+
     /// The panes scroll as far as the widest line as drawn: tabs reach
     /// their stop and wide characters count double, or the end of such a
     /// line could not be scrolled to.
