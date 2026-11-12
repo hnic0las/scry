@@ -771,9 +771,22 @@ pub struct OverviewSnapshot {
     /// The steps git applied on its own, without conflicts, before the one
     /// it stopped on.
     pub applied: Vec<u32>,
+    /// A rebase stopped on a `reword` line: the message to write.
+    pub reword: Option<RewordInfo>,
     pub files: Vec<OverviewFile>,
     pub can_continue: bool,
     pub can_skip: bool,
+}
+
+/// The commit message a `reword` line lets the user write before
+/// continuing.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RewordInfo {
+    /// The commit's own message, to start from.
+    pub message: String,
+    /// Git made the commit already, and stopped for its message; otherwise
+    /// it makes it once the conflicts are staged.
+    pub committed: bool,
 }
 
 /// A commit of the merge's history.
@@ -840,7 +853,10 @@ pub enum RebaseStepState {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum OverviewAction {
     StageResolved,
-    Continue,
+    /// At a `reword` line, `message` replaces the commit's message.
+    Continue {
+        message: Option<String>,
+    },
     Skip,
     Abort,
     KeepFile {
@@ -928,6 +944,10 @@ impl RepositoryOverview {
             can_continue: snapshot.can_continue(),
             can_skip: snapshot.can_skip(),
             applied: snapshot.applied.iter().map(|step| *step as u32).collect(),
+            reword: snapshot.reword.as_ref().map(|reword| RewordInfo {
+                message: reword.message.clone(),
+                committed: reword.committed,
+            }),
             merge: snapshot.merge.as_ref().map(|graph| {
                 let commit = |commit: &scry_core::merge_graph::GraphCommit| HistoryCommit {
                     short_id: commit.short_id.clone(),
@@ -997,7 +1017,7 @@ impl RepositoryOverview {
     pub fn apply(&self, action: OverviewAction) -> Result<(), ScryError> {
         let command = match action {
             OverviewAction::StageResolved => overview::OverviewCommand::StageResolved,
-            OverviewAction::Continue => overview::OverviewCommand::Continue,
+            OverviewAction::Continue { message } => overview::OverviewCommand::Continue { message },
             OverviewAction::Skip => overview::OverviewCommand::Skip,
             OverviewAction::Abort => overview::OverviewCommand::Abort,
             OverviewAction::KeepFile { path } => overview::OverviewCommand::KeepFile { path },

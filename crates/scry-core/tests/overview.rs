@@ -7,7 +7,7 @@ use std::process::Command;
 
 use scry_core::git::GitCli;
 use scry_core::overview::{
-    Overview, OverviewCommand, OverviewError, OverviewEvent, Special, Version,
+    Overview, OverviewCommand, OverviewError, OverviewEvent, Reword, Special, Version,
 };
 use scry_core::rebase_plan::{Action, StepState};
 use scry_core::theme::State;
@@ -81,6 +81,20 @@ impl Repo {
         assert!(self.git(args), "git {args:?}");
     }
 
+    /// The full message of `commit`, without its last newline.
+    fn message(&self, commit: &str) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(self.path())
+            .args(["show", "--no-patch", "--format=%B", commit])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .trim_end()
+            .to_string()
+    }
+
     fn commit(&self, a: &str, b: &str, message: &str) {
         fs::write(self.path().join("a.txt"), a).unwrap();
         fs::write(self.path().join("Sources/b.swift"), b).unwrap();
@@ -143,7 +157,7 @@ fn files_go_from_unresolved_to_staged_then_the_rebase_continues() {
     assert_eq!(state(&mut overview, &git, "a.txt"), State::Staged);
 
     assert!(matches!(
-        overview.apply(&git, OverviewCommand::Continue),
+        overview.apply(&git, OverviewCommand::Continue { message: None }),
         Err(OverviewError::NotStaged(1))
     ));
 
@@ -153,7 +167,9 @@ fn files_go_from_unresolved_to_staged_then_the_rebase_continues() {
         .unwrap();
     assert!(overview.refresh(&git).unwrap().can_continue());
     assert_eq!(
-        overview.apply(&git, OverviewCommand::Continue).unwrap(),
+        overview
+            .apply(&git, OverviewCommand::Continue { message: None })
+            .unwrap(),
         [OverviewEvent::Continued]
     );
 
@@ -209,9 +225,11 @@ fn a_merge_can_be_aborted_but_not_skipped() {
 }
 
 /// An interactive rebase shows its plan: each line's action, the commit a
-/// fixup joins, and where git stands. After Continue, git applies the
-/// lines without conflicts on its own; the overview says which, so the
-/// jump from step 1 to step 5 is explained.
+/// fixup joins, and where git stands. Continue stops on the reword line,
+/// so the user writes its message, even with an editor in the inherited
+/// environment; then git applies the lines without conflicts on its own,
+/// and the overview says which, so the jump from step 2 to step 5 is
+/// explained.
 #[test]
 fn an_interactive_rebase_shows_its_plan_and_what_git_applied() {
     let root = tempfile::tempdir().unwrap();
@@ -264,9 +282,11 @@ fn an_interactive_rebase_shows_its_plan_and_what_git_applied() {
         "main"
     ]));
 
-    let git = repo.cli();
+    // An editor that would fail every commit: Scry's own must replace it.
+    let git = repo.cli().with_env("GIT_EDITOR", "false");
     let mut overview = Overview::new(repo.path());
     let snapshot = overview.refresh(&git).unwrap();
+    assert!(snapshot.reword.is_none());
     let plan = snapshot.plan.unwrap();
     assert_eq!(plan.onto_subject, "main change");
     let actions: Vec<Action> = plan.steps.iter().map(|step| step.action).collect();
@@ -289,19 +309,121 @@ fn an_interactive_rebase_shows_its_plan_and_what_git_applied() {
     overview
         .apply(&git, OverviewCommand::StageResolved)
         .unwrap();
-    overview.apply(&git, OverviewCommand::Continue).unwrap();
+    overview
+        .apply(&git, OverviewCommand::Continue { message: None })
+        .unwrap();
 
     let snapshot = overview.refresh(&git).unwrap();
+    assert_eq!(snapshot.plan.as_ref().unwrap().current(), Some(2));
+    assert!(snapshot.applied.is_empty());
+    assert_eq!(
+        snapshot.reword,
+        Some(Reword {
+            message: String::from("add notes"),
+            committed: true
+        })
+    );
+    // Skipping would keep the commit made, so it is not offered.
+    assert!(!snapshot.can_skip());
+    // Step 1 kept its message through the commit after its conflict.
+    assert_eq!(repo.message("HEAD~1"), "change a");
+
+    overview
+        .apply(
+            &git,
+            OverviewCommand::Continue {
+                message: Some(String::from("Add the notes\n\nWith a body.")),
+            },
+        )
+        .unwrap();
+
+    let snapshot = overview.refresh(&git).unwrap();
+    assert!(snapshot.reword.is_none());
+    // The fixup joined the reworded commit and kept its new message.
+    assert_eq!(repo.message("HEAD"), "Add the notes\n\nWith a body.");
     let plan = snapshot.plan.unwrap();
     assert_eq!(plan.current(), Some(5));
+    // The plan shows the commit git made of the reword, not the original
+    // line of the todo list.
+    assert_eq!(plan.steps[1].subject, "Add the notes");
+    assert_ne!(plan.steps[1].short_id.as_deref(), Some(&notes[..7]));
+    assert_eq!(plan.steps[2].subject, "fixup! add notes");
     assert!(
         plan.steps[..4]
             .iter()
             .all(|step| step.state == StepState::Done)
     );
-    assert_eq!(snapshot.applied, [2, 3, 4]);
+    assert_eq!(snapshot.applied, [3, 4]);
     // Read again without moving: the message stays.
-    assert_eq!(overview.refresh(&git).unwrap().applied, [2, 3, 4]);
+    assert_eq!(overview.refresh(&git).unwrap().applied, [3, 4]);
+}
+
+/// A reword line that stops on conflicts offers its message too: git
+/// makes the commit once the files are staged, with the message the user
+/// wrote, and does not open an editor nobody would see.
+#[test]
+fn a_conflicted_reword_commits_with_the_message_written() {
+    let repo = Repo::stopped_rebase();
+    repo.ok(&["rebase", "--abort"]);
+    // Every `pick` of the todo list becomes a `reword`.
+    assert!(!repo.git(&[
+        "-c",
+        "sequence.editor=sed -i.bak -e s/^pick/reword/",
+        "rebase",
+        "-i",
+        "main"
+    ]));
+
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    let snapshot = overview.refresh(&git).unwrap();
+    assert_eq!(
+        snapshot.reword,
+        Some(Reword {
+            message: String::from("feature change"),
+            committed: false
+        })
+    );
+    fs::write(repo.path().join("a.txt"), "a both\n").unwrap();
+    fs::write(repo.path().join("Sources/b.swift"), "let b = 3\n").unwrap();
+    overview
+        .apply(&git, OverviewCommand::StageResolved)
+        .unwrap();
+    overview
+        .apply(
+            &git,
+            OverviewCommand::Continue {
+                message: Some(String::from("Join both changes")),
+            },
+        )
+        .unwrap();
+
+    assert!(overview.refresh(&git).unwrap().operation.is_none());
+    assert_eq!(repo.message("HEAD"), "Join both changes");
+}
+
+/// A message is refused where git would not use it: outside a reword
+/// line, or empty. Nothing runs, so the operation stays where it was.
+#[test]
+fn a_message_outside_a_reword_is_refused() {
+    let repo = Repo::stopped_rebase();
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    fs::write(repo.path().join("a.txt"), "a both\n").unwrap();
+    fs::write(repo.path().join("Sources/b.swift"), "let b = 3\n").unwrap();
+    overview
+        .apply(&git, OverviewCommand::StageResolved)
+        .unwrap();
+    assert!(matches!(
+        overview.apply(
+            &git,
+            OverviewCommand::Continue {
+                message: Some(String::from("Another message")),
+            },
+        ),
+        Err(OverviewError::Invalid(_))
+    ));
+    assert!(overview.refresh(&git).unwrap().operation.is_some());
 }
 
 /// A merge shows both branches since their merge base, newest first, so

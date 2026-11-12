@@ -215,7 +215,12 @@ struct PlanNode: View {
         if dropped { return "xmark" }
         switch state {
         case .done: return "checkmark"
-        case .current: return action == "edit" || action == "break" ? "pause.fill" : "exclamationmark"
+        case .current:
+            switch action {
+            case "edit", "break": return "pause.fill"
+            case "reword": return "pencil"
+            default: return "exclamationmark"
+            }
         case .pending: return action == "exec" ? "chevron.right" : nil
         }
     }

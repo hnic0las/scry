@@ -7,6 +7,7 @@
 //! command comes from the user.
 
 use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -18,7 +19,7 @@ use crate::lockfile::{self, PackageChange};
 use crate::merge_graph::{self, MergeGraph};
 use crate::operation::{self, Operation, OperationKind};
 use crate::pbxproj::{self, ProjectReview};
-use crate::rebase_plan::{self, Plan};
+use crate::rebase_plan::{self, Action, Plan};
 use crate::resolved::{self, ResolvedMerge};
 use crate::session::{self, MergetoolFiles, write_atomically};
 use crate::syntax::Language;
@@ -151,7 +152,22 @@ pub struct Snapshot {
     /// The steps git applied on its own, without conflicts, before the
     /// one it stopped on: kept until it stops elsewhere.
     pub applied: Vec<usize>,
+    /// The message of the commit a `reword` step stopped on, to write
+    /// before continuing.
+    pub reword: Option<Reword>,
     pub files: Vec<FileView>,
+}
+
+/// A rebase stopped on a `reword` line: the user writes the commit's
+/// message, which Continue gives git.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reword {
+    /// The message to start from: the commit's own.
+    pub message: String,
+    /// Git already made the commit and stopped for its message, so
+    /// Continue amends it. Otherwise the step stopped on conflicts, and
+    /// git makes the commit with this message once they are staged.
+    pub committed: bool,
 }
 
 impl Snapshot {
@@ -164,11 +180,13 @@ impl Snapshot {
         self.operation.is_some() && self.files.iter().all(|file| file.state == State::Staged)
     }
 
-    /// A merge has no commit to skip.
+    /// A merge has no commit to skip. Nor has a `reword` git already
+    /// committed: `--skip` would keep that commit, with its old message.
     pub fn can_skip(&self) -> bool {
         self.operation
             .as_ref()
             .is_some_and(|operation| operation.kind != OperationKind::Merge)
+            && !self.reword.as_ref().is_some_and(|reword| reword.committed)
     }
 }
 
@@ -179,8 +197,13 @@ pub enum OverviewCommand {
     /// Stages every file resolved and not staged yet.
     StageResolved,
     /// Goes on with the operation once every file is staged: the next
-    /// commit of a rebase, or the merge commit.
-    Continue,
+    /// commit of a rebase, or the merge commit. At a `reword` step,
+    /// `message` replaces the commit's message; without it, the message
+    /// stays.
+    Continue {
+        #[serde(default)]
+        message: Option<String>,
+    },
     /// Leaves the current commit out (rebase, cherry-pick, revert).
     Skip,
     /// Gives up the whole operation; the UI asks first.
@@ -346,6 +369,7 @@ impl Overview {
             }) => merge_graph::read(git, &ours.name, &theirs.commit.id, &theirs.name)?,
             _ => None,
         };
+        let reword = reword(git, plan.as_ref(), unmerged.is_empty())?;
         let current = plan.as_ref().and_then(Plan::current);
         if current != self.last_step {
             // Git ran every line between the one it stopped on before
@@ -361,6 +385,7 @@ impl Overview {
             plan,
             merge,
             applied: self.applied.clone(),
+            reword,
             files,
         })
     }
@@ -457,7 +482,7 @@ impl Overview {
                 git.run(&args)?;
                 Ok(vec![OverviewEvent::Staged { paths }])
             }
-            OverviewCommand::Continue => {
+            OverviewCommand::Continue { message } => {
                 let left = snapshot
                     .files
                     .iter()
@@ -466,15 +491,43 @@ impl Overview {
                 if left > 0 {
                     return Err(OverviewError::NotStaged(left));
                 }
-                // The commit keeps git's message: no editor to wait for.
-                go_on(git, &["-c", "core.editor=true", verb, "--continue"])?;
+                let editor = Editor::new(git)?;
+                match (&snapshot.reword, message) {
+                    (None, Some(_)) => {
+                        return Err(OverviewError::Invalid(String::from(
+                            "only a reword step takes a new message",
+                        )));
+                    }
+                    (None, None) => {}
+                    (Some(reword), message) => {
+                        let message = message.unwrap_or_else(|| reword.message.clone());
+                        if message.trim().is_empty() {
+                            return Err(OverviewError::Invalid(String::from(
+                                "the commit message is empty",
+                            )));
+                        }
+                        if !reword.committed {
+                            // The commit is made on Continue: the editor
+                            // hands git this message.
+                            editor.prepare(&message).map_err(OverviewError::Io)?;
+                        } else if message.trim_end() != reword.message.trim_end() {
+                            git.run_with_input(
+                                &["commit", "--amend", "--file=-"],
+                                message.as_bytes(),
+                            )?;
+                        }
+                    }
+                }
+                let result = editor.go_on(git, &[verb, "--continue"]);
+                editor.discard();
+                result?;
                 Ok(vec![OverviewEvent::Continued])
             }
             OverviewCommand::Skip => {
                 if operation.kind == OperationKind::Merge {
                     return Err(OverviewError::CannotSkipMerge);
                 }
-                go_on(git, &["-c", "core.editor=true", verb, "--skip"])?;
+                Editor::new(git)?.go_on(git, &[verb, "--skip"])?;
                 Ok(vec![OverviewEvent::Skipped])
             }
             OverviewCommand::Abort => {
@@ -820,15 +873,128 @@ fn verb(kind: OperationKind) -> &'static str {
     }
 }
 
-/// Continues or skips. Git exits with an error when the next commit stops
-/// on conflicts too, which is not a failure: the overview then lists them.
-fn go_on(git: &dyn Git, args: &[&str]) -> Result<(), GitError> {
-    let output = git.output(args)?;
-    if output.status == Some(0) || !operation::conflicted_paths(git)?.is_empty() {
-        return Ok(());
+/// The `reword` step a rebase stopped on, if it did.
+fn reword(git: &dyn Git, plan: Option<&Plan>, merged: bool) -> Result<Option<Reword>, GitError> {
+    let Some(plan) = plan else {
+        return Ok(None);
+    };
+    let is_reword = plan
+        .steps
+        .iter()
+        .any(|step| step.state == rebase_plan::StepState::Current && step.action == Action::Reword);
+    if !is_reword {
+        return Ok(None);
     }
-    Err(GitError::Failed {
-        command: args.join(" "),
-        stderr: output.stderr,
-    })
+    let dir = rebase_dir(git)?;
+    let Ok(stopped) = fs::read_to_string(dir.join("stopped-sha")) else {
+        return Ok(None);
+    };
+    let stopped = stopped.trim();
+    // Git stops after making the commit when its editor fails: HEAD is
+    // then the commit replayed, with the author and date of the original.
+    let author = |commit: &str| {
+        git.run(&[
+            "show",
+            "--no-patch",
+            "--no-show-signature",
+            "--date=raw",
+            "--format=%an%x00%ae%x00%ad",
+            commit,
+            "--",
+        ])
+    };
+    let committed = merged && author("HEAD")? == author(stopped)?;
+    // The commit's own message: git's `message` file adds comments
+    // listing the conflicts.
+    let message = message_of(git, if committed { "HEAD" } else { stopped })?;
+    Ok(Some(Reword {
+        message: message.trim_end().to_string(),
+        committed,
+    }))
+}
+
+fn message_of(git: &dyn Git, commit: &str) -> Result<String, GitError> {
+    git.run(&[
+        "show",
+        "--no-patch",
+        "--no-show-signature",
+        "--format=%B",
+        commit,
+        "--",
+    ])
+}
+
+fn rebase_dir(git: &dyn Git) -> Result<PathBuf, GitError> {
+    Ok(git_dir(git)?.join("rebase-merge"))
+}
+
+fn git_dir(git: &dyn Git) -> Result<PathBuf, GitError> {
+    Ok(PathBuf::from(
+        git.run(&["rev-parse", "--absolute-git-dir"])?.trim(),
+    ))
+}
+
+/// The editor Scry gives git when it continues or skips, so git never
+/// waits on one. The first message git asks for is the one prepared, if
+/// any; a later `reword` line makes it fail, so git stops there with the
+/// commit made and the user writes its message; any other message, such
+/// as a squash's or a commit after conflicts, stays as git wrote it.
+struct Editor {
+    /// The prepared message, in the git folder.
+    message: PathBuf,
+    /// The rebase's lines done, the last one being the line running.
+    done: PathBuf,
+}
+
+/// Run by git's shell with the file to write as `$1`. The paths come in
+/// the environment, so they need no quoting.
+const EDITOR: &str = "sh -c 'if [ -f \"$SCRY_MESSAGE\" ]; then \
+     cat \"$SCRY_MESSAGE\" > \"$1\" && rm -f \"$SCRY_MESSAGE\"; exit; fi; \
+     case \"$(tail -n 1 \"$SCRY_DONE\" 2>/dev/null)\" in r\\ *|reword\\ *) exit 1;; esac' scry-editor";
+
+impl Editor {
+    fn new(git: &dyn Git) -> Result<Editor, GitError> {
+        let dir = git_dir(git)?;
+        Ok(Editor {
+            message: dir.join("scry-message"),
+            done: dir.join("rebase-merge").join("done"),
+        })
+    }
+
+    fn prepare(&self, message: &str) -> std::io::Result<()> {
+        fs::write(&self.message, message)
+    }
+
+    /// A message git did not ask for must not reach a later commit.
+    fn discard(&self) {
+        let _ = fs::remove_file(&self.message);
+    }
+
+    /// Continues or skips. Git exits with an error when the next commit
+    /// stops on conflicts, or on a `reword` line, which is not a failure:
+    /// the overview then shows them.
+    fn go_on(&self, git: &dyn Git, args: &[&str]) -> Result<(), GitError> {
+        let message = self.message.display().to_string();
+        let done = self.done.display().to_string();
+        let output = git.output_with_env(
+            args,
+            &[
+                // GIT_EDITOR comes before core.editor, even one inherited.
+                ("GIT_EDITOR", EDITOR),
+                ("SCRY_MESSAGE", &message),
+                ("SCRY_DONE", &done),
+            ],
+        )?;
+        if output.status == Some(0) || !operation::conflicted_paths(git)?.is_empty() {
+            return Ok(());
+        }
+        let plan = rebase_plan::read(git)?;
+        if reword(git, plan.as_ref(), true)?.is_some_and(|reword| reword.committed) {
+            return Ok(());
+        }
+        Err(GitError::Failed {
+            command: args.join(" "),
+            stderr: output.stderr,
+        })
+    }
 }

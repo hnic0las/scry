@@ -10,6 +10,7 @@ final class FakeOverview: OverviewSource {
     var plan: RebasePlan?
     var merge: MergeHistory?
     var applied: [UInt32] = []
+    var reword: RewordInfo?
     private(set) var actions: [OverviewAction] = []
     private(set) var reads = 0
 
@@ -29,6 +30,7 @@ final class FakeOverview: OverviewSource {
             plan: operation == nil ? nil : plan,
             merge: operation == nil ? nil : merge,
             applied: applied,
+            reword: operation == nil ? nil : reword,
             files: files,
             canContinue: operation != nil && files.allSatisfy { $0.state == .staged },
             canSkip: operation == "rebase"
@@ -90,6 +92,7 @@ final class FakeOverview: OverviewSource {
         case .stageResolved:
             files = files.map { file($0.path, $0.state == .resolved ? .staged : $0.state, absolutePath: $0.absolutePath) }
         case .continue, .abort:
+            reword = nil
             operation = nil
             files = []
         case .skip:
@@ -177,7 +180,7 @@ struct OverviewViewModelTests {
         #expect(overview.canContinue)
         overview.continueOperation()
 
-        #expect(source.actions == [.stageResolved, .continue])
+        #expect(source.actions == [.stageResolved, .continue(message: nil)])
         #expect(!overview.hasOperation)
         #expect(overview.summary.hasPrefix("No merge"))
     }
@@ -194,6 +197,56 @@ struct OverviewViewModelTests {
         overview.open("Gone.swift")
         overview.open("A.swift")
         #expect(opened == ["A.swift"])
+    }
+
+    /// At a reword step the message starts from the commit's own, can be
+    /// edited and put back, and Continue hands git the edited message: the
+    /// point of a reword.
+    @Test func continuesARewordWithTheMessageWritten() {
+        let source = FakeOverview(files: [])
+        source.reword = RewordInfo(message: "Retry uploads", committed: true)
+        let overview = OverviewViewModel(source: source) { _ in }
+        #expect(overview.isRewording)
+        #expect(overview.rewordOnly)
+        #expect(overview.rewordMessage == "Retry uploads")
+        #expect(!overview.rewordEdited)
+        #expect(overview.canContinue)
+
+        overview.rewordMessage = "Retry uploads twice"
+        #expect(overview.rewordEdited)
+        overview.resetRewordMessage()
+        #expect(overview.rewordMessage == "Retry uploads")
+
+        overview.rewordMessage = "Retry uploads twice\n\nWith a body.\n\n"
+        overview.continueOperation()
+        #expect(source.actions == [.continue(message: "Retry uploads twice\n\nWith a body.")])
+        #expect(!overview.isRewording)
+    }
+
+    /// Git refuses an empty message, so Continue waits for one instead of
+    /// failing in git.
+    @Test func anEmptyRewordMessageCannotContinue() {
+        let source = FakeOverview(files: [])
+        source.reword = RewordInfo(message: "Retry uploads", committed: true)
+        let overview = OverviewViewModel(source: source) { _ in }
+        overview.rewordMessage = "  \n"
+        #expect(!overview.canContinue)
+        overview.continueOperation()
+        #expect(source.actions.isEmpty)
+    }
+
+    /// Reading the operation again, after resolving a file in the editor
+    /// for instance, keeps the message being typed.
+    @Test func aRefreshKeepsTheMessageBeingTyped() {
+        let source = FakeOverview(files: [file("A.swift", .unresolved)])
+        source.reword = RewordInfo(message: "Retry uploads", committed: false)
+        let overview = OverviewViewModel(source: source) { _ in }
+        overview.rewordMessage = "Retry uploads, reworded"
+        overview.refresh()
+        #expect(overview.rewordMessage == "Retry uploads, reworded")
+        // Files to resolve first: the list stays, the message goes below.
+        #expect(!overview.rewordOnly)
+        #expect(overview.rewordHelp.hasPrefix("Once its files are staged"))
     }
 
     /// Abort only runs once confirmed: the view asks, then calls abort.

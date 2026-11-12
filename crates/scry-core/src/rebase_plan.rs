@@ -139,11 +139,62 @@ pub fn read(git: &dyn Git) -> Result<Option<Plan>, GitError> {
         .trim_end_matches('\n')
         .split_once('\0')
         .unwrap_or((onto.as_str(), ""));
+    let mut steps = steps(&done, &todo);
+    let rewritten = fs::read_to_string(dir.join("rewritten-list")).unwrap_or_default();
+    show_rewritten(git, &mut steps, &rewritten)?;
     Ok(Some(Plan {
         onto_short_id: short_id.to_string(),
         onto_subject: subject.to_string(),
-        steps: steps(&done, &todo),
+        steps,
     }))
+}
+
+/// Shows the steps done as the commits git made of them: a reword's new
+/// message, and every replayed commit's new id. The todo list keeps the
+/// original lines; `rewritten-list` pairs each original commit with the
+/// one replayed, one pair per line. A fixup or squash keeps its own line:
+/// its commit no longer exists on its own.
+fn show_rewritten(git: &dyn Git, steps: &mut [Step], rewritten: &str) -> Result<(), GitError> {
+    let pairs: Vec<(&str, &str)> = rewritten
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .collect();
+    // The steps to show again, with the commit each became.
+    let mut found: Vec<(usize, String)> = Vec::new();
+    for (index, step) in steps.iter().enumerate() {
+        let replayed = matches!(step.action, Action::Pick | Action::Reword | Action::Edit);
+        let Some(id) = &step.short_id else { continue };
+        if step.state != StepState::Done || !replayed {
+            continue;
+        }
+        // The last pair wins: a fixup folded in later rewrites it again.
+        if let Some((_, new)) = pairs
+            .iter()
+            .rev()
+            .find(|(old, _)| old.starts_with(id.as_str()))
+        {
+            found.push((index, new.trim().to_string()));
+        }
+    }
+    if found.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec![
+        "show",
+        "--no-patch",
+        "--no-show-signature",
+        "--format=%h%x00%s",
+    ];
+    args.extend(found.iter().map(|(_, new)| new.as_str()));
+    args.push("--");
+    let output = git.run(&args)?;
+    for ((index, _), line) in found.iter().zip(output.lines()) {
+        if let Some((short_id, subject)) = line.split_once('\0') {
+            steps[*index].short_id = Some(short_id.to_string());
+            steps[*index].subject = subject.to_string();
+        }
+    }
+    Ok(())
 }
 
 /// The steps from the text of `done` and `git-rebase-todo`.

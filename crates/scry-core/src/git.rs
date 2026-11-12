@@ -26,6 +26,10 @@ pub trait Git {
     /// code.
     fn output_with_input(&self, args: &[&str], input: &[u8]) -> Result<GitOutput, GitError>;
 
+    /// Runs git with these variables added to its environment, whatever
+    /// its exit code: the editor git runs for a commit message, for one.
+    fn output_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> Result<GitOutput, GitError>;
+
     /// Runs git with these arguments and returns its standard output, or an
     /// error when git reports a failure.
     fn run(&self, args: &[&str]) -> Result<String, GitError> {
@@ -105,6 +109,15 @@ impl GitCli {
 impl Git for GitCli {
     fn output(&self, args: &[&str]) -> Result<GitOutput, GitError> {
         let output = self.command(args).output().map_err(GitError::Spawn)?;
+        Ok(git_output(output))
+    }
+
+    fn output_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> Result<GitOutput, GitError> {
+        let output = self
+            .command(args)
+            .envs(env.iter().copied())
+            .output()
+            .map_err(GitError::Spawn)?;
         Ok(git_output(output))
     }
 

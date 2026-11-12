@@ -129,6 +129,14 @@ mod tests {
         fn output_with_input(&self, args: &[&str], _: &[u8]) -> Result<GitOutput, GitError> {
             self.output(args)
         }
+
+        fn output_with_env(
+            &self,
+            args: &[&str],
+            _: &[(&str, &str)],
+        ) -> Result<GitOutput, GitError> {
+            self.output(args)
+        }
     }
 
     /// Installing writes the three settings `git mergetool` needs, and the

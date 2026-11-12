@@ -116,6 +116,12 @@ final class OverviewViewModel {
     var confirmingAbort = false
     /// The view settling a special file, while it is shown.
     private(set) var special: SpecialFileViewModel?
+    /// The message being written at a `reword` step; Continue gives it to
+    /// git.
+    var rewordMessage = ""
+    /// The reword step the message was started for, so a refresh keeps
+    /// what the user typed and a new step starts from its own message.
+    @ObservationIgnored private var rewordStep: String?
 
     @ObservationIgnored private let source: OverviewSource
     @ObservationIgnored private let openFile: (OverviewFile) -> Void
@@ -137,6 +143,36 @@ final class OverviewViewModel {
     }
 
     var hasOperation: Bool { snapshot?.operation != nil }
+
+    // MARK: Reword
+
+    /// Whether git stopped on a `reword` line, for its message.
+    var isRewording: Bool { snapshot?.reword != nil }
+
+    /// "Reword e076115 · step 2".
+    var rewordTitle: String {
+        guard let step = currentStep else { return "Reword" }
+        return "Reword \(step.shortId ?? "") · step \(step.number)"
+    }
+
+    var rewordHelp: String {
+        guard let reword = snapshot?.reword else { return "" }
+        return reword.committed
+            ? "Git replayed this commit and stopped for its message. Continue gives it the message below."
+            : "Once its files are staged, Continue makes this commit with the message below."
+    }
+
+    /// Git made the commit and left no files: the message is all there is
+    /// to do, so it takes the place of the file list.
+    var rewordOnly: Bool {
+        snapshot?.reword?.committed == true && files.isEmpty
+    }
+
+    /// The message differs from the commit's own.
+    var rewordEdited: Bool {
+        guard let reword = snapshot?.reword else { return false }
+        return Self.trimmed(rewordMessage) != Self.trimmed(reword.message)
+    }
 
     // MARK: Merge history
 
@@ -319,7 +355,12 @@ final class OverviewViewModel {
     var stageTitle: String { "Stage resolved (\(count(.resolved)))" }
     var canStage: Bool { count(.resolved) > 0 }
     var continueTitle: String { "Continue \(verb)" }
-    var canContinue: Bool { snapshot?.canContinue ?? false }
+    /// Every file staged, and a message when rewording: git refuses an
+    /// empty one.
+    var canContinue: Bool {
+        (snapshot?.canContinue ?? false)
+            && (!isRewording || !rewordMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
     var canSkip: Bool { snapshot?.canSkip ?? false }
 
     // MARK: Intents
@@ -333,6 +374,16 @@ final class OverviewViewModel {
         } catch {
             self.error = "\(error)"
         }
+        let step = snapshot?.reword.map { "\(snapshot?.step ?? 0) \($0.message)" }
+        if step != rewordStep {
+            rewordStep = step
+            rewordMessage = snapshot?.reword?.message ?? ""
+        }
+    }
+
+    /// Back to the commit's own message.
+    func resetRewordMessage() {
+        rewordMessage = snapshot?.reword?.message ?? ""
     }
 
     func select(_ filter: Filter) {
@@ -371,7 +422,7 @@ final class OverviewViewModel {
 
     func continueOperation() {
         guard canContinue else { return }
-        run(.continue)
+        run(.continue(message: isRewording ? Self.trimmed(rewordMessage) : nil))
     }
 
     func skip() {
@@ -388,6 +439,17 @@ final class OverviewViewModel {
     // MARK: Private
 
     private var files: [OverviewFile] { snapshot?.files ?? [] }
+
+    private var currentStep: RebaseStep? {
+        snapshot?.plan?.steps.first { $0.state == .current }
+    }
+
+    /// Without the trailing blank lines and spaces git drops anyway.
+    private static func trimmed(_ message: String) -> String {
+        var message = message
+        while message.last?.isWhitespace == true { message.removeLast() }
+        return message
+    }
 
     private func count(_ state: ConflictState) -> Int {
         files.filter { $0.state == state }.count
@@ -411,9 +473,11 @@ final class OverviewViewModel {
         let target = step.joins.map { "step \($0)" } ?? "the commit before"
         switch step.state {
         case .current:
-            return step.action == "edit" || step.action == "break"
-                ? "Git stopped here, as the plan asks. Continue when ready."
-                : "Git stopped here: resolve its files, then continue."
+            switch step.action {
+            case "edit", "break": return "Git stopped here, as the plan asks. Continue when ready."
+            case "reword": return "Git stopped here: write the commit's message, then continue."
+            default: return "Git stopped here: resolve its files, then continue."
+            }
         case .done:
             switch step.action {
             case "drop": return "Dropped: this commit was not replayed."
@@ -424,7 +488,7 @@ final class OverviewViewModel {
         case .pending:
             switch step.action {
             case "pick": return "To come: git replays this commit."
-            case "reword": return "To come: replayed with its message kept as it is."
+            case "reword": return "To come: git replays it, then stops so you can write its message."
             case "edit": return "To come: git replays it, then stops so you can amend it."
             case "fixup": return "To come: folded into \(target), keeping that commit's message."
             case "squash": return "To come: folded into \(target), messages combined."

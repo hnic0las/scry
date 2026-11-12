@@ -7,10 +7,11 @@
 #   conflicts/simple-rebase        the same commits rebased with `git rebase main`
 #   conflicts/big-merge            main merged into the branch, all at once
 #
-# The rebases stop at four of their seven steps:
+# The rebases stop at four of their seven steps on conflicts; the
+# interactive one also stops on its reword, for the commit's message:
 #
 #   1. pick    Queue uploads while offline     Swift, Kotlin, Rust, Xcode project
-#   2. reword  Explain the sync queue          (applies cleanly)
+#   2. reword  Explain the sync queue          (applies cleanly, stops for its message)
 #   3. pick    Show the user's full name       TypeScript, TSX, CSS, Python
 #   4. fixup   fixup! Show the user's full name (applies cleanly)
 #   5. pick    Upgrade dependencies and CI     Ruby, JSON, TOML, YAML, Bash,

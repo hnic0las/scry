@@ -11,16 +11,20 @@ struct OverviewView: View {
             OverviewHeader(
                 summary: viewModel.summary,
                 applied: viewModel.appliedNote,
-                progress: viewModel.hasOperation ? viewModel.progress : nil,
+                progress: viewModel.hasOperation && !viewModel.rewordOnly ? viewModel.progress : nil,
                 detail: viewModel.progressDetail,
                 segments: viewModel.progressSegments
             )
             Divider()
             HStack(spacing: 0) {
-                OverviewSidebar(filters: viewModel.filters) { viewModel.select($0) }
-                    .frame(width: 210)
-                Divider()
-                table
+                if viewModel.rewordOnly {
+                    rewordPanel
+                } else {
+                    OverviewSidebar(filters: viewModel.filters) { viewModel.select($0) }
+                        .frame(width: 210)
+                    Divider()
+                    table
+                }
                 if let names = viewModel.historyNames {
                     Divider()
                     MergeHistoryView(
@@ -40,6 +44,11 @@ struct OverviewView: View {
                     )
                     .frame(width: 340)
                 }
+            }
+            if viewModel.isRewording && !viewModel.rewordOnly {
+                Divider()
+                rewordPanel
+                    .frame(height: 170)
             }
             Divider()
             footer
@@ -65,6 +74,16 @@ struct OverviewView: View {
         } message: {
             Text(viewModel.abortMessage)
         }
+    }
+
+    private var rewordPanel: some View {
+        RewordPanel(
+            title: viewModel.rewordTitle,
+            help: viewModel.rewordHelp,
+            message: $viewModel.rewordMessage,
+            edited: viewModel.rewordEdited,
+            reset: { viewModel.resetRewordMessage() }
+        )
     }
 
     private var table: some View {
@@ -149,10 +168,54 @@ struct OverviewView: View {
                 .keyboardShortcut(.return, modifiers: [.shift, .command])
                 .buttonStyle(.borderedProminent)
                 .disabled(!viewModel.canContinue)
-                .help("Once every file is staged (⇧⌘↩)")
+                .help(viewModel.isRewording ? "With this message (⇧⌘↩)" : "Once every file is staged (⇧⌘↩)")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+        .background(Theme.Surfaces.chrome)
+    }
+}
+
+/// The message of the commit a `reword` line stopped on, written before
+/// continuing.
+struct RewordPanel: View {
+    let title: String
+    let help: String
+    @Binding var message: String
+    /// The message differs from the commit's own.
+    let edited: Bool
+    let reset: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Label(title, systemImage: "text.cursor")
+                    .font(Metrics.captionBold)
+                Text(help)
+                    .font(Metrics.caption)
+                    .foregroundStyle(Theme.Surfaces.textSecondary)
+                Spacer()
+                Button("Revert to Original", action: reset)
+                    .disabled(!edited)
+                    .help("The commit's own message")
+            }
+            TextEditor(text: $message)
+                .font(Metrics.code)
+                .scrollContentBackground(.hidden)
+                .padding(6)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Theme.Surfaces.window)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Theme.Surfaces.textSecondary.opacity(0.3))
+                )
+                .accessibilityLabel("Commit message")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.Surfaces.chrome)
     }
 }
@@ -259,6 +322,8 @@ private struct PreviewOverview: OverviewSource {
     /// The step git stopped on, and the steps it ran on its own before.
     var current: UInt32 = 3
     var applied: [UInt32] = [2]
+    /// Stopped on a `reword` line.
+    var reword: RewordInfo?
 
     func snapshot() throws -> OverviewSnapshot {
         OverviewSnapshot(
@@ -281,6 +346,7 @@ private struct PreviewOverview: OverviewSource {
             ),
             merge: nil,
             applied: operation == nil ? [] : applied,
+            reword: operation == nil ? nil : reword,
             files: files,
             canContinue: operation != nil && files.allSatisfy { $0.state == .staged },
             canSkip: operation != nil
@@ -323,6 +389,7 @@ private struct PreviewOverview: OverviewSource {
                     base: commit("a40c2d1", "Initial Atlas app")
                 ),
                 applied: [],
+                reword: nil,
                 files: files,
                 canContinue: files.allSatisfy { $0.state == .staged },
                 canSkip: false
@@ -392,6 +459,28 @@ private struct PreviewOverview: OverviewSource {
         }, current: 8, applied: [6, 7])
     ) { _ in })
     .preferredColorScheme(.dark)
+}
+
+#Preview("Overview, stopped on a reword", traits: .fixedLayout(width: 1300, height: 700)) {
+    OverviewView(viewModel: OverviewViewModel(
+        source: PreviewOverview(
+            files: [],
+            current: 2,
+            applied: [],
+            reword: RewordInfo(message: "Explain the sync queue in the README", committed: true)
+        )
+    ) { _ in })
+}
+
+#Preview("Overview, reword with conflicts", traits: .fixedLayout(width: 1300, height: 700)) {
+    OverviewView(viewModel: OverviewViewModel(
+        source: PreviewOverview(
+            files: Array(PreviewOverview.mixed.prefix(2)),
+            current: 2,
+            applied: [],
+            reword: RewordInfo(message: "Explain the sync queue in the README", committed: false)
+        )
+    ) { _ in })
 }
 
 #Preview("Overview, nothing in progress", traits: .fixedLayout(width: 1100, height: 640)) {
