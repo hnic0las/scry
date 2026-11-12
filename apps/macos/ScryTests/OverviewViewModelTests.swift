@@ -91,6 +91,10 @@ final class FakeOverview: OverviewSource {
         switch action {
         case .stageResolved:
             files = files.map { file($0.path, $0.state == .resolved ? .staged : $0.state, absolutePath: $0.absolutePath) }
+        case .stage(let path):
+            files = files.map { $0.path == path ? file(path, .staged) : $0 }
+        case .unstage(let path):
+            files = files.map { $0.path == path ? file(path, .resolved) : $0 }
         case .continue, .abort:
             reword = nil
             operation = nil
@@ -183,6 +187,27 @@ struct OverviewViewModelTests {
         #expect(source.actions == [.stageResolved, .continue(message: nil)])
         #expect(!overview.hasOperation)
         #expect(overview.summary.hasPrefix("No merge"))
+    }
+
+    /// One file is staged once resolved, and unstaged to change it again;
+    /// files in other states offer neither, so a click never asks git for
+    /// what it would refuse.
+    @Test func stagesAndUnstagesOneFile() {
+        let source = FakeOverview(files: [
+            file("A.swift", .resolved), file("B.swift", .staged), file("C.swift", .unresolved),
+        ])
+        let overview = OverviewViewModel(source: source) { _ in }
+        #expect(overview.rows.map(\.canStage) == [true, false, false])
+        #expect(overview.rows.map(\.canUnstage) == [false, true, false])
+
+        overview.stage("C.swift")
+        overview.unstage("A.swift")
+        #expect(source.actions.isEmpty)
+
+        overview.stage("A.swift")
+        overview.unstage("B.swift")
+        #expect(source.actions == [.stage(path: "A.swift"), .unstage(path: "B.swift")])
+        #expect(overview.rows.map(\.state) == [.staged, .resolved, .unresolved])
     }
 
     /// Only a file the editor can read opens, and staged files have

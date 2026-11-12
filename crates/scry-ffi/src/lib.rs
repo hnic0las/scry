@@ -853,6 +853,14 @@ pub enum RebaseStepState {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum OverviewAction {
     StageResolved,
+    /// Stages one resolved file.
+    Stage {
+        path: String,
+    },
+    /// Gives a staged file its conflict back, keeping its content.
+    Unstage {
+        path: String,
+    },
     /// At a `reword` line, `message` replaces the commit's message.
     Continue {
         message: Option<String>,
@@ -1017,6 +1025,8 @@ impl RepositoryOverview {
     pub fn apply(&self, action: OverviewAction) -> Result<(), ScryError> {
         let command = match action {
             OverviewAction::StageResolved => overview::OverviewCommand::StageResolved,
+            OverviewAction::Stage { path } => overview::OverviewCommand::Stage { path },
+            OverviewAction::Unstage { path } => overview::OverviewCommand::Unstage { path },
             OverviewAction::Continue { message } => overview::OverviewCommand::Continue { message },
             OverviewAction::Skip => overview::OverviewCommand::Skip,
             OverviewAction::Abort => overview::OverviewCommand::Abort,

@@ -402,6 +402,57 @@ fn a_conflicted_reword_commits_with_the_message_written() {
     assert_eq!(repo.message("HEAD"), "Join both changes");
 }
 
+/// One file is staged on its own once resolved, and unstaged again to
+/// change it: git has its conflict back, and the file keeps the content
+/// the user resolved, so nothing is lost.
+#[test]
+fn one_file_is_staged_then_unstaged() {
+    let repo = Repo::stopped_rebase();
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    let stage = |path: &str| OverviewCommand::Stage {
+        path: path.to_string(),
+    };
+    let unstage = |path: &str| OverviewCommand::Unstage {
+        path: path.to_string(),
+    };
+
+    // Still conflicted: nothing to stage.
+    assert!(matches!(
+        overview.apply(&git, stage("a.txt")),
+        Err(OverviewError::NotThatKind(_))
+    ));
+    fs::write(repo.path().join("a.txt"), "a both\n").unwrap();
+    assert_eq!(
+        overview.apply(&git, stage("a.txt")).unwrap(),
+        [OverviewEvent::Staged {
+            paths: vec![String::from("a.txt")]
+        }]
+    );
+    assert_eq!(state(&mut overview, &git, "a.txt"), State::Staged);
+    assert_eq!(
+        state(&mut overview, &git, "Sources/b.swift"),
+        State::Unresolved
+    );
+
+    assert_eq!(
+        overview.apply(&git, unstage("a.txt")).unwrap(),
+        [OverviewEvent::Unstaged {
+            path: String::from("a.txt")
+        }]
+    );
+    assert_eq!(state(&mut overview, &git, "a.txt"), State::Resolved);
+    assert_eq!(
+        fs::read_to_string(repo.path().join("a.txt")).unwrap(),
+        "a both\n"
+    );
+    // Not staged any more: nothing to unstage.
+    assert!(matches!(
+        overview.apply(&git, unstage("a.txt")),
+        Err(OverviewError::NotThatKind(_))
+    ));
+}
+
 /// A message is refused where git would not use it: outside a reword
 /// line, or empty. Nothing runs, so the operation stays where it was.
 #[test]
@@ -587,6 +638,32 @@ fn special_files_are_settled_from_the_overview() {
         )
         .unwrap();
     assert!(!path.join("gone.txt").exists());
+    // Unstaged, the deletion is a choice to make again.
+    overview
+        .apply(
+            &git,
+            OverviewCommand::Unstage {
+                path: String::from("gone.txt"),
+            },
+        )
+        .unwrap();
+    let gone = overview
+        .refresh(&git)
+        .unwrap()
+        .files
+        .into_iter()
+        .find(|file| file.path == "gone.txt")
+        .unwrap();
+    assert_eq!(gone.state, State::Unresolved);
+    assert_eq!(gone.special, Some(Special::DeletedOnOneSide));
+    overview
+        .apply(
+            &git,
+            OverviewCommand::DeleteFile {
+                path: String::from("gone.txt"),
+            },
+        )
+        .unwrap();
 
     // Binary: both versions previewed, theirs taken.
     let (ours, theirs) = overview.binary(&git, "icon.png").unwrap();

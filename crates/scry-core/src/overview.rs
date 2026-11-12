@@ -196,6 +196,11 @@ impl Snapshot {
 pub enum OverviewCommand {
     /// Stages every file resolved and not staged yet.
     StageResolved,
+    /// Stages one resolved file.
+    Stage { path: String },
+    /// Gives a staged file its conflict back in git, keeping its content
+    /// as resolved: to change a choice before continuing.
+    Unstage { path: String },
     /// Goes on with the operation once every file is staged: the next
     /// commit of a rebase, or the merge commit. At a `reword` step,
     /// `message` replaces the commit's message; without it, the message
@@ -237,6 +242,10 @@ pub enum OverviewCommand {
 pub enum OverviewEvent {
     Staged {
         paths: Vec<String>,
+    },
+    /// A staged file has its conflict back.
+    Unstaged {
+        path: String,
     },
     Continued,
     Skipped,
@@ -401,7 +410,37 @@ impl Overview {
             return Err(OverviewError::NoOperation);
         };
         let verb = verb(operation.kind);
+        let state = |path: &str| {
+            snapshot
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .map(|file| file.state)
+        };
         match command {
+            OverviewCommand::Stage { path } => {
+                if state(&path) != Some(State::Resolved) {
+                    return Err(OverviewError::NotThatKind(path));
+                }
+                git.run(&["add", "--", &path])?;
+                Ok(vec![OverviewEvent::Staged { paths: vec![path] }])
+            }
+            OverviewCommand::Unstage { path } => {
+                if state(&path) != Some(State::Staged) {
+                    return Err(OverviewError::NotThatKind(path));
+                }
+                // The index keeps each conflict git resolved by `git add`
+                // or `git rm` (resolve-undo): this puts its versions back
+                // and leaves the file in the folder as it is.
+                git.run(&["update-index", "--unresolve", "--", &path])?;
+                if operation::conflicted_paths(git)?.contains(&path) {
+                    Ok(vec![OverviewEvent::Unstaged { path }])
+                } else {
+                    Err(OverviewError::Invalid(format!(
+                        "git no longer keeps the conflict of {path}, so it cannot be unstaged"
+                    )))
+                }
+            }
             OverviewCommand::KeepFile { path } => {
                 self.deletion(git, &path)?;
                 git.run(&["add", "--", &path])?;

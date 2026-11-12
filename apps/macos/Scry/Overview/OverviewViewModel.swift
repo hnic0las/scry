@@ -106,6 +106,10 @@ final class OverviewViewModel {
         /// or in its own view when `special` says which.
         let canOpen: Bool
         let special: SpecialKind?
+        /// Resolved, so git can take it as it is.
+        let canStage: Bool
+        /// Staged: its conflict can come back, to change it.
+        let canUnstage: Bool
         var id: String { path }
     }
 
@@ -332,7 +336,9 @@ final class OverviewViewModel {
                     stateLabel: Self.label(file.state),
                     conflicts: file.conflicts.map(String.init) ?? "—",
                     canOpen: (file.openable || file.special != nil) && file.state != .staged,
-                    special: file.state == .staged ? nil : file.special
+                    special: file.state == .staged ? nil : file.special,
+                    canStage: file.state == .resolved,
+                    canUnstage: file.state == .staged
                 )
             }
     }
@@ -418,6 +424,18 @@ final class OverviewViewModel {
     func stageResolved() {
         guard canStage else { return }
         run(.stageResolved)
+    }
+
+    /// Stages one resolved file.
+    func stage(_ path: String) {
+        guard rows.first(where: { $0.path == path })?.canStage == true else { return }
+        run(.stage(path: path))
+    }
+
+    /// Gives a staged file its conflict back, keeping what was resolved.
+    func unstage(_ path: String) {
+        guard rows.first(where: { $0.path == path })?.canUnstage == true else { return }
+        run(.unstage(path: path))
     }
 
     func continueOperation() {

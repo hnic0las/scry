@@ -130,8 +130,16 @@ struct OverviewView: View {
             .width(70)
         }
         .contextMenu(forSelectionType: String.self) { paths in
-            if let path = paths.first, let row = viewModel.rows.first(where: { $0.path == path }), row.canOpen {
-                Button(row.special?.help ?? "Resolve in Merge Editor") { viewModel.open(path) }
+            if let path = paths.first, let row = viewModel.rows.first(where: { $0.path == path }) {
+                if row.canOpen {
+                    Button(row.special?.help ?? "Resolve in Merge Editor") { viewModel.open(path) }
+                }
+                if row.canStage {
+                    Button("Stage") { viewModel.stage(path) }
+                }
+                if row.canUnstage {
+                    Button("Unstage") { viewModel.unstage(path) }
+                }
             }
         } primaryAction: { paths in
             // Double-click, or Return on the selected row.
