@@ -61,6 +61,21 @@ else
   echo "  ln -s '$cli' <a folder on your PATH>/git-scry" >&2
 fi
 
+# Another git-scry, such as an old `cargo install`, can come first on the
+# PATH of an interactive shell (~/.zshrc) without being on the PATH this
+# script runs with, and `git scry` would run it instead of the app's.
+for dir in "$HOME/.cargo/bin" "$HOME/.local/bin" "$HOME/bin" /opt/homebrew/bin /usr/local/bin; do
+  other="$dir/git-scry"
+  [ -e "$other" ] || continue
+  [ "$(readlink "$other" || true)" = "$cli" ] && continue
+  echo "Warning: $other is another git-scry; if it comes first on your shell's PATH, git scry runs it." >&2
+  if [ "$dir" = "$HOME/.cargo/bin" ]; then
+    echo "  Remove it with: cargo uninstall git-scry" >&2
+  else
+    echo "  Remove it with: rm '$other'" >&2
+  fi
+done
+
 # The same command the app's settings install, so they show it as current.
 if [ "$(git config --global --get merge.tool || true)" = scry ]; then
   git config --global mergetool.scry.cmd \
