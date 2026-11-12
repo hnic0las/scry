@@ -61,6 +61,9 @@ final class OverviewViewModel {
         /// "into 3" for a fixup or squash.
         let note: String?
         let dropped: Bool
+        /// Git stopped on this line for conflicts: its node is the
+        /// unresolved glyph, as everywhere else a conflict is.
+        let conflicted: Bool
         /// What git does, or did, with the line.
         let detail: String
         var id: Int { number }
@@ -397,6 +400,10 @@ final class OverviewViewModel {
                 joined: joined,
                 note: joined ? step.joins.map { "into \($0)" } : nil,
                 dropped: step.action == "drop",
+                conflicted: step.state == .current && (
+                    step.action == "reword" ? snapshot?.reword?.committed == false
+                        : step.action != "edit" && step.action != "break"
+                ),
                 detail: detail(step)
             )
         }

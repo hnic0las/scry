@@ -90,6 +90,13 @@ struct PlanStepRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Color.clear.frame(width: Lane.gutter, height: Lane.rowHeight)
+            // The todo list's order, which the graph reads upside down:
+            // "Step 3 of 7" and "into 3" point here.
+            Text("\(row.number)")
+                .font(Metrics.codeSmall.monospacedDigit())
+                .foregroundStyle(Theme.Surfaces.textTertiary)
+                .frame(minWidth: 12, alignment: .trailing)
+                .padding(.top, 6)
             ActionPill(action: row.action)
                 .padding(.top, 4)
             VStack(alignment: .leading, spacing: 1) {
@@ -168,7 +175,9 @@ struct PlanStepRow: View {
                 }
                 .stroke(lineColor, style: StrokeStyle(lineWidth: 1.5, dash: row.state == .pending ? [2, 2] : []))
             }
-            PlanNode(state: row.state, dropped: row.dropped, joined: row.joined, action: row.action)
+            PlanNode(
+                state: row.state, dropped: row.dropped, joined: row.joined, conflicted: row.conflicted, action: row.action
+            )
                 .position(x: x, y: middle)
         }
         .frame(width: Lane.gutter, height: height)
@@ -189,10 +198,31 @@ struct PlanNode: View {
     let state: RebaseStepState
     let dropped: Bool
     let joined: Bool
+    /// Stopped on conflicts: the unresolved triangle, in red.
+    var conflicted = false
     let action: String
 
     var body: some View {
         let size: CGFloat = joined ? 9 : state == .current ? 16 : 14
+        if conflicted {
+            ZStack {
+                Circle()
+                    .stroke(Theme.States.unresolved.opacity(0.25), lineWidth: 4)
+                    .frame(width: size + 6, height: size + 6)
+                Circle().fill(Theme.Surfaces.sidebar)
+                Circle().strokeBorder(Theme.States.unresolved, lineWidth: 1.5)
+                Image(systemName: ConflictState.unresolved.symbol)
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Theme.States.unresolved)
+            }
+            .frame(width: size, height: size)
+            .accessibilityLabel("Stopped on conflicts")
+        } else {
+            node(size: size)
+        }
+    }
+
+    private func node(size: CGFloat) -> some View {
         ZStack {
             if state == .current {
                 Circle()

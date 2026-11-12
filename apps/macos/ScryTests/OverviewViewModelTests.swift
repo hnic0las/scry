@@ -403,6 +403,8 @@ struct OverviewViewModelTests {
         let overview = OverviewViewModel(source: source, now: { now }) { _ in }
 
         #expect(overview.rewordTitle == "Commit message · abc0002")
+        // Stopped for the message, not for conflicts: the pencil, not the triangle.
+        #expect(overview.planRows.filter(\.conflicted).isEmpty)
         #expect(overview.rewordFiles.map(\.added) == ["+54", "binary"])
         #expect(overview.rewordFiles.map(\.removed) == [nil, nil])
         #expect(overview.rewordFiles[1].directory == "repository root")
@@ -438,6 +440,8 @@ struct OverviewViewModelTests {
         #expect(reworded?.idHelp == "Replayed as 6b7c8d9")
         #expect(reworded?.was == "was “add notes”")
         #expect(overview.planRows.first { $0.number == 1 }?.was == nil)
+        // The step git stopped on for conflicts shows the conflict glyph.
+        #expect(overview.planRows.filter(\.conflicted).map(\.number) == [3])
         #expect(overview.stepLine == "Step 3 of 5 · fixup abc0003 “fixup! add notes”")
         #expect(overview.summary == "Rebasing feature onto main")
     }
