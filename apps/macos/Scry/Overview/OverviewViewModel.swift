@@ -116,7 +116,31 @@ final class OverviewViewModel {
         let canStage: Bool
         /// Staged: its conflict can come back, to change it.
         let canUnstage: Bool
+        /// Deleted on one side, binary, project or catalog: settled by a
+        /// choice in its own view, even once staged.
+        let isSpecial: Bool
+        let absolutePath: String
         var id: String { path }
+    }
+
+    /// An item of the file row menu. An item that does not apply stays,
+    /// disabled, with the reason as its second line, so the menu keeps
+    /// its shape.
+    struct MenuItem: Equatable {
+        let title: String
+        let detail: String?
+        let enabled: Bool
+    }
+
+    /// The file row menu for some rows: the right-clicked ones, or the
+    /// selection for the File menu (SPEC: File row context menu).
+    struct RowMenu: Equatable {
+        /// The default open action, ↩.
+        let open: MenuItem
+        let stage: MenuItem
+        /// The rows, in the table's order.
+        let paths: [String]
+        let absolutePaths: [String]
     }
 
     /// A file of the reworded commit, in "In this commit".
@@ -161,6 +185,8 @@ final class OverviewViewModel {
     /// The reword step the message was started for, so a refresh keeps
     /// what the user typed and a new step starts from its own message.
     @ObservationIgnored private var rewordStep: String?
+    /// The rows selected in the table, by path.
+    var selection: Set<String> = []
     /// The file of the reworded commit whose diff shows.
     private(set) var rewordSelection: String?
     private(set) var rewordDiff: [DiffRow] = []
@@ -456,10 +482,86 @@ final class OverviewViewModel {
                     conflicts: file.conflicts.map(String.init) ?? "—",
                     canOpen: (file.openable || file.special != nil) && file.state != .staged,
                     special: file.state == .staged ? nil : file.special,
-                    canStage: file.state == .resolved,
-                    canUnstage: file.state == .staged
+                    canStage: file.state == .resolved || file.state == .needsReview,
+                    canUnstage: file.state == .staged,
+                    isSpecial: file.special != nil,
+                    absolutePath: file.absolutePath
                 )
             }
+    }
+
+    // MARK: Row menu
+
+    /// The menu for these rows; `nil` when none is in the table.
+    func menu(for paths: Set<String>) -> RowMenu? {
+        let rows = rows.filter { paths.contains($0.path) }
+        guard let first = rows.first else { return nil }
+        return RowMenu(
+            open: rows.count == 1 ? Self.openItem(first) : MenuItem(
+                title: "Open in Merge Editor", detail: "Select one file to open it", enabled: false
+            ),
+            stage: Self.stageItem(rows),
+            paths: rows.map(\.path),
+            absolutePaths: rows.map(\.absolutePath)
+        )
+    }
+
+    /// The selection's menu, for the File menu.
+    var selectionMenu: RowMenu? { menu(for: selection) }
+
+    /// The menu's second item: stages the rows, or unstages them.
+    func stageOrUnstage(_ paths: [String]) {
+        let rows = rows.filter { paths.contains($0.path) }
+        guard Self.stageItem(rows).enabled else { return }
+        let actions: [OverviewAction] = rows.map { $0.canUnstage ? .unstage(path: $0.path) : .stage(path: $0.path) }
+        run(actions)
+    }
+
+    private static func openItem(_ row: FileRow) -> MenuItem {
+        if row.state == .staged {
+            return MenuItem(
+                title: row.isSpecial ? "Show Choice" : "Open in Merge Editor",
+                detail: "Unstage to change it",
+                enabled: false
+            )
+        }
+        let title = row.state == .needsReview ? "Review Auto-resolution"
+            : row.special != nil ? "Open…" : "Open in Merge Editor"
+        return MenuItem(title: title, detail: row.canOpen ? nil : "Scry cannot read this file", enabled: row.canOpen)
+    }
+
+    private static func stageItem(_ rows: [FileRow]) -> MenuItem {
+        let many = rows.count > 1
+        let files = "\(rows.count) Files"
+        if rows.allSatisfy(\.canUnstage) {
+            if many {
+                return MenuItem(
+                    title: "Unstage \(files)",
+                    detail: "Git gets the conflicts back; each file keeps your result.",
+                    enabled: true
+                )
+            }
+            return rows[0].isSpecial
+                ? MenuItem(
+                    title: "Unstage and Choose Again",
+                    detail: "Git gets the conflict back and asks again. Your choice is not kept.",
+                    enabled: true
+                )
+                : MenuItem(
+                    title: "Unstage",
+                    detail: "Git gets the conflict back; the file keeps your result, now shown as Resolved.",
+                    enabled: true
+                )
+        }
+        let title = many ? "Stage \(files)" : rows[0].state == .needsReview ? "Accept and Stage" : "Stage"
+        if rows.allSatisfy(\.canStage) {
+            let review = !many && rows[0].state == .needsReview
+            return MenuItem(title: title, detail: review ? "Keeps the rule’s result as it is" : nil, enabled: true)
+        }
+        if rows.contains(where: \.canUnstage) {
+            return MenuItem(title: title, detail: "Some of these files are staged already", enabled: false)
+        }
+        return MenuItem(title: title, detail: many ? "Resolve every file first" : "Resolve the file first", enabled: false)
     }
 
     // MARK: Footer
@@ -649,13 +751,22 @@ final class OverviewViewModel {
     }
 
     private func run(_ action: OverviewAction) {
+        run([action])
+    }
+
+    /// Runs the actions in order, stopping at the first that fails, then
+    /// reads the operation again; a failure stays shown after the read.
+    private func run(_ actions: [OverviewAction]) {
+        var failure: String?
         do {
-            try source.apply(action: action)
-            error = nil
+            for action in actions {
+                try source.apply(action: action)
+            }
         } catch {
-            self.error = "\(error)"
+            failure = "\(error)"
         }
         refresh()
+        if let failure { error = failure }
     }
 
     private static func commits(_ count: Int) -> String {

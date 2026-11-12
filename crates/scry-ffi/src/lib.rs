@@ -906,7 +906,7 @@ pub enum RebaseStepState {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum OverviewAction {
     StageResolved,
-    /// Stages one resolved file.
+    /// Stages one resolved file, or one to review as the rule left it.
     Stage {
         path: String,
     },

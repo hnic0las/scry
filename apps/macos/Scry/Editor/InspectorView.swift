@@ -3,6 +3,8 @@ import SwiftUI
 /// S3: the focused conflict, its classification and its candidates.
 struct InspectorView: View {
     let viewModel: InspectorViewModel
+    /// The candidate list has the keyboard: ↑ / ↓ move the choice.
+    @FocusState private var candidatesFocused: Bool
 
     var body: some View {
         ScrollView {
@@ -50,15 +52,38 @@ struct InspectorView: View {
             .font(Metrics.captionBold)
             .foregroundStyle(Theme.Surfaces.textSecondary)
 
-        ForEach(viewModel.cards) { card in
-            CandidateCard(candidate: card.candidate, selected: card.selected, language: viewModel.language) {
-                viewModel.choose(card.candidate.id)
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(viewModel.cards) { card in
+                CandidateCard(
+                    candidate: card.candidate,
+                    selected: card.selected,
+                    focused: candidatesFocused,
+                    language: viewModel.language
+                ) {
+                    viewModel.choose(card.candidate.id)
+                    candidatesFocused = true
+                }
+                .disabled(!viewModel.canChoose)
             }
-            .disabled(!viewModel.canChoose)
         }
+        // A radio group: one stop for Tab, then ↑ / ↓ inside it.
+        .focusable(viewModel.canChoose)
+        .focused($candidatesFocused)
+        .focusEffectDisabled()
+        .onKeyPress(.upArrow) {
+            viewModel.chooseAdjacent(-1)
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            viewModel.chooseAdjacent(1)
+            return .handled
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Candidates")
+        .accessibilityHint("Up and down arrows choose another candidate")
 
         if let edited = viewModel.editedCard {
-            CandidateCard(candidate: edited.candidate, selected: true, language: viewModel.language) {
+            CandidateCard(candidate: edited.candidate, selected: true, focused: false, language: viewModel.language) {
                 viewModel.editByHand()
             }
         }
@@ -79,6 +104,8 @@ struct InspectorView: View {
 struct CandidateCard: View {
     let candidate: CandidateInfo
     let selected: Bool
+    /// The list has the keyboard: the selected card shows the focus ring.
+    let focused: Bool
     let language: String?
     let choose: () -> Void
 
@@ -108,11 +135,19 @@ struct CandidateCard: View {
                     .fill(Theme.Surfaces.pane)
                     .stroke(selected ? accent : Theme.Surfaces.hairline, lineWidth: selected ? 2 : 1)
             )
+            .overlay {
+                if selected && focused {
+                    RoundedRectangle(cornerRadius: Metrics.cardCornerRadius + 3)
+                        .stroke(accent.opacity(0.35), lineWidth: 3)
+                        .padding(-3)
+                }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(candidate.title), \(candidate.subtitle)")
         .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityValue(selected ? "chosen" : "")
     }
 
     private var accent: Color {

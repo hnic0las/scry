@@ -213,7 +213,7 @@ impl Snapshot {
 pub enum OverviewCommand {
     /// Stages every file resolved and not staged yet.
     StageResolved,
-    /// Stages one resolved file.
+    /// Stages one resolved file, or one to review as the rule left it.
     Stage { path: String },
     /// Gives a staged file its conflict back in git, keeping its content
     /// as resolved: to change a choice before continuing.
@@ -436,7 +436,9 @@ impl Overview {
         };
         match command {
             OverviewCommand::Stage { path } => {
-                if state(&path) != Some(State::Resolved) {
+                // A file to review holds the rule's result: staging it
+                // accepts that result as it is.
+                if !matches!(state(&path), Some(State::Resolved | State::NeedsReview)) {
                     return Err(OverviewError::NotThatKind(path));
                 }
                 git.run(&["add", "--", &path])?;

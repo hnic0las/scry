@@ -3,8 +3,6 @@ import SwiftUI
 /// S1: the operation in progress and its conflicted files.
 struct OverviewView: View {
     @Bindable var viewModel: OverviewViewModel
-    /// The table's selected row, by path: purely visual.
-    @State private var selection: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -76,6 +74,13 @@ struct OverviewView: View {
                 .padding(.bottom, 48)
         }
         .overlay(alignment: .top) { ToolbarHintRow(shortcuts: viewModel.toolbarHints) }
+        .focusedSceneValue(\.fileRowActions, viewModel.selectionMenu.map { menu in
+            FileRowCommandActions(
+                menu: menu,
+                open: { if let path = menu.paths.first { viewModel.open(path) } },
+                stage: { viewModel.stageOrUnstage(menu.paths) }
+            )
+        })
         .background(Theme.Surfaces.window)
         .navigationTitle(viewModel.title)
         .navigationSubtitle(viewModel.hasOperation ? viewModel.snapshot?.operation ?? "" : "")
@@ -100,22 +105,29 @@ struct OverviewView: View {
     }
 
     private var table: some View {
-        Table(viewModel.rows, selection: $selection) {
+        Table(viewModel.rows, selection: $viewModel.selection) {
             TableColumn("") { row in
                 if row.canOpen {
                     Button { viewModel.open(row.path) } label: {
                         Image(systemName: row.special?.symbol ?? "square.and.pencil")
-                            .foregroundStyle(Theme.Interaction.accent)
+                            .rowForeground(Theme.Interaction.accent)
                     }
                     .buttonStyle(.borderless)
                     .help("\(row.special?.help ?? "Resolve in the merge editor"): \(row.name) (double-click the row)")
                     .accessibilityLabel("Resolve \(row.name)")
+                } else if row.canUnstage {
+                    // Staged files do not open: git has no conflict left
+                    // to show. Unstage is the explicit step.
+                    Image(systemName: "square.and.pencil")
+                        .rowForeground(Theme.Surfaces.textTertiary, secondary: true)
+                        .help("Unstage to change it")
+                        .accessibilityLabel("\(row.name) is staged: unstage to change it")
                 }
             }
             .width(28)
             TableColumn("State") { row in
                 Label(row.stateLabel, systemImage: row.state.symbol)
-                    .foregroundStyle(row.state.color)
+                    .rowForeground(row.state.color)
                     .font(Metrics.callout)
             }
             .width(min: 110, ideal: 130)
@@ -125,14 +137,14 @@ struct OverviewView: View {
                         .font(Metrics.code.weight(.semibold))
                     Text(row.directory)
                         .font(Metrics.caption)
-                        .foregroundStyle(Theme.Surfaces.textSecondary)
+                        .rowForeground(Theme.Surfaces.textSecondary, secondary: true)
                 }
             }
             .width(min: 180, ideal: 260)
             TableColumn("Kind") { row in
                 Text(row.kind)
                     .font(Metrics.callout)
-                    .foregroundStyle(Theme.Surfaces.textSecondary)
+                    .rowForeground(Theme.Surfaces.textSecondary, secondary: true)
             }
             .width(min: 90, ideal: 140)
             TableColumn("Conflicts") { row in
@@ -143,16 +155,13 @@ struct OverviewView: View {
             .width(70)
         }
         .contextMenu(forSelectionType: String.self) { paths in
-            if let path = paths.first, let row = viewModel.rows.first(where: { $0.path == path }) {
-                if row.canOpen {
-                    Button(row.special?.help ?? "Resolve in Merge Editor") { viewModel.open(path) }
-                }
-                if row.canStage {
-                    Button("Stage") { viewModel.stage(path) }
-                }
-                if row.canUnstage {
-                    Button("Unstage") { viewModel.unstage(path) }
-                }
+            if let menu = viewModel.menu(for: paths) {
+                FileRowMenuItems(
+                    menu: menu,
+                    showsReturn: true,
+                    open: { if let path = menu.paths.first { viewModel.open(path) } },
+                    stage: { viewModel.stageOrUnstage(menu.paths) }
+                )
             }
         } primaryAction: { paths in
             // Double-click, or Return on the selected row.
@@ -483,6 +492,12 @@ private struct PreviewOverview: OverviewSource {
     OverviewView(viewModel: OverviewViewModel(source: PreviewOverview(files: PreviewOverview.mixed)) { _ in })
 }
 
+#Preview("Overview, a row selected", traits: .fixedLayout(width: 1300, height: 640)) {
+    let viewModel = OverviewViewModel(source: PreviewOverview(files: PreviewOverview.mixed)) { _ in }
+    viewModel.selection = ["Sources/Sync/SyncEngine.swift"]
+    return OverviewView(viewModel: viewModel)
+}
+
 #Preview("Overview, git ran steps on its own", traits: .fixedLayout(width: 1300, height: 640)) {
     OverviewView(viewModel: OverviewViewModel(
         source: PreviewOverview(files: PreviewOverview.mixed.map {
@@ -534,4 +549,27 @@ private struct PreviewOverview: OverviewSource {
 
 #Preview("Overview, merge", traits: .fixedLayout(width: 1300, height: 640)) {
     OverviewView(viewModel: OverviewViewModel(source: PreviewOverview.Merge(files: PreviewOverview.mixed)) { _ in })
+}
+
+/// A table cell's colour, which turns to the selection's text colour on a
+/// selected row: the theme's red or grey on the system's blue cannot be
+/// read.
+private struct RowForeground: ViewModifier {
+    let color: Color
+    let secondary: Bool
+    @Environment(\.backgroundProminence) private var prominence
+
+    func body(content: Content) -> some View {
+        if prominence == .increased {
+            content.foregroundStyle(secondary ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+        } else {
+            content.foregroundStyle(color)
+        }
+    }
+}
+
+private extension View {
+    func rowForeground(_ color: Color, secondary: Bool = false) -> some View {
+        modifier(RowForeground(color: color, secondary: secondary))
+    }
 }

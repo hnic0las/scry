@@ -25,6 +25,7 @@ struct ScryApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {
                 OpenCommands()
+                FileRowCommands()
             }
             CommandGroup(after: .help) {
                 KeyboardShortcutsCommand()

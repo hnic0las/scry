@@ -222,6 +222,66 @@ struct OverviewViewModelTests {
         #expect(overview.rows.map(\.state) == [.staged, .resolved, .unresolved])
     }
 
+    /// The row menu keeps the same items in every state: those that do not
+    /// apply stay disabled and say why, so the user learns what to do
+    /// instead of wondering where an item went.
+    @Test func rowMenuSaysWhyAnItemIsDisabled() throws {
+        let source = FakeOverview(files: [
+            file("A.swift", .unresolved), file("B.swift", .resolved), file("C.swift", .staged),
+            file("Gone.swift", .staged, special: .deletedOnOneSide), file("R.swift", .needsReview),
+            file("Icon.png", .unresolved, openable: false, special: .binary),
+        ])
+        let overview = OverviewViewModel(source: source) { _ in }
+        let menu = { (path: String) in try #require(overview.menu(for: [path])) }
+
+        let unresolved = try menu("A.swift")
+        #expect(unresolved.open == .init(title: "Open in Merge Editor", detail: nil, enabled: true))
+        #expect(unresolved.stage == .init(title: "Stage", detail: "Resolve the file first", enabled: false))
+        #expect(unresolved.absolutePaths == ["/r/A.swift"])
+
+        #expect(try menu("B.swift").stage == .init(title: "Stage", detail: nil, enabled: true))
+        #expect(try menu("Icon.png").open.title == "Open…")
+        #expect(try menu("R.swift").open.title == "Review Auto-resolution")
+        #expect(try menu("R.swift").stage == .init(title: "Accept and Stage", detail: "Keeps the rule’s result as it is", enabled: true))
+
+        // Staged files do not open: unstaging is the explicit step.
+        let staged = try menu("C.swift")
+        #expect(staged.open == .init(title: "Open in Merge Editor", detail: "Unstage to change it", enabled: false))
+        #expect(staged.stage.title == "Unstage")
+        #expect(staged.stage.detail?.hasSuffix("now shown as Resolved.") == true)
+        let special = try menu("Gone.swift")
+        #expect(special.open.title == "Show Choice")
+        #expect(!special.open.enabled)
+        #expect(special.stage.title == "Unstage and Choose Again")
+    }
+
+    /// With several rows selected, the second item counts them and works
+    /// only if it applies to every row; the File menu acts on the same
+    /// selection.
+    @Test func rowMenuActsOnEverySelectedRow() throws {
+        let source = FakeOverview(files: [
+            file("A.swift", .resolved), file("B.swift", .resolved), file("C.swift", .staged), file("D.swift", .unresolved),
+        ])
+        let overview = OverviewViewModel(source: source) { _ in }
+        #expect(overview.selectionMenu == nil)
+
+        overview.selection = ["A.swift", "B.swift"]
+        let both = try #require(overview.selectionMenu)
+        #expect(both.stage == .init(title: "Stage 2 Files", detail: nil, enabled: true))
+        #expect(!both.open.enabled)
+
+        let mixed = try #require(overview.menu(for: ["A.swift", "C.swift"]))
+        #expect(mixed.stage.title == "Stage 2 Files")
+        #expect(!mixed.stage.enabled)
+        overview.stageOrUnstage(mixed.paths)
+        #expect(source.actions.isEmpty)
+        #expect(try #require(overview.menu(for: ["A.swift", "D.swift"])).stage.detail == "Resolve every file first")
+
+        overview.stageOrUnstage(both.paths)
+        #expect(source.actions == [.stage(path: "A.swift"), .stage(path: "B.swift")])
+        #expect(try #require(overview.menu(for: ["A.swift", "B.swift", "C.swift"])).stage.title == "Unstage 3 Files")
+    }
+
     /// The overview's hint strip offers ↩ only while a file can open, and
     /// the app's own shortcuts always.
     @Test func hintStripOffersOpeningOnlyWhenAFileCan() {

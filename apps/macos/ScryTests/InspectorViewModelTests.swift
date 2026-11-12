@@ -62,4 +62,29 @@ struct InspectorViewModelTests {
         editor.editBlock?.cancel()
         #expect(editor.inspector.canChoose)
     }
+
+    /// The candidates are a radio group: ↑ and ↓ move the choice one card
+    /// at a time and stop at the ends, so a held key never wraps round to
+    /// a resolution the user did not see; nothing moves while editing.
+    @Test func arrowsMoveTheChoiceThroughTheCards() throws {
+        let editor = try ConflictFile().editor()
+        let inspector = editor.inspector
+        let ids = inspector.cards.map(\.id)
+        #expect(ids.count > 1)
+
+        inspector.chooseAdjacent(1)
+        #expect(editor.chosen(0) == ids.first)
+        inspector.chooseAdjacent(-1)
+        #expect(editor.chosen(0) == ids.first)
+        inspector.chooseAdjacent(1)
+        #expect(editor.chosen(0) == ids[1])
+
+        editor.take(ids.last ?? "")
+        inspector.chooseAdjacent(1)
+        #expect(editor.chosen(0) == ids.last)
+
+        editor.startEditing()
+        inspector.chooseAdjacent(-1)
+        #expect(editor.chosen(0) == ids.last)
+    }
 }

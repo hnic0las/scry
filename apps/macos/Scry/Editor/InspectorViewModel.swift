@@ -57,6 +57,23 @@ final class InspectorViewModel {
         model.choose(candidate, conflict: conflict.index)
     }
 
+    /// ↑ / ↓ in the candidate list, a radio group: the previous or next
+    /// card, in display order, without wrapping. With none chosen, ↓
+    /// takes the first and ↑ the last. No global shortcut cycles them: a
+    /// habit press would silently change a resolution (SPEC: keyboard map).
+    func chooseAdjacent(_ offset: Int) {
+        let ids = cards.map(\.id)
+        guard !ids.isEmpty else { return }
+        let target: Int
+        if let current = cards.firstIndex(where: \.selected) {
+            target = min(max(current + offset, 0), ids.count - 1)
+            guard target != current else { return }
+        } else {
+            target = offset > 0 ? 0 : ids.count - 1
+        }
+        choose(ids[target])
+    }
+
     func editByHand() {
         guard let conflict, model.editing == nil else { return }
         onEditByHand(conflict.index)
