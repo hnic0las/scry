@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Scry
 
@@ -32,7 +33,7 @@ struct SettingsViewModelTests {
     /// longer offered.
     @Test func replacesAnotherTool() {
         let installer = FakeInstaller(.other(tool: "opendiff"))
-        let settings = SettingsViewModel(installer: installer)
+        let settings = SettingsViewModel(installer: installer, defaults: .isolated)
         settings.refresh()
 
         #expect(settings.status.contains("opendiff"))
@@ -49,7 +50,7 @@ struct SettingsViewModelTests {
     /// The settings show the app's own git-scry and the exact command git
     /// runs, so they can be copied and checked.
     @Test func showsTheCommandLineTool() {
-        let settings = SettingsViewModel(installer: FakeInstaller(.notSet))
+        let settings = SettingsViewModel(installer: FakeInstaller(.notSet), defaults: .isolated)
 
         #expect(settings.cliPath == "/A/git-scry")
         #expect(settings.command.hasPrefix("\"/A/git-scry\" resolve --app="))
@@ -57,7 +58,7 @@ struct SettingsViewModelTests {
 
     /// A Scry command for an app moved since is offered as an update.
     @Test func offersToUpdateAMovedApp() {
-        let settings = SettingsViewModel(installer: FakeInstaller(.scry(current: false)))
+        let settings = SettingsViewModel(installer: FakeInstaller(.scry(current: false)), defaults: .isolated)
         settings.refresh()
 
         #expect(!settings.isInstalled)
@@ -69,7 +70,7 @@ struct SettingsViewModelTests {
     @Test func needsTheBundledCommandLineTool() {
         let installer = FakeInstaller(.notSet)
         installer.isAvailable = false
-        let settings = SettingsViewModel(installer: installer)
+        let settings = SettingsViewModel(installer: installer, defaults: .isolated)
         settings.refresh()
 
         settings.install()
@@ -84,7 +85,7 @@ struct SettingsViewModelTests {
     @Test func showsWhyInstallingFailed() {
         let installer = FakeInstaller(.notSet)
         installer.failure = .Failed(message: "could not lock config file")
-        let settings = SettingsViewModel(installer: installer)
+        let settings = SettingsViewModel(installer: installer, defaults: .isolated)
         settings.refresh()
 
         settings.install()
@@ -101,5 +102,22 @@ struct SettingsViewModelTests {
         #expect(installer.cli.hasSuffix("Scry.app/Contents/Helpers/git-scry"))
         #expect(installer.isAvailable)
         #expect(installer.command.contains("resolve --app="))
+    }
+
+    /// Settings ▸ Appearance shows and changes the same layout choice as
+    /// the editor's toolbar, so the two never disagree.
+    @Test func sharesTheEditorLayoutChoice() throws {
+        let defaults = UserDefaults.isolated
+        let settings = SettingsViewModel(installer: FakeInstaller(.notSet), defaults: defaults)
+        let editor = try ConflictFile().editor(defaults: defaults)
+        #expect(settings.editorLayout == .columns)
+
+        settings.editorLayout = .stacked
+        editor.reloadLayout()
+        #expect(editor.layout == .stacked)
+
+        editor.switchLayout()
+        settings.refresh()
+        #expect(settings.editorLayout == .columns)
     }
 }

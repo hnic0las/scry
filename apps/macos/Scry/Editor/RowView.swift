@@ -7,14 +7,59 @@ struct RowView: View {
     let widths: PaneWidths
     /// The panes' shared sideways scroll, read by the cells only.
     let scroll: SideScroll
+    /// Which panes this row draws: all three, or one area of the stacked
+    /// layout.
+    var part: RowPart = .all
+    /// Stacked: the line under the pointer, tinted in both areas.
+    var twin = false
+    /// A lens row's take buttons, with the candidate and the conflict.
+    var take: (String, Int) -> Void = { _, _ in }
+    var takeBoth: (Int) -> Void = { _ in }
     /// Focuses a conflict.
     let focus: (Int) -> Void
 
     var body: some View {
         switch row {
         case .lens(let lens):
-            LensRow(state: lens, widths: widths) { focus(lens.conflict) }
+            LensRow(
+                state: lens, widths: widths, part: part,
+                take: { take($0, lens.conflict) }, takeBoth: { takeBoth(lens.conflict) }
+            ) { focus(lens.conflict) }
         case .code(let code):
+            cells(code)
+                .frame(height: Metrics.rowHeight)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if let conflict = code.conflict { focus(conflict) }
+                }
+        }
+    }
+
+    @ViewBuilder
+    private func cells(_ code: MergeEditorViewModel.CodeRowState) -> some View {
+        switch part {
+        case .sides:
+            HStack(spacing: 0) {
+                CellView(
+                    cell: code.ours, pane: .ours, invalid: false, scroll: scroll,
+                    codeWidth: widths.code(widths.side), twin: twin
+                )
+                    .frame(width: widths.side)
+                Rectangle().fill(Theme.Surfaces.hairline).frame(width: widths.connector)
+                CellView(
+                    cell: code.theirs, pane: .theirs, invalid: false, scroll: scroll,
+                    codeWidth: widths.code(widths.side), twin: twin
+                )
+                    .frame(width: widths.side)
+            }
+        case .result:
+            CellView(
+                cell: code.result, pane: .result, invalid: code.resultInvalid,
+                scroll: scroll, codeWidth: widths.code(widths.result),
+                provenance: code.resultProvenance.color, twin: twin
+            )
+            .frame(width: widths.result)
+        case .all:
             HStack(spacing: 0) {
                 CellView(cell: code.ours, pane: .ours, invalid: false, scroll: scroll, codeWidth: widths.code(widths.side))
                     .frame(width: widths.side)
@@ -31,13 +76,18 @@ struct RowView: View {
                 CellView(cell: code.theirs, pane: .theirs, invalid: false, scroll: scroll, codeWidth: widths.code(widths.side))
                     .frame(width: widths.side)
             }
-            .frame(height: Metrics.rowHeight)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if let conflict = code.conflict { focus(conflict) }
-            }
         }
     }
+}
+
+/// The panes a row draws.
+enum RowPart {
+    /// Ours, result and theirs, in columns.
+    case all
+    /// Stacked layout, top area: ours and theirs.
+    case sides
+    /// Stacked layout, bottom area: the result.
+    case result
 }
 
 enum Pane {
@@ -54,6 +104,8 @@ struct CellView: View {
     let codeWidth: CGFloat
     /// The colour of the chosen resolution's provenance, for the result.
     var provenance: Color = Theme.Provenance.git
+    /// Tinted as the twin line; a pane with no line here stays hatched.
+    var twin = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -71,7 +123,9 @@ struct CellView: View {
                 .clipped()
         }
         .frame(maxHeight: .infinity)
-        .background(background)
+        .background {
+            if twin && cell.kind != .spacer { Theme.Interaction.currentLine } else { background }
+        }
         .overlay(alignment: .leading) { strip }
         .clipped()
     }
@@ -246,13 +300,93 @@ struct Connector: View {
 struct LensRow: View {
     let state: MergeEditorViewModel.LensRowState
     let widths: PaneWidths
+    var part: RowPart = .all
+    /// Stacked: takes a candidate for this conflict.
+    var take: (String) -> Void = { _ in }
+    var takeBoth: () -> Void = {}
     let focus: () -> Void
 
     var body: some View {
         HStack(spacing: 0) {
-            LensCommitView(commit: state.oursCommit)
+            switch part {
+            case .all:
+                LensCommitView(commit: state.oursCommit)
+                    .frame(width: widths.side)
+                Color.clear.frame(width: widths.connector)
+                title
+                    .frame(width: widths.result)
+                Color.clear.frame(width: widths.connector)
+                LensCommitView(commit: state.theirsCommit)
+                    .frame(width: widths.side)
+            case .sides:
+                // The arrows point down at the result (SPEC: apply buttons).
+                HStack(spacing: 0) {
+                    LensCommitView(commit: state.oursCommit)
+                    takeButton("Take ours", candidate: "ours", shortcut: .takeOurs)
+                }
                 .frame(width: widths.side)
-            Color.clear.frame(width: widths.connector)
+                Rectangle().fill(Theme.Surfaces.hairline).frame(width: widths.connector)
+                HStack(spacing: 0) {
+                    LensCommitView(commit: state.theirsCommit)
+                    takeButton("Take theirs", candidate: "theirs", shortcut: .takeTheirs)
+                }
+                .frame(width: widths.side)
+            case .result:
+                HStack(spacing: 6) {
+                    title
+                    Button("Take both", action: takeBoth)
+                        .help(Shortcut.takeBoth.help("Take both, ours first; again for theirs first"))
+                    takeMenu
+                }
+                .controlSize(.small)
+                .disabled(!state.canTake)
+                .padding(.trailing, 10)
+                .frame(width: widths.result)
+            }
+        }
+        .frame(height: Metrics.lensHeight)
+        .background(state.focused && part != .all ? Theme.Interaction.selection : Theme.Surfaces.sidebar)
+        .overlay(alignment: .leading) {
+            // Stacked, the focused conflict is marked in both areas.
+            if state.focused && part != .all {
+                Rectangle().fill(Theme.Interaction.focus).frame(width: 3)
+            }
+        }
+        .overlay(alignment: .top) { Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1) }
+    }
+
+    /// A side's "↓ Take ours" or "↓ Take theirs".
+    private func takeButton(_ title: String, candidate: String, shortcut: Shortcut) -> some View {
+        Button { take(candidate) } label: {
+            Label(title, systemImage: "arrow.down")
+        }
+        .controlSize(.small)
+        .disabled(!state.canTake)
+        .help(shortcut.help("\(title) into the result"))
+        .accessibilityLabel("\(title) into the result")
+        .padding(.trailing, 8)
+    }
+
+    /// Every take action, Take base included.
+    private var takeMenu: some View {
+        Menu {
+            Button("Take ours") { take("ours") }
+            Button("Take theirs") { take("theirs") }
+            Button("Take both, ours first") { take("ours-then-theirs") }
+            Button("Take both, theirs first") { take("theirs-then-ours") }
+            Button("Take base") { take("base") }
+            Button("Take none") { take("neither") }
+        } label: {
+            Image(systemName: "ellipsis")
+        }
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("More ways to resolve this conflict")
+        .accessibilityLabel("More ways to resolve this conflict")
+    }
+
+    /// The conflict's number and the state of its resolution.
+    private var title: some View {
             HStack(spacing: 6) {
                 Button(state.title, action: focus)
                     .buttonStyle(.plain)
@@ -269,14 +403,6 @@ struct LensRow: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 10)
-            .frame(width: widths.result)
-            Color.clear.frame(width: widths.connector)
-            LensCommitView(commit: state.theirsCommit)
-                .frame(width: widths.side)
-        }
-        .frame(height: Metrics.lensHeight)
-        .background(Theme.Surfaces.sidebar)
-        .overlay(alignment: .top) { Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1) }
     }
 
 }

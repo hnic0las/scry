@@ -102,6 +102,44 @@ struct MergeEditorViewModelTests {
         #expect(editor.toolbarHints.map(\.id).contains("toggleInspector"))
     }
 
+    /// The layout choice is the user's, kept for the next file; a narrow
+    /// window stacks the panes without changing it, so widening the window
+    /// brings the choice back, and the switch is unavailable meanwhile.
+    @Test func layoutIsRememberedAndForcedWhenNarrow() throws {
+        let defaults = UserDefaults(suiteName: "ScryTests.\(UUID().uuidString)")!
+        let editor = try ConflictFile().editor(defaults: defaults)
+        #expect(editor.layout == .columns)
+        #expect(editor.toolbarHints.map(\.id).contains("switchLayout"))
+
+        editor.switchLayout()
+        #expect(editor.layout == .stacked)
+        #expect(try ConflictFile().editor(defaults: defaults).layout == .stacked)
+        editor.switchLayout()
+        #expect(editor.layout == .columns)
+
+        editor.windowWidthChanged(900)
+        #expect(editor.layout == .stacked)
+        #expect(!editor.canSwitchLayout)
+        #expect(editor.layoutHelp == "Needs a wider window")
+        #expect(!editor.toolbarHints.map(\.id).contains("switchLayout"))
+        editor.switchLayout()
+        #expect(editor.preferredLayout == .columns)
+
+        editor.windowWidthChanged(1440)
+        #expect(editor.layout == .columns)
+    }
+
+    /// Stacked, a conflict scrolls to 4 rows below the top, so its lines
+    /// come with some context in both areas; in columns, to its lens row.
+    @Test func stackedScrollsAConflictBelowTheTop() throws {
+        let editor = try ConflictFile(text: String(repeating: "let x = 0\n", count: 10) + ConflictFile.text).editor()
+        let last = editor.lensRows.count - 1
+        let lens = try #require(editor.lensRowIndex(of: last))
+        #expect(editor.scrollTarget(for: last) == lens)
+        editor.setLayout(.stacked)
+        #expect(editor.scrollTarget(for: last) == lens - 4)
+    }
+
     /// The panes scroll as far as the widest line as drawn: tabs reach
     /// their stop and wide characters count double, or the end of such a
     /// line could not be scrolled to.
@@ -110,6 +148,25 @@ struct MergeEditorViewModelTests {
 
         // Eight spaces, "let ", two wide characters, " = 1".
         #expect(editor.longestLine == 8 + 4 + 4 + 4)
+    }
+
+    /// A lens row's take button acts on its own conflict, not on the
+    /// focused one, and does nothing while a conflict is edited by hand.
+    @Test func lensButtonsTakeForTheirConflict() throws {
+        let editor = try ConflictFile().editor()
+        #expect(editor.currentConflict == 0)
+
+        editor.take("theirs", in: 1)
+        #expect(editor.currentConflict == 1)
+        #expect(editor.chosen(1) == "theirs")
+        #expect(editor.chosen(0) == nil)
+
+        editor.takeBoth(in: 0)
+        #expect(editor.chosen(0) == "ours-then-theirs")
+
+        editor.startEditing()
+        editor.take("ours", in: 1)
+        #expect(editor.chosen(1) == "theirs")
     }
 
     /// Taking the side already taken changes nothing: one undo takes the

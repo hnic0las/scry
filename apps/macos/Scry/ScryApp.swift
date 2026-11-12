@@ -27,6 +27,9 @@ struct ScryApp: App {
                 OpenCommands()
                 FileRowCommands()
             }
+            CommandGroup(after: .toolbar) {
+                LayoutCommands()
+            }
             CommandGroup(after: .help) {
                 KeyboardShortcutsCommand()
             }
@@ -85,7 +88,36 @@ struct OpenActions {
     let file: () -> Void
 }
 
+/// What View ▸ Layout does in the merge editor that has the focus.
+struct EditorLayoutActions {
+    let layout: MergeEditorViewModel.EditorLayout
+    /// No in a window too narrow for three columns.
+    let enabled: Bool
+    let set: (MergeEditorViewModel.EditorLayout) -> Void
+    let toggle: () -> Void
+}
+
+/// View ▸ Layout, and Switch Layout (⌥⌘L), for the merge editor.
+struct LayoutCommands: View {
+    @FocusedValue(\.editorLayoutActions) private var actions
+
+    var body: some View {
+        Picker("Layout", selection: Binding(
+            get: { actions?.layout ?? .columns },
+            set: { actions?.set($0) }
+        )) {
+            Text("Three Columns").tag(MergeEditorViewModel.EditorLayout.columns)
+            Text("Stacked: Sides Above the Result").tag(MergeEditorViewModel.EditorLayout.stacked)
+        }
+        .disabled(actions?.enabled != true)
+        Button("Switch Layout") { actions?.toggle() }
+            .keyboardShortcut(Shortcut.switchLayout)
+            .disabled(actions?.enabled != true)
+    }
+}
+
 extension FocusedValues {
+    @Entry var editorLayoutActions: EditorLayoutActions?
     @Entry var openActions: OpenActions?
     @Entry var shortcutActions: ShortcutActions?
 }

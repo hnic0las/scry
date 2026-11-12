@@ -30,9 +30,14 @@ final class MergeEditorViewModel {
     var confirmingOverwrite = false
 
     @ObservationIgnored private let model: MergeModel
+    /// Where the layout choice is remembered, per user, not per repository.
+    @ObservationIgnored private let defaults: UserDefaults
 
-    init(model: MergeModel) {
+    /// `defaults` keeps the layout choice; tests pass their own suite.
+    init(model: MergeModel, defaults: UserDefaults = .standard) {
         self.model = model
+        self.defaults = defaults
+        preferredLayout = defaults.string(forKey: Self.layoutKey).flatMap(EditorLayout.init(rawValue:)) ?? .columns
         inspector = InspectorViewModel(model: model)
         inspector.onEditByHand = { [weak self] conflict in
             self?.startEditing(conflict)
@@ -43,6 +48,65 @@ final class MergeEditorViewModel {
 
     var title: String { model.header.fileName }
     var subtitle: String { model.header.summary ?? model.header.path }
+
+    // MARK: Layout
+
+    /// Ours, result and theirs side by side, or the two sides above the
+    /// result (SPEC: sides above, result below).
+    enum EditorLayout: String, CaseIterable {
+        case columns
+        case stacked
+    }
+
+    static let layoutKey = "mergeEditorLayout"
+    /// Below this window width the sides are too narrow beside the result,
+    /// so the editor stacks them whatever the choice.
+    static let narrowWidth = 1100.0
+
+    /// The user's choice, kept for the next file; three columns at first.
+    private(set) var preferredLayout: EditorLayout
+    /// The window is narrower than `narrowWidth`.
+    private(set) var isNarrow = false
+
+    /// The layout shown: stacked in a narrow window, without changing the
+    /// choice, so widening the window brings it back.
+    var layout: EditorLayout { isNarrow ? .stacked : preferredLayout }
+    var canSwitchLayout: Bool { !isNarrow }
+
+    /// The layout control's tooltip.
+    var layoutHelp: String {
+        isNarrow ? "Needs a wider window" : Shortcut.switchLayout.help()
+    }
+
+    func setLayout(_ layout: EditorLayout) {
+        guard canSwitchLayout, layout != preferredLayout else { return }
+        preferredLayout = layout
+        defaults.set(layout.rawValue, forKey: Self.layoutKey)
+    }
+
+    /// ⌥⌘L.
+    func switchLayout() {
+        setLayout(preferredLayout == .columns ? .stacked : .columns)
+    }
+
+    /// Reads the choice again: Settings may have changed it.
+    func reloadLayout() {
+        let stored = defaults.string(forKey: Self.layoutKey).flatMap(EditorLayout.init(rawValue:)) ?? .columns
+        if stored != preferredLayout { preferredLayout = stored }
+    }
+
+    func windowWidthChanged(_ width: Double) {
+        let narrow = width < Self.narrowWidth
+        if narrow != isNarrow { isNarrow = narrow }
+    }
+
+    /// The row to scroll to the top for a conflict: its lens row, or in
+    /// the stacked layout the row 4 above it, so the conflict sits a little
+    /// below the top of both areas with some context.
+    func scrollTarget(for conflict: Int) -> Int? {
+        guard let lens = lensRowIndex(of: conflict) else { return nil }
+        return layout == .stacked ? max(lens - 4, 0) : lens
+    }
 
     // MARK: Headers
 
@@ -85,6 +149,8 @@ final class MergeEditorViewModel {
         let badges: [LensBadge]
         /// The conflict is open for editing under this row.
         let editing: Bool
+        /// The take buttons work: no conflict is open for editing.
+        let canTake: Bool
     }
 
     struct CodeRowState {
@@ -158,7 +224,8 @@ final class MergeEditorViewModel {
             oursCommit: info?.oursCommit,
             theirsCommit: info?.theirsCommit,
             badges: info?.badges ?? [],
-            editing: model.editing == conflict
+            editing: model.editing == conflict,
+            canTake: model.editing == nil
         )
     }
 
@@ -179,6 +246,7 @@ final class MergeEditorViewModel {
         if canGoToPrevious { shortcuts.append(.previousConflict) }
         if canGoToNext { shortcuts.append(.nextConflict) }
         if !isEditing { shortcuts.append(contentsOf: [Shortcut.takeOurs, .takeBoth, .takeTheirs]) }
+        if canSwitchLayout { shortcuts.append(.switchLayout) }
         shortcuts.append(.toggleInspector)
         if canMarkResolved { shortcuts.append(.markAsResolved) }
         return shortcuts
@@ -296,6 +364,20 @@ final class MergeEditorViewModel {
               conflict.candidates.contains(where: { $0.id == candidate })
         else { return }
         model.choose(candidate, conflict: model.current)
+    }
+
+    /// A lens row's button: focuses its conflict, then takes the
+    /// candidate, so the button acts on the conflict it sits on.
+    func take(_ candidate: String, in conflict: Int) {
+        guard !isEditing else { return }
+        model.focus(conflict)
+        take(candidate)
+    }
+
+    func takeBoth(in conflict: Int) {
+        guard !isEditing else { return }
+        model.focus(conflict)
+        takeBoth()
     }
 
     /// Both sides, ours first; pressed again, theirs first.

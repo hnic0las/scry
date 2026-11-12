@@ -59,9 +59,14 @@ struct ConflictFile {
         )
     }
 
+    /// `defaults` defaults to a suite of its own, so tests never read or
+    /// change the user's settings.
     @MainActor
-    func editor() throws -> MergeEditorViewModel {
-        MergeEditorViewModel(model: try MergeModel(path: url.path))
+    func editor(defaults: UserDefaults? = nil) throws -> MergeEditorViewModel {
+        MergeEditorViewModel(
+            model: try MergeModel(path: url.path),
+            defaults: defaults ?? .isolated
+        )
     }
 }
 
@@ -78,5 +83,13 @@ extension MergeEditorViewModel {
     func chosen(_ conflict: Int) -> String? {
         focus(conflict)
         return inspector.editedCard?.id ?? inspector.cards.first { $0.selected }?.id
+    }
+}
+
+extension UserDefaults {
+    /// A suite of its own, so a test never reads or changes the user's
+    /// settings.
+    static var isolated: UserDefaults {
+        UserDefaults(suiteName: "ScryTests.\(UUID().uuidString)")!
     }
 }

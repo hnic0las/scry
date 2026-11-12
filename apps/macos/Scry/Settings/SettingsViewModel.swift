@@ -25,10 +25,28 @@ final class SettingsViewModel {
     /// Why git's configuration could not be read or written.
     private(set) var error: String?
 
-    @ObservationIgnored private let installer: MergetoolInstaller
+    /// The merge editor's layout, the one ⌥⌘L and the toolbar switch:
+    /// kept per user, read by every editor window.
+    var editorLayout: MergeEditorViewModel.EditorLayout {
+        didSet {
+            guard editorLayout != oldValue else { return }
+            defaults.set(editorLayout.rawValue, forKey: MergeEditorViewModel.layoutKey)
+        }
+    }
 
-    init(installer: MergetoolInstaller) {
+    @ObservationIgnored private let installer: MergetoolInstaller
+    @ObservationIgnored private let defaults: UserDefaults
+
+    /// `defaults` keeps the layout choice; tests pass their own suite.
+    init(installer: MergetoolInstaller, defaults: UserDefaults = .standard) {
         self.installer = installer
+        self.defaults = defaults
+        editorLayout = Self.storedLayout(in: defaults)
+    }
+
+    private static func storedLayout(in defaults: UserDefaults) -> MergeEditorViewModel.EditorLayout {
+        defaults.string(forKey: MergeEditorViewModel.layoutKey)
+            .flatMap(MergeEditorViewModel.EditorLayout.init(rawValue:)) ?? .columns
     }
 
     /// The command git will run for each conflicted file.
@@ -66,6 +84,9 @@ final class SettingsViewModel {
     /// Reads git's configuration again: it may have changed since the
     /// settings were last open.
     func refresh() {
+        // An editor may have switched the layout since.
+        let stored = Self.storedLayout(in: defaults)
+        if stored != editorLayout { editorLayout = stored }
         do {
             setup = try installer.setup()
             error = nil

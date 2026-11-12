@@ -4,19 +4,49 @@ import SwiftUI
 /// and making it git's merge tool.
 struct SettingsView: View {
     @State private var viewModel: SettingsViewModel
+    @State private var tab: SettingsTab
 
-    init(viewModel: SettingsViewModel = SettingsViewModel(installer: AppMergetoolInstaller())) {
+    enum SettingsTab: Hashable {
+        case cli, appearance
+    }
+
+    init(
+        viewModel: SettingsViewModel = SettingsViewModel(installer: AppMergetoolInstaller()),
+        tab: SettingsTab = .cli
+    ) {
         _viewModel = State(initialValue: viewModel)
+        _tab = State(initialValue: tab)
     }
 
     var body: some View {
-        TabView {
-            Tab("CLI", systemImage: "terminal") {
+        TabView(selection: $tab) {
+            Tab("CLI", systemImage: "terminal", value: .cli) {
                 cli
+            }
+            Tab("Appearance", systemImage: "rectangle.split.3x1", value: .appearance) {
+                appearance
             }
         }
         .frame(width: 520)
         .onAppear { viewModel.refresh() }
+    }
+
+    private var appearance: some View {
+        Form {
+            Section {
+                Picker("Merge editor layout", selection: $viewModel.editorLayout) {
+                    Text("Three columns").tag(MergeEditorViewModel.EditorLayout.columns)
+                    Text("Stacked: sides above the result").tag(MergeEditorViewModel.EditorLayout.stacked)
+                }
+                .pickerStyle(.radioGroup)
+            } footer: {
+                Text("Also in the editor's toolbar and View ▸ Layout (\(Shortcut.switchLayout.keys)). Windows narrower than 1,100 pt are always stacked.")
+                    .font(Metrics.caption)
+                    .foregroundStyle(Theme.Surfaces.textSecondary)
+            }
+        }
+        .formStyle(.grouped)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var cli: some View {
@@ -88,18 +118,25 @@ private struct PreviewInstaller: MergetoolInstaller {
 }
 
 #Preview("Settings, no merge tool") {
-    SettingsView(viewModel: SettingsViewModel(installer: PreviewInstaller(state: .notSet)))
+    SettingsView(viewModel: SettingsViewModel(installer: PreviewInstaller(state: .notSet), defaults: .preview))
 }
 
 #Preview("Settings, another tool") {
-    SettingsView(viewModel: SettingsViewModel(installer: PreviewInstaller(state: .other(tool: "opendiff"))))
+    SettingsView(viewModel: SettingsViewModel(installer: PreviewInstaller(state: .other(tool: "opendiff")), defaults: .preview))
 }
 
 #Preview("Settings, installed") {
-    SettingsView(viewModel: SettingsViewModel(installer: PreviewInstaller(state: .scry(current: true))))
+    SettingsView(viewModel: SettingsViewModel(installer: PreviewInstaller(state: .scry(current: true)), defaults: .preview))
         .preferredColorScheme(.dark)
 }
 
 #Preview("Settings, app moved") {
-    SettingsView(viewModel: SettingsViewModel(installer: PreviewInstaller(state: .scry(current: false))))
+    SettingsView(viewModel: SettingsViewModel(installer: PreviewInstaller(state: .scry(current: false)), defaults: .preview))
+}
+
+#Preview("Settings, appearance") {
+    SettingsView(
+        viewModel: SettingsViewModel(installer: PreviewInstaller(state: .notSet), defaults: .preview),
+        tab: .appearance
+    )
 }

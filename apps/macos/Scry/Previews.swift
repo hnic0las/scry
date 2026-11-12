@@ -51,7 +51,8 @@ enum PreviewSample {
               (try? text.write(to: url, atomically: true, encoding: .utf8)) != nil,
               let model = try? MergeModel(path: url.path)
         else { return nil }
-        let editor = MergeEditorViewModel(model: model)
+        // Settings of their own: a preview never changes the user's.
+        let editor = MergeEditorViewModel(model: model, defaults: .preview)
         setUp(editor)
         return editor
     }
@@ -81,7 +82,7 @@ private struct DemoEditor: View {
             if let (conflict, text) = edited {
                 model.edit(conflict, text: text)
             }
-            viewModel = MergeEditorViewModel(model: model)
+            viewModel = MergeEditorViewModel(model: model, defaults: .preview)
             if let editing {
                 viewModel?.startEditing(editing)
             }
@@ -125,4 +126,12 @@ private struct DemoEditor: View {
         choose: [(0, "theirs")],
         edited: (1, "func cancel() {\n    queue.cancelAll()\n}\n\nfunc pause() {\n    queue.suspend()")
     )
+}
+
+extension UserDefaults {
+    /// A suite of its own, so a preview never reads or changes the user's
+    /// settings.
+    static var preview: UserDefaults {
+        UserDefaults(suiteName: "ScryPreview.\(UUID().uuidString)")!
+    }
 }

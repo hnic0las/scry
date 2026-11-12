@@ -20,16 +20,25 @@ struct MergeEditorView: View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
                 GeometryReader { geometry in
-                    let widths = PaneWidths(total: geometry.size.width)
-                    VStack(spacing: 0) {
-                        PaneHeaders(
-                            ours: viewModel.oursHeader,
-                            result: viewModel.resultHeader,
-                            theirs: viewModel.theirsHeader,
-                            widths: widths
-                        )
-                        Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1)
-                        rowsList(widths: widths)
+                    Group {
+                        if viewModel.layout == .stacked {
+                            StackedPanes(viewModel: viewModel, scroll: scroll, size: geometry.size)
+                        } else {
+                            let widths = PaneWidths(total: geometry.size.width)
+                            VStack(spacing: 0) {
+                                PaneHeaders(
+                                    ours: viewModel.oursHeader,
+                                    result: viewModel.resultHeader,
+                                    theirs: viewModel.theirsHeader,
+                                    widths: widths
+                                )
+                                Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1)
+                                rowsList(widths: widths)
+                            }
+                        }
+                    }
+                    .onChange(of: maxScrollX(width: geometry.size.width), initial: true) { _, maximum in
+                        scroll.maximum = maximum
                     }
                 }
                 .overlay(alignment: .bottom) { HintStrip(shortcuts: viewModel.hintStrip) }
@@ -48,6 +57,19 @@ struct MergeEditorView: View {
                     .frame(width: Metrics.inspectorWidth)
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            // Settings ▸ Appearance may have changed the layout.
+            viewModel.reloadLayout()
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+            viewModel.windowWidthChanged(Double(width))
+        }
+        .focusedSceneValue(\.editorLayoutActions, EditorLayoutActions(
+            layout: viewModel.layout,
+            enabled: viewModel.canSwitchLayout,
+            set: { viewModel.setLayout($0) },
+            toggle: { viewModel.switchLayout() }
+        ))
         .navigationTitle(viewModel.title)
         .navigationSubtitle(viewModel.subtitle)
         .toolbar { toolbar }
@@ -108,19 +130,18 @@ struct MergeEditorView: View {
                     scroll.scroll(by: delta)
                 }
             }
-            .onChange(of: maxScrollX(widths), initial: true) { _, maximum in
-                scroll.maximum = maximum
-            }
             .onChange(of: viewModel.currentConflict) { _, conflict in
-                if let row = viewModel.lensRowIndex(of: conflict) {
+                if let row = viewModel.scrollTarget(for: conflict) {
                     withAnimation { proxy.scrollTo(row, anchor: .top) }
                 }
             }
         }
     }
 
-    /// Far enough for the longest line to show whole in the narrowest pane.
-    private func maxScrollX(_ widths: PaneWidths) -> CGFloat {
+    /// Far enough for the longest line to show whole in the narrowest pane:
+    /// a side, a column or half the top area.
+    private func maxScrollX(width: CGFloat) -> CGFloat {
+        let widths = viewModel.layout == .stacked ? PaneWidths.stackedSides(total: width) : PaneWidths(total: width)
         let longest = CGFloat(viewModel.longestLine) * Metrics.codeCharacterWidth + Metrics.clipFadeWidth
         return max(longest - widths.code(widths.side), 0)
     }
@@ -193,6 +214,20 @@ struct MergeEditorView: View {
         }
 
         ToolbarItem {
+            Picker("Layout", selection: Binding(get: { viewModel.layout }, set: { viewModel.setLayout($0) })) {
+                Image(systemName: "rectangle.split.3x1")
+                    .accessibilityLabel("Three columns")
+                    .tag(MergeEditorViewModel.EditorLayout.columns)
+                Image(systemName: "rectangle.split.1x2")
+                    .accessibilityLabel("Stacked: sides above the result")
+                    .tag(MergeEditorViewModel.EditorLayout.stacked)
+            }
+            .pickerStyle(.segmented)
+            .disabled(!viewModel.canSwitchLayout)
+            .help(viewModel.layoutHelp)
+        }
+
+        ToolbarItem {
             Button { showInspector.toggle() } label: {
                 Image(systemName: "sidebar.right")
             }
@@ -257,15 +292,34 @@ struct MergeEditorView: View {
 }
 
 /// Column widths: ours 1fr, connector, result 1.25fr, connector, theirs 1fr.
+/// Stacked, each area has its own: the sides halves of the top area with a
+/// hairline between them, the result the whole bottom area.
 struct PaneWidths {
     let side: CGFloat
     let result: CGFloat
-    let connector = Metrics.connectorWidth
+    let connector: CGFloat
 
     init(total: CGFloat) {
         let flexible = max(total - 2 * Metrics.connectorWidth, 0)
         side = flexible / 3.25
         result = flexible * 1.25 / 3.25
+        connector = Metrics.connectorWidth
+    }
+
+    init(side: CGFloat, result: CGFloat, connector: CGFloat) {
+        self.side = side
+        self.result = result
+        self.connector = connector
+    }
+
+    /// The stacked layout's top area: ours and theirs, 1 pt apart.
+    static func stackedSides(total: CGFloat) -> PaneWidths {
+        PaneWidths(side: max(total - 1, 0) / 2, result: 0, connector: 1)
+    }
+
+    /// The stacked layout's bottom area: the result, full width.
+    static func stackedResult(total: CGFloat) -> PaneWidths {
+        PaneWidths(side: 0, result: total, connector: 0)
     }
 
     /// The width left for code in a pane, after the line-number and mark
@@ -280,17 +334,29 @@ struct PaneHeaders: View {
     let result: MergeEditorViewModel.PaneHeader
     let theirs: MergeEditorViewModel.PaneHeader
     let widths: PaneWidths
+    /// The headers of the panes shown: all three, or one stacked area.
+    var part: RowPart = .all
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            header(ours, color: Theme.Sides.ours, symbol: "circle.fill")
-            .frame(width: widths.side)
-            Color.clear.frame(width: widths.connector)
-            header(result, color: Theme.Sides.result, symbol: "diamond.fill")
-            .frame(width: widths.result)
-            Color.clear.frame(width: widths.connector)
-            header(theirs, color: Theme.Sides.theirs, symbol: "square.fill")
-            .frame(width: widths.side)
+            if part != .result {
+                header(ours, color: Theme.Sides.ours, symbol: "circle.fill")
+                    .frame(width: widths.side)
+                if part == .sides {
+                    Rectangle().fill(Theme.Surfaces.hairline).frame(width: widths.connector)
+                } else {
+                    Color.clear.frame(width: widths.connector)
+                }
+            }
+            if part != .sides {
+                header(result, color: Theme.Sides.result, symbol: "diamond.fill")
+                    .frame(width: widths.result)
+            }
+            if part != .result {
+                if part == .all { Color.clear.frame(width: widths.connector) }
+                header(theirs, color: Theme.Sides.theirs, symbol: "square.fill")
+                    .frame(width: widths.side)
+            }
         }
         // The spacer columns would otherwise stretch the row to the whole
         // editor height.
@@ -396,6 +462,21 @@ enum SideShape {
         editor.take("theirs")
         editor.markResolved()
     }) {
+        MergeEditorView(viewModel: editor)
+    }
+}
+
+#Preview("Editor, stacked", traits: .fixedLayout(width: 1440, height: 700)) {
+    if let editor = PreviewSample.editor({ editor in
+        editor.setLayout(.stacked)
+        editor.take("theirs")
+    }) {
+        MergeEditorView(viewModel: editor)
+    }
+}
+
+#Preview("Editor, narrow window", traits: .fixedLayout(width: 1000, height: 700)) {
+    if let editor = PreviewSample.editor({ $0.windowWidthChanged(1000) }) {
         MergeEditorView(viewModel: editor)
     }
 }
