@@ -198,6 +198,7 @@ struct RootView: View {
             KeyboardShortcutsView(viewModel: shortcuts) { viewModel.closeShortcuts() }
         }
         .background { WindowCloseGuard { viewModel.shouldClose() } }
+        .background { TitleBarDoubleClick() }
         .alert("Close without writing?", isPresented: $viewModel.confirmingClose) {
             Button("Close Without Writing", role: .destructive) {
                 viewModel.closeWithoutWriting()
