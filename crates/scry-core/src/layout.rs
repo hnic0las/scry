@@ -13,7 +13,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::conflict::Segment;
 use crate::highlight::Span;
 use crate::session::MergeSession;
-use crate::words::{self, LineChange};
+use crate::words::LineChange;
 
 /// Tab stops every this many columns, as most editors show code.
 pub const TAB_WIDTH: usize = 4;
@@ -291,13 +291,7 @@ impl MergeSession {
         ours: &str,
         theirs: &str,
     ) {
-        let base = self
-            .conflict(index)
-            .base
-            .as_ref()
-            .map(|base| base.text.as_str());
-        let mut ours_changes = words::line_changes(base, ours);
-        let mut theirs_changes = words::line_changes(base, theirs);
+        let (ours_changes, theirs_changes) = self.line_changes(index);
         let ours: Vec<&str> = ours.lines().collect();
         let theirs: Vec<&str> = theirs.lines().collect();
         let chosen_text = self.chosen_text(index);
@@ -316,7 +310,7 @@ impl MergeSession {
                     text,
                     CellKind::Conflict,
                     highlights.ours,
-                    std::mem::replace(&mut ours_changes[row], LineChange::Unchanged),
+                    ours_changes[row].clone(),
                 ),
                 None => empty(CellKind::Spacer),
             };
@@ -326,7 +320,7 @@ impl MergeSession {
                     text,
                     CellKind::Conflict,
                     highlights.theirs,
-                    std::mem::replace(&mut theirs_changes[row], LineChange::Unchanged),
+                    theirs_changes[row].clone(),
                 ),
                 None => empty(CellKind::Spacer),
             };

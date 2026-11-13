@@ -15,6 +15,9 @@ final class MergeModel {
     /// The widest line of any pane, in columns: how far the panes can
     /// scroll sideways.
     private(set) var longestLine = 0
+    /// Every conflict; only the focused one is sure to have its candidates
+    /// checked by parsing (`checked`), since checking them all took seconds
+    /// on a large file.
     private(set) var conflicts: [ConflictInfo] = []
     private(set) var status: Status
     /// The focused conflict, from 0.
@@ -34,6 +37,10 @@ final class MergeModel {
     /// focus, the conflict being edited), so view models can keep what
     /// they derive from it until then.
     private(set) var revision = 0
+    /// Goes up whenever the core's snapshot changes (rows, conflicts), but
+    /// not for a change of focus: the editor's rows depend on it, and only
+    /// the lens rows depend on the focus.
+    private(set) var snapshot = 0
 
     @ObservationIgnored private let document: MergeDocument
 
@@ -89,6 +96,7 @@ final class MergeModel {
     func focus(_ index: Int) {
         guard conflicts.indices.contains(index), index != current else { return }
         current = index
+        checkCurrent()
         revision += 1
     }
 
@@ -137,6 +145,7 @@ final class MergeModel {
     func startEditing(_ index: Int) {
         guard conflicts.indices.contains(index) else { return }
         current = index
+        checkCurrent()
         editing = index
         revision += 1
     }
@@ -205,13 +214,25 @@ final class MergeModel {
 
     private func refresh() {
         revision += 1
+        snapshot += 1
         rows = document.rows(showBase: showsBase)
         longestLine = rows.reduce(0) { longest, row in
             guard case .code(let ours, let result, let theirs, _) = row else { return longest }
             return max(longest, Int(ours.columns), Int(result.columns), Int(theirs.columns))
         }
         conflicts = document.conflicts()
+        checkCurrent()
         status = document.status()
+    }
+
+    /// Reads the focused conflict with its candidates checked, once: the
+    /// core keeps the check.
+    private func checkCurrent() {
+        guard conflicts.indices.contains(current), !conflicts[current].checked,
+              let checked = document.conflict(index: UInt32(current))
+        else { return }
+        conflicts[current] = checked
+        snapshot += 1
     }
 }
 

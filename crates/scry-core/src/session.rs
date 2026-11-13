@@ -10,6 +10,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use crate::command::{Command, CommandError, Event};
 use crate::conflict::{self, Conflict, ParseError, Segment};
@@ -20,6 +21,7 @@ use crate::operation::{self, Operation};
 use crate::presentation;
 use crate::resolution::{self, Analysis, Candidate, CandidateKind};
 use crate::syntax::{Language, ParseCheck, ParsedFile};
+use crate::words::{self, LineChange};
 
 /// The side panes of the merge editor; the result pane has its own
 /// methods, since it depends on the choices.
@@ -67,6 +69,17 @@ pub struct Edit {
     pub parse: ParseCheck,
 }
 
+/// The result pane's file as last highlighted: each conflict's chosen text
+/// (empty while unresolved), the file parsed, and its spans by line.
+struct ResultPaint {
+    texts: Vec<String>,
+    parsed: ParsedFile,
+    spans: Vec<Vec<Span>>,
+}
+
+/// A conflict's line changes against its base: ours, then theirs.
+pub(crate) type SideChanges = (Vec<LineChange>, Vec<LineChange>);
+
 /// Conflicts with a choice each: the choices a command sets, or the ones
 /// they replaced.
 type Change = Vec<(usize, Option<Choice>)>;
@@ -94,7 +107,20 @@ pub enum Origin {
 pub struct MergeSession {
     segments: Vec<Segment>,
     conflicts: Vec<Conflict>,
+    /// Each conflict's candidates as the rules give them, unchecked.
     analyses: Vec<Analysis>,
+    /// Each conflict's candidates once checked by parsing, with the
+    /// "closed" variants of "both" added: computed the first time they are
+    /// asked for, since checking every conflict of a large file up front
+    /// took seconds.
+    checked: Vec<OnceLock<Analysis>>,
+    /// Each conflict's line changes, ours then theirs, against its base:
+    /// the sides never change, so they are worked out once, when first
+    /// shown.
+    line_changes: Vec<OnceLock<SideChanges>>,
+    /// The result pane as last highlighted, so a choice repaints only the
+    /// lines it changes: painting a large file took most of each refresh.
+    result_paint: Mutex<Option<ResultPaint>>,
     choices: Vec<Option<Choice>>,
     /// Changes to undo, the latest last, and changes undone that can be
     /// redone. A new change clears the redo history, as in any editor.
@@ -182,11 +208,11 @@ impl MergeSession {
         language: Option<Language>,
     ) -> MergeSession {
         let conflicts: Vec<Conflict> = conflict::conflicts(&segments).cloned().collect();
-        let mut analyses = resolution::analyze(&segments);
+        let analyses = resolution::analyze(&segments);
         let (ours_text, ranges) = ours_file(&segments);
         let reference = language.and_then(|language| ParsedFile::new(language, ours_text));
         let checkable = match &reference {
-            Some(reference) => verify(&segments, &conflicts, &mut analyses, reference, &ranges),
+            Some(reference) => parses_both_ways(&conflicts, reference, &ranges),
             None => false,
         };
         let choices = vec![None; conflicts.len()];
@@ -195,6 +221,9 @@ impl MergeSession {
         let mut session = MergeSession {
             segments,
             conflicts,
+            checked: analyses.iter().map(|_| OnceLock::new()).collect(),
+            line_changes: analyses.iter().map(|_| OnceLock::new()).collect(),
+            result_paint: Mutex::new(None),
             analyses,
             choices,
             undo_history: Vec::new(),
@@ -260,7 +289,125 @@ impl MergeSession {
         let texts: Vec<&str> = (0..self.conflicts.len())
             .map(|index| self.chosen_text(index).unwrap_or(""))
             .collect();
-        self.highlight_variant(&texts)
+        let Some(highlighter) = &self.highlighter else {
+            return Vec::new();
+        };
+        let mut paint = self
+            .result_paint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(last) = paint.as_ref()
+            && let Some(next) = self.repaint(highlighter, last, &texts)
+        {
+            let spans = next.spans.clone();
+            *paint = Some(next);
+            return spans;
+        }
+        let Some(parsed) = self.variant(&texts) else {
+            return Vec::new();
+        };
+        let spans = highlighter.lines_in(&parsed, 0..parsed.text().len());
+        *paint = Some(ResultPaint {
+            texts: texts.iter().map(|text| text.to_string()).collect(),
+            parsed,
+            spans: spans.clone(),
+        });
+        spans
+    }
+
+    /// The result pane painted again from `last` for the new chosen
+    /// `texts`: only the conflicts whose text changed are parsed again, and
+    /// only the lines whose syntax may differ are painted; the others keep
+    /// their spans. `None` when that cannot be done safely.
+    fn repaint(
+        &self,
+        highlighter: &Highlighter,
+        last: &ResultPaint,
+        texts: &[&str],
+    ) -> Option<ResultPaint> {
+        // Each changed conflict's bytes in the last result file.
+        let mut replacements: Vec<(Range<usize>, &str)> = Vec::new();
+        let mut offset = 0;
+        let mut index = 0;
+        for segment in &self.segments {
+            match segment {
+                Segment::Common(common) => offset += common.len(),
+                Segment::Conflict(_) => {
+                    let old = &last.texts[index];
+                    if old != texts[index] {
+                        replacements.push((offset..offset + old.len(), texts[index]));
+                    }
+                    offset += old.len();
+                    index += 1;
+                }
+            }
+        }
+        if replacements.is_empty() {
+            return Some(ResultPaint {
+                texts: last.texts.clone(),
+                parsed: last.parsed.clone(),
+                spans: last.spans.clone(),
+            });
+        }
+        let (parsed, changed) = last.parsed.with_changes(&replacements)?;
+        let line_count = parsed.text().lines().count();
+
+        // The unchanged lines keep their spans, shifted by the lines each
+        // replacement adds or removes; the replaced ones are painted.
+        let mut spans: Vec<Option<Vec<Span>>> = Vec::with_capacity(line_count);
+        let mut old_row = 0;
+        let mut shift: isize = 0;
+        for (range, text) in &replacements {
+            let new_start = (range.start as isize + shift) as usize;
+            let old_rows = last.parsed.row(range.start)..last.parsed.row(range.end);
+            let new_rows = parsed.row(new_start)..parsed.row(new_start + text.len());
+            while spans.len() < new_rows.start {
+                spans.push(Some(last.spans.get(old_row)?.clone()));
+                old_row += 1;
+            }
+            spans.extend(new_rows.map(|_| None));
+            old_row = old_rows.end;
+            shift += text.len() as isize - range.len() as isize;
+        }
+        while spans.len() < line_count {
+            spans.push(Some(last.spans.get(old_row)?.clone()));
+            old_row += 1;
+        }
+        if spans.len() != line_count || old_row != last.spans.len() {
+            return None;
+        }
+        for range in changed {
+            let end = parsed.row(range.end.saturating_sub(1).max(range.start));
+            for row in parsed.row(range.start)..=end {
+                if let Some(line) = spans.get_mut(row) {
+                    *line = None;
+                }
+            }
+        }
+
+        // Paint each run of lines left without spans in one go.
+        let mut row = 0;
+        while row < spans.len() {
+            if spans[row].is_some() {
+                row += 1;
+                continue;
+            }
+            let start = row;
+            while row < spans.len() && spans[row].is_none() {
+                row += 1;
+            }
+            let painted = highlighter.lines_in(&parsed, parsed.line_bytes(start..row));
+            for (offset, line) in painted.into_iter().enumerate() {
+                if let Some(slot) = spans.get_mut(start + offset) {
+                    *slot = Some(line);
+                }
+            }
+        }
+        Some(ResultPaint {
+            texts: texts.iter().map(|text| text.to_string()).collect(),
+            parsed,
+            spans: spans.into_iter().map(Option::unwrap_or_default).collect(),
+        })
     }
 
     /// The text a side pane shows, as one file: the common text with each
@@ -316,7 +463,10 @@ impl MergeSession {
     /// text written by hand; `None` while unresolved.
     pub fn chosen_text(&self, index: usize) -> Option<&str> {
         match self.choices[index].as_ref()? {
-            Choice::Candidate(kind) => self.analyses[index]
+            // A closed "both" is only offered once checked.
+            Choice::Candidate(kind) => self.checked[index]
+                .get()
+                .unwrap_or(&self.analyses[index])
                 .candidates
                 .iter()
                 .find(|candidate| candidate.kind == *kind)
@@ -414,8 +564,89 @@ impl MergeSession {
         &self.conflicts[index]
     }
 
+    /// Conflict `index`'s candidates, checked by parsing when the file can
+    /// be checked; the first call for a conflict checks it.
     pub fn analysis(&self, index: usize) -> &Analysis {
-        &self.analyses[index]
+        let Some(reference) = self.reference.as_ref().filter(|_| self.checkable) else {
+            return &self.analyses[index];
+        };
+        self.checked[index].get_or_init(|| {
+            check_conflict(
+                &self.segments,
+                &self.conflicts,
+                &self.analyses[index],
+                reference,
+                &self.ranges,
+                index,
+            )
+        })
+    }
+
+    /// Conflict `index`'s line changes against its base, ours then theirs.
+    pub(crate) fn line_changes(&self, index: usize) -> &SideChanges {
+        self.line_changes[index].get_or_init(|| {
+            let conflict = &self.conflicts[index];
+            let base = conflict.base.as_ref().map(|base| base.text.as_str());
+            (
+                words::line_changes(base, &conflict.ours.text),
+                words::line_changes(base, &conflict.theirs.text),
+            )
+        })
+    }
+
+    /// Conflict `index`'s candidates as far as they are known: checked once
+    /// `analysis` checked them, as the rules give them before.
+    pub fn analysis_so_far(&self, index: usize) -> &Analysis {
+        self.checked[index].get().unwrap_or(&self.analyses[index])
+    }
+
+    /// Whether conflict `index`'s candidates are checked, or never will be
+    /// (a file the grammar cannot check).
+    pub fn is_checked(&self, index: usize) -> bool {
+        !self.checkable || self.checked[index].get().is_some()
+    }
+
+    /// Checks every conflict not checked yet, spread over the processor's
+    /// cores: for a front end that shows them all at once, such as the CLI.
+    pub fn check_all(&self) {
+        let Some(reference) = self.reference.as_ref().filter(|_| self.checkable) else {
+            return;
+        };
+        let left: Vec<usize> = (0..self.conflicts.len())
+            .filter(|index| self.checked[*index].get().is_none())
+            .collect();
+        let threads = std::thread::available_parallelism().map_or(1, |count| count.get());
+        let per_thread = left.len().div_ceil(threads).max(1);
+        let results: Vec<(usize, Analysis)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = left
+                .chunks(per_thread)
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .map(|&index| {
+                                let analysis = check_conflict(
+                                    &self.segments,
+                                    &self.conflicts,
+                                    &self.analyses[index],
+                                    reference,
+                                    &self.ranges,
+                                    index,
+                                );
+                                (index, analysis)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().unwrap_or_default())
+                .collect()
+        });
+        for (index, analysis) in results {
+            let _ = self.checked[index].set(analysis);
+        }
     }
 
     pub fn choice(&self, index: usize) -> Option<&Choice> {
@@ -442,8 +673,16 @@ impl MergeSession {
         index: usize,
         kind: CandidateKind,
     ) -> Result<Vec<Event>, ChooseError> {
-        let Some(analysis) = self.analyses.get(index) else {
+        if index >= self.analyses.len() {
             return Err(ChooseError::NoSuchConflict(index + 1));
+        }
+        // The rules' candidates are offered checked or not; a closed "both"
+        // only once checked.
+        let offered = |analysis: &Analysis| analysis.candidates.iter().any(|c| c.kind == kind);
+        let analysis = if offered(self.analysis_so_far(index)) {
+            self.analysis_so_far(index)
+        } else {
+            self.analysis(index)
         };
         if !analysis
             .candidates
@@ -568,14 +807,9 @@ impl MergeSession {
         if !self.checkable {
             return ParseCheck::NotChecked;
         }
-        let mut texts: Vec<&str> = self
-            .conflicts
-            .iter()
-            .map(|c| c.ours.text.as_str())
-            .collect();
-        texts[index] = text;
-        match self.variant(&texts) {
-            Some(parsed) => parsed.check(),
+        // The other conflicts stay as ours, as in the reference file.
+        match &self.reference {
+            Some(reference) => reference.check_with(&[(self.ranges[index].clone(), text)]),
             None => ParseCheck::NotChecked,
         }
     }
@@ -749,18 +983,12 @@ fn line_break(text: &str) -> &'static str {
     if crlf > lf { "\r\n" } else { "\n" }
 }
 
-/// Checks every candidate by parsing the whole file with it in place, and
-/// adds the "closed" variants of "both" where they repair it.
-///
-/// Only when the file parses both with every conflict taken from ours and
-/// with every conflict taken from theirs: grammars reject some valid code
-/// (newer syntax, macros), and a failure must never be blamed on a candidate
-/// for that. The other conflicts are filled with ours while one is checked.
-/// Returns whether the file could be checked.
-fn verify(
-    segments: &[Segment],
+/// Whether candidates can be checked by parsing: only when the file
+/// parses both with every conflict taken from ours and with every conflict
+/// taken from theirs. Grammars reject some valid code (newer syntax,
+/// macros), and a failure must never be blamed on a candidate for that.
+fn parses_both_ways(
     conflicts: &[Conflict],
-    analyses: &mut [Analysis],
     reference: &ParsedFile,
     ranges: &[Range<usize>],
 ) -> bool {
@@ -769,43 +997,41 @@ fn verify(
         .cloned()
         .zip(conflicts.iter().map(|c| c.theirs.text.as_str()))
         .collect();
-    let theirs_parses = reference
-        .with(&theirs)
-        .is_some_and(|parsed| parsed.check() == ParseCheck::Parses);
-    if reference.check() != ParseCheck::Parses || !theirs_parses {
-        return false;
-    }
+    reference.check() == ParseCheck::Parses && reference.check_with(&theirs) == ParseCheck::Parses
+}
 
-    // The other conflicts stay as ours while one is checked.
-    let check = |index: usize, text: &str| match reference.with(&[(ranges[index].clone(), text)]) {
-        Some(parsed) => parsed.check(),
-        None => ParseCheck::NotChecked,
-    };
-    let verify_conflict = |index: usize, analysis: &mut Analysis| {
-        add_closed_candidates(segments, &conflicts[index], index, analysis, &|text| {
-            check(index, text) == ParseCheck::Parses
-        });
-        for candidate in &mut analysis.candidates {
-            candidate.parse = check(index, &candidate.text);
+/// Conflict `index`'s candidates checked by parsing the whole file with
+/// each in place, the other conflicts as ours, and with the "closed"
+/// variants of "both" added where they repair it. A text is parsed once,
+/// and ours is the reference file itself, which parses.
+fn check_conflict(
+    segments: &[Segment],
+    conflicts: &[Conflict],
+    analysis: &Analysis,
+    reference: &ParsedFile,
+    ranges: &[Range<usize>],
+    index: usize,
+) -> Analysis {
+    let mut analysis = analysis.clone();
+    let checked = std::cell::RefCell::new(Vec::<(String, ParseCheck)>::new());
+    let check = |text: &str| -> ParseCheck {
+        if text == conflicts[index].ours.text {
+            return ParseCheck::Parses;
         }
-    };
-
-    // Each conflict is checked on its own, so they are shared between the
-    // processor's cores: a large file with many conflicts (a string
-    // catalog) opens several times faster.
-    let threads = std::thread::available_parallelism().map_or(1, |count| count.get());
-    let per_thread = analyses.len().div_ceil(threads).max(1);
-    std::thread::scope(|scope| {
-        for (chunk_index, chunk) in analyses.chunks_mut(per_thread).enumerate() {
-            let verify_conflict = &verify_conflict;
-            scope.spawn(move || {
-                for (offset, analysis) in chunk.iter_mut().enumerate() {
-                    verify_conflict(chunk_index * per_thread + offset, analysis);
-                }
-            });
+        if let Some((_, known)) = checked.borrow().iter().find(|(seen, _)| seen == text) {
+            return *known;
         }
+        let result = reference.check_with(&[(ranges[index].clone(), text)]);
+        checked.borrow_mut().push((text.to_string(), result));
+        result
+    };
+    add_closed_candidates(segments, &conflicts[index], index, &mut analysis, &|text| {
+        check(text) == ParseCheck::Parses
     });
-    true
+    for candidate in &mut analysis.candidates {
+        candidate.parse = check(&candidate.text);
+    }
+    analysis
 }
 
 /// The file with every conflict taken from ours, and each conflict's byte
@@ -1732,6 +1958,86 @@ mod tests {
             )
         );
         assert_eq!(session.merged_check(), ParseCheck::Parses);
+    }
+
+    /// The result pane is repainted only where a choice changes it; after any sequence of
+    /// choices, undos and hand edits, its spans must be what painting the whole result
+    /// gives, including lines after a conflict whose text opens a string.
+    #[test]
+    fn the_result_repainted_in_part_matches_a_full_paint() {
+        let text = "let a = 1\n\
+            <<<<<<< ours\nlet b = 2\nlet c = 3\n||||||| base\nlet b = 0\n=======\nlet b = \"x\"\n>>>>>>> theirs\n\
+            func f() {\n    print(a)\n}\n\
+            <<<<<<< ours\nlet d = 4\n||||||| base\nlet d = 0\n=======\nlet d = 5\nlet e = 6\nlet f = 7\n>>>>>>> theirs\n\
+            let z = \"end\"\n";
+        let mut session = MergeSession::from_text(text, Some(Language::Swift)).unwrap();
+        let full = |session: &MergeSession| {
+            let texts: Vec<&str> = (0..session.conflict_count())
+                .map(|index| session.chosen_text(index).unwrap_or(""))
+                .collect();
+            session.highlight_variant(&texts)
+        };
+        assert_eq!(session.result_spans(), full(&session));
+        let steps = [
+            Command::Choose {
+                conflict: 1,
+                candidate: CandidateKind::Theirs,
+            },
+            Command::Choose {
+                conflict: 0,
+                candidate: CandidateKind::Ours,
+            },
+            Command::Choose {
+                conflict: 0,
+                candidate: CandidateKind::Theirs,
+            },
+            Command::Choose {
+                conflict: 1,
+                candidate: CandidateKind::Neither,
+            },
+            Command::Edit {
+                conflict: 0,
+                text: String::from("let s = \"open\nlet t = 1\n"),
+            },
+            Command::Undo,
+            Command::Choose {
+                conflict: 1,
+                candidate: CandidateKind::OursThenTheirs,
+            },
+        ];
+        for step in steps {
+            session.apply(step.clone()).unwrap();
+            assert_eq!(session.result_spans(), full(&session), "after {step:?}");
+        }
+    }
+
+    /// Candidates are checked the first time a conflict is asked for, not on opening:
+    /// checking every conflict of a large catalog up front took seconds. A closed "both"
+    /// can be chosen before anything asked, and the check is kept.
+    #[test]
+    fn candidates_are_checked_when_first_asked_for() {
+        let mut session = MergeSession::from_text(SWIFT, Some(Language::Swift)).unwrap();
+        assert!(!session.is_checked(0));
+        assert!(
+            session
+                .analysis_so_far(0)
+                .candidates
+                .iter()
+                .all(|c| c.parse == ParseCheck::NotChecked)
+        );
+        session
+            .choose(0, CandidateKind::OursThenTheirsClosed)
+            .unwrap();
+        assert!(session.is_checked(0));
+        assert_eq!(session.merged_check(), ParseCheck::Parses);
+
+        let session = MergeSession::from_text(SWIFT, Some(Language::Swift)).unwrap();
+        session.check_all();
+        assert!(session.is_checked(0));
+        assert_eq!(
+            session.analysis_so_far(0).candidates.len(),
+            session.analysis(0).candidates.len()
+        );
     }
 
     /// Closed variants are offered only when they repair something: not when plain "both"

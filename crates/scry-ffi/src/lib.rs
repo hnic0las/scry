@@ -319,6 +319,10 @@ pub struct ConflictInfo {
     /// git wrote the conflict with its base (diff3 markers, or a merge
     /// tool's base file), so it can be shown.
     pub has_base: bool,
+    /// The candidates are checked by parsing (or the file cannot be).
+    /// `conflicts` leaves them unchecked until `conflict` asks for one:
+    /// checking every conflict of a large file took seconds.
+    pub checked: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -440,11 +444,20 @@ impl MergeDocument {
         self.lock().rows(show_base).into_iter().map(row).collect()
     }
 
+    /// Every conflict, its candidates as far as they are checked.
     pub fn conflicts(&self) -> Vec<ConflictInfo> {
         let session = self.lock();
         (0..session.conflict_count())
-            .map(|index| self.conflict_info(&session, index))
+            .map(|index| self.conflict_info(&session, index, false))
             .collect()
+    }
+
+    /// One conflict, its candidates checked by parsing: for the focused
+    /// conflict. `None` out of range.
+    pub fn conflict(&self, index: u32) -> Option<ConflictInfo> {
+        let session = self.lock();
+        let index = index as usize;
+        (index < session.conflict_count()).then(|| self.conflict_info(&session, index, true))
     }
 
     /// Runs a command: the only way the app changes the merge. Returns
@@ -539,8 +552,13 @@ impl MergeDocument {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn conflict_info(&self, session: &MergeSession, index: usize) -> ConflictInfo {
-        let view = session.conflict_view(index, &self.header.ours.label, &self.header.theirs.label);
+    fn conflict_info(&self, session: &MergeSession, index: usize, check: bool) -> ConflictInfo {
+        let (ours, theirs) = (&self.header.ours.label, &self.header.theirs.label);
+        let view = if check {
+            session.conflict_view(index, ours, theirs)
+        } else {
+            session.conflict_view_so_far(index, ours, theirs)
+        };
         ConflictInfo {
             id: view.id,
             number: view.number as u32,
@@ -554,6 +572,7 @@ impl MergeDocument {
             ours_commit: self.lens_commit(index, true),
             theirs_commit: self.lens_commit(index, false),
             has_base: session.conflict(index).base.is_some(),
+            checked: view.checked,
         }
     }
 
@@ -1776,12 +1795,16 @@ mod tests {
             Err(ScryError::Failed { .. })
         ));
 
+        // The list leaves candidates unchecked; the focused conflict is
+        // asked for checked.
         let conflicts = document.conflicts();
         assert_eq!(conflicts[0].candidates[1].id, "theirs");
-        assert!(matches!(
-            conflicts[0].candidates[1].parse,
-            ParseStatus::Parses
-        ));
+        assert!(!conflicts[0].checked);
+        let conflict = document.conflict(0).unwrap();
+        assert!(conflict.checked);
+        assert!(matches!(conflict.candidates[1].parse, ParseStatus::Parses));
+        assert!(document.conflicts()[0].checked);
+        assert!(document.conflict(1).is_none());
         choose(&document, "theirs").unwrap();
         assert_eq!(document.status().resolved, 1);
         assert!(choose(&document, "nonsense").is_err());

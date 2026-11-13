@@ -106,6 +106,24 @@ enum Pane {
     case ours, result, theirs
 }
 
+/// A line's code, coloured once: SwiftUI evaluates it again only when the
+/// cell or the tint changes, not on every sideways-scroll tick that moves it.
+struct CellCode: View, Equatable {
+    let cell: Cell
+    let wordTint: Color?
+
+    var body: some View {
+        // Base lines are grey italic, unhighlighted, so they never read as
+        // the result.
+        Text(cell.kind == .base ? AttributedString(cell.text) : cell.highlighted(wordTint: wordTint))
+            .font(Metrics.code)
+            .italic(cell.kind == .base)
+            .foregroundStyle(Theme.Sides.base)
+            .lineLimit(1)
+            .fixedSize()
+    }
+}
+
 struct CellView: View {
     let cell: Cell
     let pane: Pane
@@ -156,14 +174,8 @@ struct CellView: View {
                 .foregroundStyle(Theme.Surfaces.textSecondary)
         default:
             // No wrapping: rows stay one line high so the panes stay aligned.
-            // Base lines are grey italic, unhighlighted, so they never read
-            // as the result.
-            Text(cell.kind == .base ? AttributedString(cell.text) : cell.highlighted(wordTint: wordTint))
-                .font(Metrics.code)
-                .italic(cell.kind == .base)
-                .foregroundStyle(Theme.Sides.base)
-                .lineLimit(1)
-                .fixedSize()
+            CellCode(cell: cell, wordTint: wordTint)
+                .equatable()
                 .offset(x: -scroll.clamped)
                 .frame(width: codeWidth, alignment: .leading)
                 .mask { clipped ? AnyView(fadeMask) : AnyView(Color.black) }

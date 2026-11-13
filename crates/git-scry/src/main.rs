@@ -168,6 +168,7 @@ fn list_conflicts(file: &Path) -> ExitCode {
     }
 
     println!("{}: {count} conflict(s)", file.display());
+    session.check_all();
     for index in 0..count {
         let conflict = session.conflict(index);
         let analysis = session.analysis(index);

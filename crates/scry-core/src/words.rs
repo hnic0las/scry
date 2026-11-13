@@ -32,6 +32,11 @@ const MIN_SIMILARITY: f64 = 0.5;
 const MAX_LINE_TABLE: usize = 4_000_000;
 const MAX_GAP_PAIRS: usize = 40_000;
 const MAX_TOKEN_TABLE: usize = 250_000;
+/// The most token comparisons a gap's pairing may cost with exact
+/// similarities (the words' longest common subsequence for every pair of
+/// lines). A larger gap, such as 150 long lines edited on each side, is
+/// paired by shared words regardless of order, which is linear.
+const MAX_GAP_TOKEN_WORK: usize = 4_000_000;
 
 /// The change of each line of `side` (as `str::lines` splits it) against
 /// `base`. Without a base, every line is edited with no word marked: the
@@ -137,19 +142,59 @@ fn words_of(line: &str) -> Vec<Range<usize>> {
     words
 }
 
+/// A line's words as text (`words_of`).
+fn tokens(line: &str) -> Vec<&str> {
+    words_of(line)
+        .into_iter()
+        .map(|range| &line[range])
+        .collect()
+}
+
+/// A line's words with how often each occurs, and their total length.
+struct Bag<'a> {
+    counts: std::collections::HashMap<&'a str, usize>,
+    length: usize,
+}
+
+impl<'a> Bag<'a> {
+    fn of(tokens: &[&'a str]) -> Bag<'a> {
+        let mut counts = std::collections::HashMap::new();
+        for token in tokens {
+            *counts.entry(*token).or_default() += 1;
+        }
+        Bag {
+            counts,
+            length: tokens.iter().map(|token| token.len()).sum(),
+        }
+    }
+
+    /// Like `similarity`, counting the words both lines have whatever their
+    /// order: an upper bound of it, in linear time.
+    fn shared(&self, other: &Bag) -> f64 {
+        let total = self.length + other.length;
+        if total == 0 {
+            return 1.0;
+        }
+        let common: usize = self
+            .counts
+            .iter()
+            .map(|(token, count)| token.len() * count.min(other.counts.get(token).unwrap_or(&0)))
+            .sum();
+        2.0 * common as f64 / total as f64
+    }
+}
+
 /// How alike two lines are, from 0 to 1: twice the length of their common
 /// words over their total length, whitespace left out.
-fn similarity(a: &str, b: &str) -> f64 {
-    let a_texts: Vec<&str> = words_of(a).into_iter().map(|range| &a[range]).collect();
-    let b_texts: Vec<&str> = words_of(b).into_iter().map(|range| &b[range]).collect();
-    let total: usize = a_texts.iter().chain(&b_texts).map(|text| text.len()).sum();
+fn similarity(a_texts: &[&str], b_texts: &[&str]) -> f64 {
+    let total: usize = a_texts.iter().chain(b_texts).map(|text| text.len()).sum();
     if total == 0 {
         return 1.0;
     }
     if a_texts.len() * b_texts.len() > MAX_TOKEN_TABLE {
         return 0.0;
     }
-    let common: usize = common_subsequence(&a_texts, &b_texts, MAX_TOKEN_TABLE)
+    let common: usize = common_subsequence(a_texts, b_texts, MAX_TOKEN_TABLE)
         .into_iter()
         .map(|(index, _)| a_texts[index].len())
         .sum();
@@ -164,10 +209,24 @@ fn pair_gap(base: &[&str], side: &[&str]) -> Vec<(usize, usize)> {
     }
     let rows = base.len();
     let columns = side.len();
+    let base_tokens: Vec<Vec<&str>> = base.iter().map(|line| tokens(line)).collect();
+    let side_tokens: Vec<Vec<&str>> = side.iter().map(|line| tokens(line)).collect();
+    let base_count: usize = base_tokens.iter().map(Vec::len).sum();
+    let side_count: usize = side_tokens.iter().map(Vec::len).sum();
     let mut similar = vec![0.0_f64; rows * columns];
-    for i in 0..rows {
-        for j in 0..columns {
-            similar[i * columns + j] = similarity(base[i], side[j]);
+    if base_count * side_count > MAX_GAP_TOKEN_WORK {
+        let base_bags: Vec<Bag> = base_tokens.iter().map(|tokens| Bag::of(tokens)).collect();
+        let side_bags: Vec<Bag> = side_tokens.iter().map(|tokens| Bag::of(tokens)).collect();
+        for i in 0..rows {
+            for j in 0..columns {
+                similar[i * columns + j] = base_bags[i].shared(&side_bags[j]);
+            }
+        }
+    } else {
+        for i in 0..rows {
+            for j in 0..columns {
+                similar[i * columns + j] = similarity(&base_tokens[i], &side_tokens[j]);
+            }
         }
     }
     // best[i][j]: the best total for base[i..] and side[j..].
@@ -288,6 +347,31 @@ mod tests {
             marked(ours, &changed_words(base, ours)),
             [", timeout: .seconds(30)"]
         );
+    }
+
+    /// A gap of 150 long lines edited on each side is paired by shared words, in linear
+    /// time per pair: the exact pairing took seconds per call. Each line is still paired
+    /// with its base line and its changed word marked.
+    #[test]
+    fn a_large_gap_is_paired_by_shared_words() {
+        let side = |changed: &str| -> String {
+            (0..150)
+                .map(|line| {
+                    let words: Vec<String> =
+                        (0..100).map(|word| format!("w{line}x{word}")).collect();
+                    format!("let v{line} = [{}, {changed}]\n", words.join(", "))
+                })
+                .collect()
+        };
+        let base = side("old");
+        let ours = side("new");
+        let changes = line_changes(Some(&base), &ours);
+        assert_eq!(changes.len(), 150);
+        let first = ours.lines().next().unwrap();
+        let LineChange::Edited { words } = &changes[0] else {
+            panic!("not paired: {:?}", changes[0]);
+        };
+        assert_eq!(marked(first, words), ["new"]);
     }
 
     /// A call wrapped in a retry: the call is paired with its base line (edited, indentation

@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::path::Path;
 
 use crate::operation::{Operation, Side, SideRole};
-use crate::resolution::CandidateKind;
+use crate::resolution::{Analysis, CandidateKind};
 use crate::session::{Choice, MergeSession};
 use crate::syntax::ParseCheck;
 use crate::theme::{Badge, Provenance, Role, Severity, State};
@@ -98,6 +98,9 @@ pub struct ConflictView {
     /// The text editing by hand starts from: the current resolution, or
     /// ours while unresolved.
     pub edit_text: String,
+    /// Whether the candidates are checked by parsing (or the file cannot
+    /// be): until then they have no parse result and no closed "both".
+    pub checked: bool,
 }
 
 /// The first lines of a text, and whether there are more. Any line ending
@@ -114,9 +117,19 @@ fn preview(text: &str) -> (Vec<String>, bool) {
 
 impl MergeSession {
     /// Conflict `index` in words, with `ours` and `theirs` the sides'
-    /// labels.
+    /// labels; checks its candidates first if they are not yet.
     pub fn conflict_view(&self, index: usize, ours: &str, theirs: &str) -> ConflictView {
-        let analysis = self.analysis(index);
+        self.view(self.analysis(index), index, ours, theirs)
+    }
+
+    /// Conflict `index` as far as it is checked (`analysis_so_far`): cheap
+    /// for a list of every conflict, where the focused one is asked for
+    /// with `conflict_view`.
+    pub fn conflict_view_so_far(&self, index: usize, ours: &str, theirs: &str) -> ConflictView {
+        self.view(self.analysis_so_far(index), index, ours, theirs)
+    }
+
+    fn view(&self, analysis: &Analysis, index: usize, ours: &str, theirs: &str) -> ConflictView {
         let candidates: Vec<CandidateView> = analysis
             .candidates
             .iter()
@@ -186,6 +199,7 @@ impl MergeSession {
                 .chosen_text(index)
                 .unwrap_or(&self.conflict(index).ours.text)
                 .to_string(),
+            checked: self.is_checked(index),
         }
     }
 }

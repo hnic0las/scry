@@ -195,6 +195,16 @@ impl ParsedFile {
     /// This file with each range replaced by its text. The ranges are byte
     /// ranges of this file, in order and not overlapping.
     pub(crate) fn with(&self, replacements: &[(Range<usize>, &str)]) -> Option<ParsedFile> {
+        self.with_changes(replacements).map(|(parsed, _)| parsed)
+    }
+
+    /// `with`, and the byte ranges of the new file whose syntax may differ
+    /// from this one's: the replaced text, and what tree-sitter reports as
+    /// changed around it (a string left open colours the lines after it).
+    pub(crate) fn with_changes(
+        &self,
+        replacements: &[(Range<usize>, &str)],
+    ) -> Option<(ParsedFile, Vec<Range<usize>>)> {
         let mut text = String::with_capacity(self.text.len());
         let mut copied = 0;
         for (range, replacement) in replacements {
@@ -218,8 +228,120 @@ impl ParsedFile {
                 new_end_position: advance(start, replacement),
             });
         }
-        let tree = parser(self.language)?.parse(&text, Some(&tree))?;
-        Some(ParsedFile::from_parts(self.language, text, tree))
+        let new_tree = parser(self.language)?.parse(&text, Some(&tree))?;
+        let mut changed: Vec<Range<usize>> = tree
+            .changed_ranges(&new_tree)
+            .map(|range| range.start_byte..range.end_byte)
+            .collect();
+        let mut shift: isize = 0;
+        for (range, replacement) in replacements {
+            let start = (range.start as isize + shift) as usize;
+            changed.push(start..start + replacement.len());
+            shift += replacement.len() as isize - range.len() as isize;
+        }
+        Some((
+            ParsedFile::from_parts(self.language, text, new_tree),
+            changed,
+        ))
+    }
+
+    /// The row of the line holding byte `offset`.
+    pub(crate) fn row(&self, offset: usize) -> usize {
+        self.point(offset).row
+    }
+
+    /// The bytes of lines `rows`, line breaks included.
+    pub(crate) fn line_bytes(&self, rows: Range<usize>) -> Range<usize> {
+        let start = self.point_of_row(rows.start);
+        let end = self.point_of_row(rows.end);
+        start..end
+    }
+
+    /// Where line `row` starts; the text's end past the last line.
+    fn point_of_row(&self, row: usize) -> usize {
+        self.point(0);
+        let line_starts = self
+            .line_starts
+            .get()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        line_starts.get(row).copied().unwrap_or(self.text.len())
+    }
+
+    /// Whether this file parses with each range replaced by its text, as
+    /// `with(replacements).check()` says, without building that file.
+    ///
+    /// Once every way the parser was trying is in error, the file cannot
+    /// parse, so it stops there: past an error tree-sitter can rarely reuse
+    /// the old tree, and parsing on to the end of a large file for each
+    /// candidate made opening a file quadratic in its conflicts. The line
+    /// reported is then where the parser met the error, rather than the
+    /// first error node of the whole tree; they are the same or nearby.
+    pub(crate) fn check_with(&self, replacements: &[(Range<usize>, &str)]) -> ParseCheck {
+        let mut tree = self.tree.clone();
+        let mut shift: isize = 0;
+        // Where each replacement lands in the new text.
+        let mut pieces: Vec<(usize, usize, &[u8])> = Vec::new();
+        for (range, replacement) in replacements {
+            let start = (range.start as isize + shift) as usize;
+            pieces.push((start, range.start, replacement.as_bytes()));
+            shift += replacement.len() as isize - range.len() as isize;
+        }
+        for (range, replacement) in replacements.iter().rev() {
+            let start = self.point(range.start);
+            tree.edit(&InputEdit {
+                start_byte: range.start,
+                old_end_byte: range.end,
+                new_end_byte: range.start + replacement.len(),
+                start_position: start,
+                old_end_position: advance(start, &self.text[range.clone()]),
+                new_end_position: advance(start, replacement),
+            });
+        }
+        let old = self.text.as_bytes();
+        // The new text from `offset` on, up to the next boundary between
+        // this file's text and a replacement.
+        let mut read = |offset: usize, _: Point| -> &[u8] {
+            let mut shift: isize = 0;
+            for (index, (start, old_start, bytes)) in pieces.iter().enumerate() {
+                if offset < *start {
+                    let from = (offset as isize - shift) as usize;
+                    return &old[from..*old_start];
+                }
+                if offset < start + bytes.len() {
+                    return &bytes[offset - start..];
+                }
+                shift += bytes.len() as isize - replacements[index].0.len() as isize;
+            }
+            let from = (offset as isize - shift) as usize;
+            &old[from.min(old.len())..]
+        };
+        let mut failed_at: Option<usize> = None;
+        let mut stop = |state: &tree_sitter::ParseState| {
+            if state.has_error() {
+                failed_at = Some(state.current_byte_offset());
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        };
+        let options = tree_sitter::ParseOptions::new().progress_callback(&mut stop);
+        let Some(mut parser) = parser(self.language) else {
+            return ParseCheck::NotChecked;
+        };
+        let parsed = parser.parse_with_options(&mut read, Some(&tree), Some(options));
+        match (parsed, failed_at) {
+            (Some(tree), _) => match first_error(tree.root_node()) {
+                None => ParseCheck::Parses,
+                Some(node) => ParseCheck::DoesNotParse {
+                    line: error_row(node) + 1,
+                },
+            },
+            (None, Some(offset)) => ParseCheck::DoesNotParse {
+                line: row_in(&pieces, replacements, &self.text, offset) + 1,
+            },
+            (None, None) => ParseCheck::NotChecked,
+        }
     }
 
     /// The row and byte column of `offset`.
@@ -242,6 +364,38 @@ fn parser(language: Language) -> Option<Parser> {
     let mut parser = Parser::new();
     parser.set_language(&language.grammar()).ok()?;
     Some(parser)
+}
+
+/// The row of `offset` in `text` with `replacements` made, `pieces` giving
+/// where each lands (`check_with`).
+fn row_in(
+    pieces: &[(usize, usize, &[u8])],
+    replacements: &[(Range<usize>, &str)],
+    text: &str,
+    offset: usize,
+) -> usize {
+    let mut row = 0;
+    let mut copied = 0;
+    let mut position = 0;
+    for ((start, old_start, bytes), (range, _)) in pieces.iter().zip(replacements) {
+        let before = &text[copied..*old_start];
+        if offset < *start {
+            return row + count_lines(&before.as_bytes()[..offset - position]);
+        }
+        row += count_lines(before.as_bytes());
+        if offset < start + bytes.len() {
+            return row + count_lines(&bytes[..offset - start]);
+        }
+        row += count_lines(bytes);
+        copied = range.end;
+        position = start + bytes.len();
+    }
+    let rest = &text.as_bytes()[copied..];
+    row + count_lines(&rest[..(offset - position).min(rest.len())])
+}
+
+fn count_lines(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|byte| **byte == b'\n').count()
 }
 
 /// Where `start` ends up after `text`.
@@ -353,6 +507,49 @@ mod tests {
             let fresh = ParsedFile::new(Language::Swift, edited.text().to_string()).unwrap();
             assert_eq!(nodes(&edited), nodes(&fresh), "{:?}", edited.text());
             assert_eq!(edited.check(), fresh.check());
+        }
+    }
+
+    /// `check_with` stops at the first sure error instead of parsing on: it
+    /// must give the same verdict as checking the edited file, whatever the
+    /// edits, with the error line at most one line from the full check's.
+    #[test]
+    fn check_with_gives_the_full_checks_verdict() {
+        let functions: String = (0..200)
+            .map(|index| format!("func f{index}() {{\n    g({index})\n}}\n"))
+            .collect();
+        let text = format!("let a = 1\nfunc b() {{\n    print(\"b\")\n}}\n{functions}");
+        let base = ParsedFile::new(Language::Swift, text.clone()).unwrap();
+        let a = text.find("let a = 1").unwrap();
+        let print = text.find("print").unwrap();
+        let far = text.find("g(150)").unwrap();
+        let cases: Vec<Vec<(Range<usize>, &str)>> = vec![
+            vec![(a..a + 9, "let a = 2")],
+            vec![(print..print + 10, "if x {")],
+            vec![(print..print + 10, "let = = 3")],
+            vec![
+                (a..a + 9, "let é = \"…\"\nlet b = 2"),
+                (far..far + 6, "g(150))"),
+            ],
+            vec![(far..far + 6, "\"open")],
+            vec![(a..a + 9, ""), (print..print + 10, "}\n}\n")],
+            vec![],
+        ];
+        for replacements in cases {
+            let full = base.with(&replacements).unwrap().check();
+            let quick = base.check_with(&replacements);
+            match (full, quick) {
+                (
+                    ParseCheck::DoesNotParse { line: full },
+                    ParseCheck::DoesNotParse { line: quick },
+                ) => {
+                    assert!(
+                        full.abs_diff(quick) <= 1,
+                        "{replacements:?}: line {full} or {quick}"
+                    );
+                }
+                (full, quick) => assert_eq!(full, quick, "{replacements:?}"),
+            }
         }
     }
 

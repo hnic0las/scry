@@ -23,6 +23,25 @@ struct MergeEditorViewModelTests {
         #expect(!editor.canUndo)
     }
 
+    /// Only the focused conflict's candidates are checked by parsing, so a
+    /// file with thousands of conflicts opens at once; moving the focus
+    /// checks the next one, and moves the focus mark between the two lens
+    /// rows without building the rows again.
+    @Test func checksTheFocusedConflictOnly() throws {
+        let model = try MergeModel(path: ConflictFile().url.path)
+        let editor = MergeEditorViewModel(model: model, defaults: .isolated)
+
+        #expect(model.conflicts.map(\.checked) == [true, false])
+        #expect(model.conflicts[0].candidates.allSatisfy { $0.parse == .parses })
+        let rows = editor.rows.count
+        editor.next()
+        #expect(model.conflicts.map(\.checked) == [true, true])
+        #expect(editor.lensRows.map(\.focused) == [false, true])
+        editor.previous()
+        #expect(editor.lensRows.map(\.focused) == [true, false])
+        #expect(editor.rows.count == rows)
+    }
+
     /// Next and previous move the focus between conflicts and stop at
     /// both ends, so the toolbar arrows never focus a missing conflict.
     @Test func movesBetweenConflicts() throws {

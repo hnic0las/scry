@@ -1610,3 +1610,61 @@ fn a_file_with_a_separator_line_opens_from_the_overview() {
     assert_eq!(session.conflict(0).ours.text, "main\n");
     assert_eq!(session.conflict(0).theirs.text, "feature\n");
 }
+
+/// Counts the git runs of a `GitCli`.
+struct Counting {
+    git: GitCli,
+    runs: std::cell::Cell<usize>,
+}
+
+impl scry_core::git::Git for Counting {
+    fn output(&self, args: &[&str]) -> Result<scry_core::git::GitOutput, scry_core::git::GitError> {
+        self.runs.set(self.runs.get() + 1);
+        self.git.output(args)
+    }
+
+    fn output_with_input(
+        &self,
+        args: &[&str],
+        input: &[u8],
+    ) -> Result<scry_core::git::GitOutput, scry_core::git::GitError> {
+        self.runs.set(self.runs.get() + 1);
+        self.git.output_with_input(args, input)
+    }
+
+    fn output_with_env(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<scry_core::git::GitOutput, scry_core::git::GitError> {
+        self.runs.set(self.runs.get() + 1);
+        self.git.output_with_env(args, env)
+    }
+}
+
+/// A refresh runs as many gits for twenty files in conflict as for one: their stages
+/// and attributes are read in one run each, since the app refreshes on every activation.
+#[test]
+fn a_refresh_does_not_run_git_per_file() {
+    let runs = |files: usize| {
+        let repo = stopped_merge(|repo, side| {
+            for file in 0..files {
+                fs::write(
+                    repo.path().join(format!("f{file}.txt")),
+                    format!("{side}\n"),
+                )
+                .unwrap();
+            }
+            repo.ok(&["add", "--all"]);
+        });
+        let git = Counting {
+            git: repo.cli(),
+            runs: std::cell::Cell::new(0),
+        };
+        let mut overview = Overview::new(repo.path());
+        let snapshot = overview.refresh(&git).unwrap();
+        assert_eq!(snapshot.files.len(), files);
+        git.runs.get()
+    };
+    assert_eq!(runs(20), runs(1));
+}

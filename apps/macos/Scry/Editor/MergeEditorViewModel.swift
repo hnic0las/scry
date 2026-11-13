@@ -210,20 +210,50 @@ final class MergeEditorViewModel {
         var canTake = true
     }
 
-    /// The rows, built again only when the model changes: SwiftUI reads
-    /// them on every evaluation of the editor, and a large file has tens of
-    /// thousands.
+    /// The rows, built again only when the snapshot or the conflict being
+    /// edited changes: SwiftUI reads them on every evaluation of the
+    /// editor, and a large file has tens of thousands. A change of focus
+    /// only redraws the two lens rows it moves between.
     var rows: [RowState] {
-        let revision = model.revision
-        if let cached = rowsCache, cached.revision == revision {
+        let key = RowsKey(snapshot: model.snapshot, editing: model.editing)
+        let focused = model.current
+        if var cached = rowsCache, cached.key == key {
+            if cached.focused != focused {
+                // Let go of the cache's copy, so the rows change in place.
+                rowsCache = nil
+                for conflict in [cached.focused, focused] {
+                    if let index = cached.lensRows[conflict] {
+                        cached.rows[index] = .lens(lensRow(conflict))
+                    }
+                }
+                cached.focused = focused
+                rowsCache = cached
+            }
             return cached.rows
         }
         let rows = buildRows()
-        rowsCache = (revision, rows)
+        var lensRows: [Int: Int] = [:]
+        for (index, row) in rows.enumerated() {
+            if case .lens(let lens) = row { lensRows[lens.conflict] = index }
+        }
+        rowsCache = RowsCache(key: key, focused: focused, rows: rows, lensRows: lensRows)
         return rows
     }
 
-    @ObservationIgnored private var rowsCache: (revision: Int, rows: [RowState])?
+    private struct RowsKey: Equatable {
+        let snapshot: Int
+        let editing: Int?
+    }
+
+    private struct RowsCache {
+        let key: RowsKey
+        var focused: Int
+        var rows: [RowState]
+        /// Each conflict's lens row, by index in `rows`.
+        let lensRows: [Int: Int]
+    }
+
+    @ObservationIgnored private var rowsCache: RowsCache?
 
     private func buildRows() -> [RowState] {
         // Once per conflict, not once per line.

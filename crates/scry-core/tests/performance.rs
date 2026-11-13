@@ -94,3 +94,46 @@ fn report_timings_on_a_large_string_catalog() {
         session.newline(5, "              \"value\" : {", "")
     });
 }
+
+/// Opening must grow with the file, not with the square of its conflicts: a
+/// catalog after a large translation merge has thousands.
+#[test]
+#[ignore]
+fn report_open_timings_by_conflict_count() {
+    for conflicts in [40, 500, 3_000] {
+        let text = string_catalog(conflicts);
+        let (session, _) = time(&format!("open, {conflicts} conflicts"), || {
+            MergeSession::from_text(&text, Some(Language::Json)).unwrap()
+        });
+        time(&format!("rows, {conflicts} conflicts"), || {
+            session.rows(false)
+        });
+    }
+}
+
+/// One conflict of 150 long lines on each side, every line different: the
+/// word diff of its rows must not be redone on every `rows` call.
+#[test]
+#[ignore]
+fn report_rows_on_one_large_conflict() {
+    let side = |who: &str| -> String {
+        (0..150)
+            .map(|line| {
+                let words: Vec<String> =
+                    (0..100).map(|word| format!("{who}{line}w{word}")).collect();
+                format!("let v{line} = [{}]\n", words.join(", "))
+            })
+            .collect()
+    };
+    let text = format!(
+        "start\n<<<<<<< ours\n{}||||||| base\n{}=======\n{}>>>>>>> theirs\nend\n",
+        side("o"),
+        side("b"),
+        side("t")
+    );
+    let (session, _) = time("open, one large conflict", || {
+        MergeSession::from_text(&text, Some(Language::Swift)).unwrap()
+    });
+    time("rows", || session.rows(false));
+    time("rows again", || session.rows(false));
+}

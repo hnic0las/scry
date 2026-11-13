@@ -6,6 +6,7 @@
 //! (portability rule 2). Nothing here runs on an agent's behalf: every
 //! command comes from the user.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -457,9 +458,20 @@ impl Overview {
                 }
             }
         }
+        // One git run each for every file's stages and attributes, rather
+        // than several per file: a large conflict list refreshes on every
+        // activation of the app.
+        let facts = if unmerged.is_empty() {
+            Facts::default()
+        } else {
+            Facts {
+                stages: Stages::all(git)?,
+                attributes: attributes(git, &unmerged)?,
+            }
+        };
         let mut files = Vec::new();
         for path in &self.paths {
-            files.push(self.file(git, path, unmerged.contains(path))?);
+            files.push(self.file(git, path, unmerged.contains(path), &facts)?);
         }
         let plan = match &operation {
             Some(operation) if operation.kind == OperationKind::Rebase => rebase_plan::read(git)?,
@@ -959,7 +971,13 @@ impl Overview {
         Ok((rebuilt?.unwrap_or(text), size))
     }
 
-    fn file(&self, git: &dyn Git, path: &str, unmerged: bool) -> Result<FileView, GitError> {
+    fn file(
+        &self,
+        git: &dyn Git,
+        path: &str,
+        unmerged: bool,
+        facts: &Facts,
+    ) -> Result<FileView, GitError> {
         let (name, directory) = match path.rsplit_once('/') {
             Some((directory, name)) => (name.to_string(), directory.to_string()),
             None => (path.to_string(), String::new()),
@@ -978,7 +996,7 @@ impl Overview {
             return Ok(view);
         }
         view.state = State::Unresolved;
-        let stages = Stages::of(git, path)?;
+        let stages = facts.stages.get(path).unwrap_or(&Stages::NONE);
         if let Some(unusual) = stages.unusual() {
             view.kind = unusual.kind().to_string();
             view.special = Some(Special::Unusual);
@@ -1008,13 +1026,15 @@ impl Overview {
         } else {
             None
         };
-        let size = conflict::marker_size(git, Path::new(path));
+        let attributes = facts.attributes.get(path);
+        let size = attributes.map_or(conflict::DEFAULT_MARKER_SIZE, |found| found.marker_size);
         if let Ok(segments) = conflict::parse_with_marker_size(&text, size) {
             let count = conflict::conflicts(&segments).count();
             view.conflicts = Some(count);
             view.openable = true;
             if count == 0 {
-                if self.left_as_ours(git, path, text.as_bytes())? {
+                let merge = attributes.map_or("", |found| found.merge.as_str());
+                if left_as_ours(git, path, merge, text.as_bytes())? {
                     view.kind = String::from("Not merged by git");
                     view.special = Some(Special::NotMerged);
                     view.openable = false;
@@ -1025,18 +1045,73 @@ impl Overview {
         }
         Ok(view)
     }
+}
 
-    /// Git did not merge the file (`-merge` or `merge=binary` in
-    /// `.gitattributes`) and it still holds ours as git left it: no
-    /// markers, yet nothing was decided.
-    fn left_as_ours(&self, git: &dyn Git, path: &str, content: &[u8]) -> Result<bool, GitError> {
-        let attribute = git.run(&["check-attr", "-z", "merge", "--", path])?;
-        let value = attribute.split('\0').nth(2).unwrap_or_default();
-        if value != "unset" && value != "binary" {
-            return Ok(false);
-        }
-        Ok(stage(git, path, Version::Ours)?.as_deref() == Some(content))
+/// Git did not merge the file (`-merge` or `merge=binary` in
+/// `.gitattributes`, its `merge` attribute) and it still holds ours as git
+/// left it: no markers, yet nothing was decided.
+fn left_as_ours(git: &dyn Git, path: &str, merge: &str, content: &[u8]) -> Result<bool, GitError> {
+    if merge != "unset" && merge != "binary" {
+        return Ok(false);
     }
+    Ok(stage(git, path, Version::Ours)?.as_deref() == Some(content))
+}
+
+/// What git says about the files in conflict, read once per refresh.
+#[derive(Default)]
+struct Facts {
+    stages: HashMap<String, Stages>,
+    attributes: HashMap<String, Attributes>,
+}
+
+/// A file's attributes that change how its conflict is read.
+struct Attributes {
+    /// `conflict-marker-size`, or git's default.
+    marker_size: usize,
+    /// `merge`: "unset" for `-merge`, "binary", a driver's name, or
+    /// "unspecified".
+    merge: String,
+}
+
+/// The attributes of every path in `paths`, in one `git check-attr` run.
+fn attributes(git: &dyn Git, paths: &[String]) -> Result<HashMap<String, Attributes>, GitError> {
+    let mut input = Vec::new();
+    for path in paths {
+        input.extend_from_slice(path.as_bytes());
+        input.push(0);
+    }
+    let output = git.run_with_input(
+        &[
+            "check-attr",
+            "-z",
+            "--stdin",
+            "conflict-marker-size",
+            "merge",
+        ],
+        &input,
+    )?;
+    let mut found: HashMap<String, Attributes> = HashMap::new();
+    // `<path>\0<attribute>\0<value>\0`, for each path and attribute.
+    let fields: Vec<&str> = output.split('\0').collect();
+    for entry in fields.chunks(3) {
+        let [path, attribute, value] = entry else {
+            continue;
+        };
+        let attributes = found.entry(path.to_string()).or_insert(Attributes {
+            marker_size: conflict::DEFAULT_MARKER_SIZE,
+            merge: String::from("unspecified"),
+        });
+        match *attribute {
+            "conflict-marker-size" => {
+                if let Some(size) = value.parse().ok().filter(|size| *size > 0) {
+                    attributes.marker_size = size;
+                }
+            }
+            "merge" => attributes.merge = value.to_string(),
+            _ => {}
+        }
+    }
+    Ok(found)
 }
 
 /// The versions git staged for an unmerged path: the mode of the
@@ -1070,18 +1145,32 @@ impl Unusual {
 }
 
 impl Stages {
+    /// No stage: a path git does not have in conflict.
+    const NONE: Stages = Stages {
+        base: None,
+        ours: None,
+        theirs: None,
+    };
+
     fn of(git: &dyn Git, path: &str) -> Result<Stages, GitError> {
         let output = git.run(&["ls-files", "--unmerged", "-z", "--", path])?;
-        let mut stages = Stages {
-            base: None,
-            ours: None,
-            theirs: None,
-        };
+        Ok(Stages::read(&output).remove(path).unwrap_or(Stages::NONE))
+    }
+
+    /// The stages of every path in conflict, in one git run.
+    fn all(git: &dyn Git) -> Result<HashMap<String, Stages>, GitError> {
+        Ok(Stages::read(&git.run(&["ls-files", "--unmerged", "-z"])?))
+    }
+
+    /// Stages by path from `git ls-files --unmerged -z` output.
+    fn read(output: &str) -> HashMap<String, Stages> {
+        let mut all: HashMap<String, Stages> = HashMap::new();
         // `<mode> <object> <stage>\t<path>`.
         for entry in output.split('\0') {
-            let Some((info, _)) = entry.split_once('\t') else {
+            let Some((info, path)) = entry.split_once('\t') else {
                 continue;
             };
+            let stages = all.entry(path.to_string()).or_insert(Stages::NONE);
             let mut fields = info.split(' ');
             let (Some(mode), Some(_object), Some(stage)) =
                 (fields.next(), fields.next(), fields.next())
@@ -1096,7 +1185,7 @@ impl Stages {
                 _ => {}
             }
         }
-        Ok(stages)
+        all
     }
 
     fn unusual(&self) -> Option<Unusual> {
