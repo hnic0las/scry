@@ -26,6 +26,8 @@ final class MergeModel {
     /// The result was written at least once since the file was opened: the
     /// file on disk is resolved, whatever changed after.
     private(set) var everWritten = false
+    /// Each conflict's base lines are shown above its block (⌥⌘B).
+    private(set) var showsBase = false
     /// The last action the core refused, until it is shown.
     var failure: String?
     /// Goes up whenever what the editor shows changes (the snapshot, the
@@ -76,6 +78,13 @@ final class MergeModel {
     }
 
     // MARK: Focus
+
+    /// Shows or hides the base lines: the core lays the rows out again.
+    func setShowsBase(_ shows: Bool) {
+        guard shows != showsBase else { return }
+        showsBase = shows
+        refresh()
+    }
 
     func focus(_ index: Int) {
         guard conflicts.indices.contains(index), index != current else { return }
@@ -196,7 +205,7 @@ final class MergeModel {
 
     private func refresh() {
         revision += 1
-        rows = document.rows()
+        rows = document.rows(showBase: showsBase)
         longestLine = rows.reduce(0) { longest, row in
             guard case .code(let ours, let result, let theirs, _) = row else { return longest }
             return max(longest, Int(ours.columns), Int(result.columns), Int(theirs.columns))

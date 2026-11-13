@@ -97,13 +97,21 @@ struct EditorLayoutActions {
     let enabled: Bool
     let set: (MergeEditorViewModel.EditorLayout) -> Void
     let toggle: () -> Void
+    let showsBase: Bool
+    let canShowBase: Bool
+    let toggleBase: () -> Void
 }
 
-/// View ▸ Layout, and Switch Layout (⌥⌘L), for the merge editor.
+/// View ▸ Show Base (⌥⌘B), Layout and Switch Layout (⌥⌘L), for the merge
+/// editor.
 struct LayoutCommands: View {
     @FocusedValue(\.editorLayoutActions) private var actions
 
     var body: some View {
+        Button(actions?.showsBase == true ? "Hide Base" : "Show Base") { actions?.toggleBase() }
+            .keyboardShortcut(Shortcut.toggleBase)
+            .disabled(actions?.canShowBase != true)
+        Divider()
         Picker("Layout", selection: Binding(
             get: { actions?.layout ?? .columns },
             set: { actions?.set($0) }

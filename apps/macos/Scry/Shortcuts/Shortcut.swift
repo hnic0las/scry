@@ -109,6 +109,10 @@ extension Shortcut {
         id: "toggleInspector", title: "Show or hide the inspector", section: .editor, key: .character("i"),
         modifiers: [.control, .command], hint: "Inspector"
     )
+    static let toggleBase = Shortcut(
+        id: "toggleBase", title: "Show or hide base", section: .editor, key: .character("b"), modifiers: [.option, .command],
+        note: "Base lines above each conflict, in the result", hint: "Base"
+    )
     static let switchLayout = Shortcut(
         id: "switchLayout", title: "Switch layout", section: .editor, key: .character("l"), modifiers: [.option, .command],
         note: "Three columns, or the sides above the result", hint: "Layout"
@@ -167,7 +171,7 @@ extension Shortcut {
     /// Every shortcut, in the order the sheet lists them.
     static let all: [Shortcut] = [
         previousConflict, nextConflict, takeOurs, takeTheirs, takeBoth, takeBase, takeNone, editByHand,
-        undo, redo, switchLayout, toggleInspector, markAsResolved,
+        undo, redo, toggleBase, switchLayout, toggleInspector, markAsResolved,
         applyEdit, cancelEdit,
         openFile, refresh, continueOperation,
         openRepository, openConflictedFile, keyboardShortcuts,

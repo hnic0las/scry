@@ -85,6 +85,9 @@ pub enum CellKind {
     Unresolved,
     Chosen,
     Removed,
+    /// A base line, in the result above its conflict, when the base is
+    /// shown.
+    Base,
 }
 
 /// The design's syntax colour roles; text without a span is plain.
@@ -251,6 +254,9 @@ pub struct ConflictInfo {
     /// the lens row; `None` outside an operation or when git has no answer.
     pub ours_commit: Option<LensCommit>,
     pub theirs_commit: Option<LensCommit>,
+    /// git wrote the conflict with its base (diff3 markers, or a merge
+    /// tool's base file), so it can be shown.
+    pub has_base: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -378,8 +384,9 @@ impl MergeDocument {
         self.header.clone()
     }
 
-    pub fn rows(&self) -> Vec<Row> {
-        self.lock().rows().into_iter().map(row).collect()
+    /// `show_base` adds each conflict's base lines above its block.
+    pub fn rows(&self, show_base: bool) -> Vec<Row> {
+        self.lock().rows(show_base).into_iter().map(row).collect()
     }
 
     pub fn conflicts(&self) -> Vec<ConflictInfo> {
@@ -497,6 +504,7 @@ impl MergeDocument {
             edit_text: view.edit_text,
             ours_commit: self.lens_commit(index, true),
             theirs_commit: self.lens_commit(index, false),
+            has_base: session.conflict(index).base.is_some(),
         }
     }
 
@@ -1480,6 +1488,7 @@ fn cell(cell: layout::Cell) -> Cell {
             layout::CellKind::Unresolved => CellKind::Unresolved,
             layout::CellKind::Chosen => CellKind::Chosen,
             layout::CellKind::Removed => CellKind::Removed,
+            layout::CellKind::Base => CellKind::Base,
         },
         spans: cell.spans.into_iter().map(span).collect(),
         change: match cell.change {

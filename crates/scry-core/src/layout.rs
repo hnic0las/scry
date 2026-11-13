@@ -2,7 +2,8 @@
 //! aligned line for line, so every UI draws the same thing.
 //!
 //! Common lines appear on one row in all three panes. A conflict takes as
-//! many rows as its longest pane; shorter panes get spacer rows.
+//! many rows as its longest pane; shorter panes get spacer rows. With the
+//! base shown, a conflict's base lines come first, in the result pane only.
 
 use std::ops::Range;
 
@@ -30,6 +31,9 @@ pub enum CellKind {
     Chosen,
     /// The chosen candidate removes the block.
     Removed,
+    /// A line of the conflict's base, shown in the result above the block
+    /// when the user asks for the base; the sides get spacers.
+    Base,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,8 +185,33 @@ fn empty(kind: CellKind) -> Cell {
     }
 }
 
+/// A conflict's base lines, in the result pane only. They have no number:
+/// they are not lines of the result, and the UI labels them "base".
+fn push_base_rows(rows: &mut Vec<Row>, index: usize, base: Option<&str>) {
+    let Some(base) = base else { return };
+    for text in base.lines() {
+        let mut number = 1;
+        let mut cell = line(
+            &mut number,
+            text,
+            CellKind::Base,
+            &[],
+            LineChange::Unchanged,
+        );
+        cell.number = None;
+        rows.push(Row::Code {
+            ours: empty(CellKind::Spacer),
+            result: cell,
+            theirs: empty(CellKind::Spacer),
+            conflict: Some(index),
+        });
+    }
+}
+
 impl MergeSession {
-    pub fn rows(&self) -> Vec<Row> {
+    /// The editor's rows; `show_base` adds each conflict's base lines
+    /// above its block.
+    pub fn rows(&self, show_base: bool) -> Vec<Row> {
         let mut rows = Vec::new();
         let mut numbers = Numbers {
             ours: 1,
@@ -228,6 +257,13 @@ impl MergeSession {
                 }
                 Segment::Conflict(conflict) => {
                     rows.push(Row::Lens { conflict: index });
+                    if show_base {
+                        push_base_rows(
+                            &mut rows,
+                            index,
+                            conflict.base.as_ref().map(|base| base.text.as_str()),
+                        );
+                    }
                     self.push_conflict_rows(
                         &mut rows,
                         &mut numbers,
@@ -342,7 +378,7 @@ mod tests {
     #[test]
     fn unresolved_conflict_is_padded_to_its_longest_side() {
         let session = MergeSession::from_text(TEXT, None).unwrap();
-        let rows = session.rows();
+        let rows = session.rows(false);
         assert_eq!(
             kinds(&rows),
             [
@@ -371,12 +407,48 @@ mod tests {
         assert_eq!(ours.text, "z");
     }
 
+    /// With the base shown, its lines come after the lens row, in the result only and
+    /// without a number, so the sides get spacers and every pane keeps its numbering.
+    #[test]
+    fn base_lines_go_in_the_result_above_the_block() {
+        let session = MergeSession::from_text(TEXT, None).unwrap();
+        let rows = session.rows(true);
+        assert_eq!(
+            kinds(&rows),
+            [
+                "Common Common Common",
+                "lens 0",
+                "Spacer Base Spacer",
+                "Conflict Unresolved Conflict",
+                "Spacer Spacer Conflict",
+                "Spacer Spacer Conflict",
+                "Common Common Common",
+            ]
+        );
+        let Row::Code { result, .. } = &rows[2] else {
+            panic!("expected a code row");
+        };
+        assert_eq!((result.number, result.text.as_str()), (None, "b"));
+        let Row::Code { result, .. } = &rows[6] else {
+            panic!("expected a code row");
+        };
+        assert_eq!(result.number, Some(2));
+    }
+
+    /// A conflict without a base (no diff3 markers) adds no row when the base is shown.
+    #[test]
+    fn no_base_adds_no_rows() {
+        let text = "a\n<<<<<<< ours\no\n=======\nt\n>>>>>>> theirs\nz\n";
+        let session = MergeSession::from_text(text, None).unwrap();
+        assert_eq!(session.rows(true), session.rows(false));
+    }
+
     /// Once a candidate is chosen, the result pane shows its lines, padded like the sides.
     #[test]
     fn chosen_candidate_fills_the_result() {
         let mut session = MergeSession::from_text(TEXT, None).unwrap();
         session.choose(0, CandidateKind::TheirsThenOurs).unwrap();
-        let rows = session.rows();
+        let rows = session.rows(false);
         assert_eq!(
             kinds(&rows)[2..6],
             [
@@ -395,7 +467,7 @@ mod tests {
         let text = "let a = 1\n<<<<<<< ours\nlet b = \"x\"\n||||||| base\nlet b = 0\n=======\n// none\n>>>>>>> theirs\nlet z = 2\n";
         let mut session = MergeSession::from_text(text, Some(Language::Swift)).unwrap();
         session.choose(0, CandidateKind::Ours).unwrap();
-        let rows = session.rows();
+        let rows = session.rows(false);
         let roles =
             |cell: &Cell| -> Vec<SyntaxRole> { cell.spans.iter().map(|span| span.role).collect() };
         let Row::Code {
@@ -424,7 +496,7 @@ mod tests {
     fn conflict_lines_carry_their_change_against_the_base() {
         let text = "a\n<<<<<<< ours\nsend(item, timeout)\n||||||| base\nsend(item)\n=======\nretry {\n    send(item)\n}\n>>>>>>> theirs\nz\n";
         let session = MergeSession::from_text(text, None).unwrap();
-        let rows = session.rows();
+        let rows = session.rows(false);
         let changes: Vec<(LineChange, LineChange)> = rows
             .iter()
             .filter_map(|row| match row {
@@ -452,7 +524,7 @@ mod tests {
     fn removed_block_shows_one_row() {
         let mut session = MergeSession::from_text(TEXT, None).unwrap();
         session.choose(0, CandidateKind::Neither).unwrap();
-        let rows = session.rows();
+        let rows = session.rows(false);
         assert_eq!(kinds(&rows)[2], "Conflict Removed Conflict");
     }
 
@@ -480,7 +552,7 @@ mod tests {
     fn spans_and_changed_words_follow_expanded_tabs() {
         let text = "package a\n\nfunc f() {\n<<<<<<< ours\n\treturn 1\n||||||| base\n\treturn 0\n=======\n\treturn 2\n>>>>>>> theirs\n}\n";
         let session = MergeSession::from_text(text, Some(Language::Go)).unwrap();
-        let rows = session.rows();
+        let rows = session.rows(false);
         let ours = rows
             .iter()
             .find_map(|row| match row {

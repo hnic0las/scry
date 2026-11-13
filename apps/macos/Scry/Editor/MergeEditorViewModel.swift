@@ -89,6 +89,25 @@ final class MergeEditorViewModel {
         setLayout(preferredLayout == .columns ? .stacked : .columns)
     }
 
+    // MARK: Base
+
+    /// Some conflict has a base to show: git wrote diff3 markers, or a
+    /// merge tool passed the base file.
+    var canShowBase: Bool { model.conflicts.contains(where: \.hasBase) }
+    var showsBase: Bool { model.showsBase }
+
+    var baseHelp: String {
+        canShowBase
+            ? Shortcut.toggleBase.help(showsBase ? "Hide base" : "Show base")
+            : "No base: git wrote this file without diff3 markers"
+    }
+
+    /// ⌥⌘B.
+    func toggleBase() {
+        guard canShowBase else { return }
+        model.setShowsBase(!model.showsBase)
+    }
+
     /// Reads the choice again: Settings may have changed it.
     func reloadLayout() {
         let stored = defaults.string(forKey: Self.layoutKey).flatMap(EditorLayout.init(rawValue:)) ?? .columns
@@ -246,6 +265,7 @@ final class MergeEditorViewModel {
         if canGoToPrevious { shortcuts.append(.previousConflict) }
         if canGoToNext { shortcuts.append(.nextConflict) }
         if !isEditing { shortcuts.append(contentsOf: [Shortcut.takeOurs, .takeBoth, .takeTheirs]) }
+        if canShowBase { shortcuts.append(.toggleBase) }
         if canSwitchLayout { shortcuts.append(.switchLayout) }
         shortcuts.append(.toggleInspector)
         if canMarkResolved { shortcuts.append(.markAsResolved) }

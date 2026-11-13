@@ -68,7 +68,10 @@ struct MergeEditorView: View {
             layout: viewModel.layout,
             enabled: viewModel.canSwitchLayout,
             set: { viewModel.setLayout($0) },
-            toggle: { viewModel.switchLayout() }
+            toggle: { viewModel.switchLayout() },
+            showsBase: viewModel.showsBase,
+            canShowBase: viewModel.canShowBase,
+            toggleBase: { viewModel.toggleBase() }
         ))
         .navigationTitle(viewModel.title)
         .navigationSubtitle(viewModel.subtitle)
@@ -211,6 +214,19 @@ struct MergeEditorView: View {
                 }
                 .help(Shortcut.takeTheirs.help())
             }
+        }
+
+        ToolbarItem {
+            Toggle(isOn: Binding(get: { viewModel.showsBase }, set: { _ in viewModel.toggleBase() })) {
+                HStack(spacing: 5) {
+                    Image(systemName: "square.2.layers.3d")
+                    Text("Base")
+                }
+            }
+            .toggleStyle(.button)
+            .disabled(!viewModel.canShowBase)
+            .help(viewModel.baseHelp)
+            .accessibilityLabel(viewModel.showsBase ? "Hide base" : "Show base")
         }
 
         ToolbarItem {
@@ -477,6 +493,24 @@ enum SideShape {
 
 #Preview("Editor, narrow window", traits: .fixedLayout(width: 1000, height: 700)) {
     if let editor = PreviewSample.editor({ $0.windowWidthChanged(1000) }) {
+        MergeEditorView(viewModel: editor)
+    }
+}
+
+#Preview("Editor, base shown", traits: .fixedLayout(width: 1440, height: 600)) {
+    if let editor = PreviewSample.editor({ editor in
+        editor.toggleBase()
+        editor.take("theirs")
+    }) {
+        MergeEditorView(viewModel: editor)
+    }
+}
+
+#Preview("Editor, stacked with base", traits: .fixedLayout(width: 1440, height: 700)) {
+    if let editor = PreviewSample.editor({ editor in
+        editor.setLayout(.stacked)
+        editor.toggleBase()
+    }) {
         MergeEditorView(viewModel: editor)
     }
 }

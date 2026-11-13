@@ -169,6 +169,32 @@ struct MergeEditorViewModelTests {
         #expect(editor.chosen(1) == "theirs")
     }
 
+    /// ⌥⌘B adds each conflict's base lines to the rows, above the block
+    /// in the result, and hides them again; a file without a base cannot
+    /// show one, so the toggle is disabled rather than doing nothing.
+    @Test func togglesTheBase() throws {
+        let editor = try ConflictFile().editor()
+        #expect(editor.canShowBase)
+        let count = editor.rows.count
+        editor.toggleBase()
+        #expect(editor.showsBase)
+        #expect(editor.rows.count > count)
+        let lens = try #require(editor.lensRowIndex(of: 0))
+        guard case .code(let row) = editor.rows[lens + 1] else {
+            Issue.record("expected a base row under the lens row")
+            return
+        }
+        #expect(row.result.kind == .base)
+        #expect(row.ours.kind == .spacer)
+        editor.toggleBase()
+        #expect(editor.rows.count == count)
+
+        let noBase = try ConflictFile(text: "a\n<<<<<<< ours\no\n=======\nt\n>>>>>>> theirs\nz\n").editor()
+        #expect(!noBase.canShowBase)
+        noBase.toggleBase()
+        #expect(!noBase.showsBase)
+    }
+
     /// Taking the side already taken changes nothing: one undo takes the
     /// choice back, rather than an undo that seems to do nothing.
     @Test func takingTheSameSideTwiceIsOneStep() throws {

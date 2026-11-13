@@ -66,7 +66,7 @@ fn report_timings_on_a_large_string_catalog() {
         MergeSession::from_text(&text, Some(Language::Json)).unwrap()
     });
     let mut session = session;
-    time("rows", || session.rows());
+    time("rows", || session.rows(false));
     time("merged_check (unresolved)", || session.merged_check());
     time("choose", || {
         session
@@ -76,7 +76,7 @@ fn report_timings_on_a_large_string_catalog() {
             })
             .unwrap()
     });
-    time("rows after a choice", || session.rows());
+    time("rows after a choice", || session.rows(false));
     for index in 1..40 {
         session
             .apply(Command::Choose {

@@ -109,7 +109,7 @@ struct CellView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Text(cell.number.map(String.init) ?? "")
+            Text(cell.kind == .base ? "base" : cell.number.map(String.init) ?? "")
                 .font(Metrics.lineNumber)
                 .foregroundStyle(Theme.Surfaces.textTertiary)
                 .frame(width: Metrics.lineNumberWidth - Metrics.lineNumberPadding, alignment: .trailing)
@@ -144,8 +144,12 @@ struct CellView: View {
                 .foregroundStyle(Theme.Surfaces.textSecondary)
         default:
             // No wrapping: rows stay one line high so the panes stay aligned.
-            Text(cell.highlighted(wordTint: wordTint))
+            // Base lines are grey italic, unhighlighted, so they never read
+            // as the result.
+            Text(cell.kind == .base ? AttributedString(cell.text) : cell.highlighted(wordTint: wordTint))
                 .font(Metrics.code)
+                .italic(cell.kind == .base)
+                .foregroundStyle(Theme.Sides.base)
                 .lineLimit(1)
                 .fixedSize()
                 .offset(x: -scroll.clamped)
@@ -237,6 +241,8 @@ struct CellView: View {
             (invalid ? Theme.Severity.error : provenance).opacity(Metrics.blockTintOpacity)
         case .removed:
             Theme.Provenance.human.opacity(Metrics.blockTintOpacity)
+        case .base:
+            Theme.Sides.base.opacity(Metrics.blockTintOpacity)
         }
     }
 
