@@ -239,6 +239,28 @@ struct MergeEditorViewModelTests {
         #expect(editing == [false, false])
     }
 
+    /// The ruler has one mark per conflict, in file order, with the rows
+    /// above it by height, so the view can place it where its lens row is
+    /// drawn; it marks the focused one and follows each conflict's state.
+    @Test func rulerMarksFollowTheConflicts() throws {
+        let editor = try ConflictFile().editor()
+        let ruler = editor.ruler
+        var marks = ruler.marks
+        #expect(marks.map(\.conflict) == [0, 1])
+        #expect(marks.map(\.focused) == [true, false])
+        #expect(marks.map(\.lensRowsBefore) == [0, 1])
+        #expect(marks[0].codeRowsBefore < marks[1].codeRowsBefore)
+        #expect(ruler.lensRows == 2)
+        #expect(ruler.codeRows + ruler.lensRows == editor.rows.count)
+        #expect(marks[1].label == "Conflict 2 · Unresolved")
+
+        editor.next()
+        editor.take("theirs")
+        marks = editor.ruler.marks
+        #expect(marks.map(\.focused) == [false, true])
+        #expect(marks[1].state != .unresolved)
+    }
+
     /// Taking the side already taken changes nothing: one undo takes the
     /// choice back, rather than an undo that seems to do nothing.
     @Test func takingTheSameSideTwiceIsOneStep() throws {

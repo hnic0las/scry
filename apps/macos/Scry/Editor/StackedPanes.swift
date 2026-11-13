@@ -31,8 +31,11 @@ struct StackedPanes: View {
     static let barHeight: CGFloat = 9
 
     var body: some View {
-        let sides = PaneWidths.stackedSides(total: size.width)
-        let result = PaneWidths.stackedResult(total: size.width)
+        // The overview ruler, beside the result, takes its width off both
+        // areas so the sides and the result stay the same width.
+        let width = size.width - OverviewRuler.width
+        let sides = PaneWidths.stackedSides(total: width)
+        let result = PaneWidths.stackedResult(total: width)
         let available = max(size.height - Self.barHeight, 0)
         VStack(spacing: 0) {
             VStack(spacing: 0) {
@@ -44,6 +47,7 @@ struct StackedPanes: View {
                 area(.top, widths: sides)
                 SideScrollBars(scroll: scroll, widths: sides, part: .sides)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: available * topFraction)
             resizeBar(available: available)
             VStack(spacing: 0) {
@@ -51,9 +55,15 @@ struct StackedPanes: View {
                     ours: viewModel.oursHeader, result: viewModel.resultHeader, theirs: viewModel.theirsHeader,
                     widths: result, part: .result
                 )
+                .frame(maxWidth: .infinity, alignment: .leading)
                 Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1)
-                area(.bottom, widths: result)
-                SideScrollBars(scroll: scroll, widths: result, part: .result)
+                HStack(spacing: 0) {
+                    VStack(spacing: 0) {
+                        area(.bottom, widths: result)
+                        SideScrollBars(scroll: scroll, widths: result, part: .result)
+                    }
+                    OverviewRuler(ruler: viewModel.ruler) { viewModel.focus($0) }
+                }
             }
             .frame(maxHeight: .infinity)
         }

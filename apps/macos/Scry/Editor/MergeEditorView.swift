@@ -24,7 +24,8 @@ struct MergeEditorView: View {
                         if viewModel.layout == .stacked {
                             StackedPanes(viewModel: viewModel, scroll: scroll, size: geometry.size)
                         } else {
-                            let widths = PaneWidths(total: geometry.size.width)
+                            // The ruler takes its width off the panes.
+                            let widths = PaneWidths(total: geometry.size.width - OverviewRuler.width)
                             VStack(spacing: 0) {
                                 PaneHeaders(
                                     ours: viewModel.oursHeader,
@@ -32,9 +33,15 @@ struct MergeEditorView: View {
                                     theirs: viewModel.theirsHeader,
                                     widths: widths
                                 )
+                                .frame(maxWidth: .infinity, alignment: .leading)
                                 Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1)
-                                rowsList(widths: widths)
-                                SideScrollBars(scroll: scroll, widths: widths)
+                                HStack(spacing: 0) {
+                                    VStack(spacing: 0) {
+                                        rowsList(widths: widths)
+                                        SideScrollBars(scroll: scroll, widths: widths)
+                                    }
+                                    OverviewRuler(ruler: viewModel.ruler) { viewModel.focus($0) }
+                                }
                             }
                         }
                     }
@@ -147,6 +154,7 @@ struct MergeEditorView: View {
     /// Far enough for the longest line to show whole in the narrowest pane:
     /// a side, a column or half the top area.
     private func maxScrollX(width: CGFloat) -> CGFloat {
+        let width = width - OverviewRuler.width
         let widths = viewModel.layout == .stacked ? PaneWidths.stackedSides(total: width) : PaneWidths(total: width)
         let longest = CGFloat(viewModel.longestLine) * Metrics.codeCharacterWidth + Metrics.clipFadeWidth
         return max(longest - widths.code(widths.side), 0)
@@ -515,5 +523,45 @@ enum SideShape {
         editor.toggleBase()
     }) {
         MergeEditorView(viewModel: editor)
+    }
+}
+
+/// The 12 pt strip beside the rows: one mark per conflict, where its lens
+/// row is drawn, in its state's colour; the focused one is taller. Hover
+/// for its label, click to go to it (SPEC: overview ruler). A file taller
+/// than the strip is scaled to fit; a shorter one keeps its rows' places.
+struct OverviewRuler: View {
+    let ruler: MergeEditorViewModel.Ruler
+    let focus: (Int) -> Void
+
+    static let width: CGFloat = 12
+
+    var body: some View {
+        GeometryReader { geometry in
+            let content = CGFloat(ruler.codeRows) * Metrics.rowHeight + CGFloat(ruler.lensRows) * Metrics.lensHeight
+            let scale = content > geometry.size.height && content > 0 ? geometry.size.height / content : 1
+            ForEach(ruler.marks, id: \.conflict) { mark in
+                let top = CGFloat(mark.codeRowsBefore) * Metrics.rowHeight
+                    + CGFloat(mark.lensRowsBefore) * Metrics.lensHeight
+                let y = (top + Metrics.lensHeight / 2) * scale
+                let height: CGFloat = mark.focused ? 8 : 4
+                Button { focus(mark.conflict) } label: {
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(mark.state.color)
+                        .frame(width: 8, height: height)
+                        .frame(width: Self.width, height: max(height, 8))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(mark.label)
+                .accessibilityLabel(mark.label)
+                .position(x: Self.width / 2, y: min(max(y, 4), max(geometry.size.height - 4, 4)))
+            }
+        }
+        .frame(width: Self.width)
+        .background(Theme.Surfaces.pane)
+        .overlay(alignment: .leading) { Rectangle().fill(Theme.Surfaces.hairline).frame(width: 1) }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Conflicts in the file")
     }
 }

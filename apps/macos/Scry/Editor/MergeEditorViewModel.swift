@@ -285,6 +285,63 @@ final class MergeEditorViewModel {
         )
     }
 
+    // MARK: Overview ruler
+
+    /// The overview ruler: the marks, and how many rows of each height the
+    /// file has, so the view can place each mark where its row is drawn.
+    struct Ruler: Equatable {
+        let marks: [RulerMark]
+        let codeRows: Int
+        let lensRows: Int
+    }
+
+    /// A conflict's mark on the overview ruler.
+    struct RulerMark: Equatable {
+        let conflict: Int
+        /// The rows above its lens row, by height: the view turns them
+        /// into points.
+        let codeRowsBefore: Int
+        let lensRowsBefore: Int
+        let state: ConflictState
+        let focused: Bool
+        /// The tooltip: "Conflict 2 · Unresolved".
+        let label: String
+    }
+
+    /// One mark per conflict, at its place in the file.
+    var ruler: Ruler {
+        var marks: [RulerMark] = []
+        var lensRows = 0
+        var codeRows = 0
+        for row in model.rows {
+            guard case .lens(let conflict) = row else {
+                codeRows += 1
+                continue
+            }
+            let number = Int(conflict)
+            let state = model.conflict(number)?.state ?? .unresolved
+            marks.append(RulerMark(
+                conflict: number,
+                codeRowsBefore: codeRows,
+                lensRowsBefore: lensRows,
+                state: state,
+                focused: number == model.current,
+                label: "Conflict \(number + 1) · \(Self.stateName(state))"
+            ))
+            lensRows += 1
+        }
+        return Ruler(marks: marks, codeRows: codeRows, lensRows: lensRows)
+    }
+
+    private static func stateName(_ state: ConflictState) -> String {
+        switch state {
+        case .unresolved: "Unresolved"
+        case .needsReview: "Needs review"
+        case .resolved: "Resolved"
+        case .staged: "Staged"
+        }
+    }
+
     // MARK: Toolbar
 
     var counter: String {
