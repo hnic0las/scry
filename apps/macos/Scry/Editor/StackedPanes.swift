@@ -42,6 +42,7 @@ struct StackedPanes: View {
                 )
                 Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1)
                 area(.top, widths: sides)
+                SideScrollBars(scroll: scroll, widths: sides, part: .sides)
             }
             .frame(height: available * topFraction)
             resizeBar(available: available)
@@ -52,6 +53,7 @@ struct StackedPanes: View {
                 )
                 Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1)
                 area(.bottom, widths: result)
+                SideScrollBars(scroll: scroll, widths: result, part: .result)
             }
             .frame(maxHeight: .infinity)
         }

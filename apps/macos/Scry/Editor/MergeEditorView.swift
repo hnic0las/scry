@@ -34,6 +34,7 @@ struct MergeEditorView: View {
                                 )
                                 Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1)
                                 rowsList(widths: widths)
+                                SideScrollBars(scroll: scroll, widths: widths)
                             }
                         }
                     }

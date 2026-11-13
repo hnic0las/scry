@@ -54,4 +54,23 @@ struct HorizontalScrollTests {
         if let scrollView = view as? NSScrollView { return scrollView }
         return view.subviews.lazy.compactMap { firstScrollView(in: $0) }.first
     }
+
+    /// The scroll bars show only when a line goes past the narrowest pane,
+    /// and dragging one keeps the shared offset within the longest line,
+    /// so no pane scrolls into empty space.
+    @Test func scrollBarsMoveTheSharedOffsetWithinRange() {
+        let scroll = SideScroll()
+        #expect(!scroll.canScroll)
+        scroll.maximum = 0
+        #expect(!scroll.canScroll)
+        scroll.maximum = 120
+        #expect(scroll.canScroll)
+
+        scroll.scroll(to: 500)
+        #expect(scroll.clamped == 120)
+        scroll.scroll(to: -10)
+        #expect(scroll.clamped == 0)
+        scroll.scroll(to: 40)
+        #expect(scroll.clamped == 40)
+    }
 }

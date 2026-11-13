@@ -104,4 +104,117 @@ final class SideScroll {
     func scroll(by delta: CGFloat) {
         offset = min(max(clamped + delta, 0), maximum)
     }
+
+    func scroll(to offset: CGFloat) {
+        self.offset = min(max(offset, 0), maximum)
+    }
+
+    /// Lines go past the narrowest pane: the scroll bars show.
+    var canScroll: Bool {
+        maximum > 0 && maximum < .greatestFiniteMagnitude
+    }
+}
+
+/// The scroll bars under the panes, one per pane's code (the gutters stay
+/// fixed), all moving the shared offset (SPEC: horizontal scrolling is
+/// synchronised, by the scroll bar at the bottom of any pane too). Hidden
+/// when every line fits.
+struct SideScrollBars: View {
+    let scroll: SideScroll
+    let widths: PaneWidths
+    var part: RowPart = .all
+
+    var body: some View {
+        if scroll.canScroll {
+            HStack(spacing: 0) {
+                switch part {
+                case .all:
+                    bar(widths.side)
+                    Color.clear.frame(width: widths.connector)
+                    bar(widths.result)
+                    Color.clear.frame(width: widths.connector)
+                    bar(widths.side)
+                case .sides:
+                    bar(widths.side)
+                    Rectangle().fill(Theme.Surfaces.hairline).frame(width: widths.connector)
+                    bar(widths.side)
+                case .result:
+                    bar(widths.result)
+                }
+            }
+            .frame(height: SideScrollBar.height)
+            .background(Theme.Surfaces.pane)
+            .overlay(alignment: .top) { Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1) }
+        }
+    }
+
+    private func bar(_ pane: CGFloat) -> some View {
+        HStack(spacing: 0) {
+            Color.clear.frame(width: Metrics.lineNumberWidth + Metrics.markWidth)
+            SideScrollBar(scroll: scroll, visible: widths.code(pane))
+        }
+        .frame(width: pane)
+    }
+}
+
+/// One pane's scroll bar: a knob as wide as the share of the longest line
+/// the pane shows. Drag the knob, or click the track to move a page.
+struct SideScrollBar: View {
+    let scroll: SideScroll
+    /// The code width the pane shows.
+    let visible: CGFloat
+
+    static let height: CGFloat = 11
+
+    @State private var dragStart: CGFloat?
+    @State private var hovering = false
+
+    var body: some View {
+        GeometryReader { geometry in
+            let track = geometry.size.width
+            let knob = knobWidth(track: track)
+            let travel = max(track - knob, 1)
+            let x = scroll.maximum > 0 ? scroll.clamped / scroll.maximum * travel : 0
+            ZStack(alignment: .leading) {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { location in
+                        // A page towards the click, as AppKit's scroll bars do.
+                        scroll.scroll(by: location.x < x ? -visible : visible)
+                    }
+                Capsule()
+                    .fill(Theme.Surfaces.textTertiary.opacity(hovering || dragStart != nil ? 0.8 : 0.5))
+                    .frame(width: knob, height: hovering || dragStart != nil ? 7 : 5)
+                    .offset(x: x)
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { drag in
+                                let start = dragStart ?? scroll.clamped
+                                dragStart = start
+                                scroll.scroll(to: start + drag.translation.width / travel * scroll.maximum)
+                            }
+                            .onEnded { _ in dragStart = nil }
+                    )
+            }
+            .frame(maxHeight: .infinity)
+        }
+        .padding(.horizontal, 2)
+        .onHover { hovering = $0 }
+        .accessibilityElement()
+        .accessibilityLabel("Scroll the lines sideways")
+        .accessibilityValue("\(Int(scroll.maximum > 0 ? scroll.clamped / scroll.maximum * 100 : 0)) %")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: scroll.scroll(by: visible / 2)
+            case .decrement: scroll.scroll(by: -visible / 2)
+            @unknown default: break
+            }
+        }
+    }
+
+    private func knobWidth(track: CGFloat) -> CGFloat {
+        let content = visible + scroll.maximum
+        guard content > 0 else { return track }
+        return min(max(track * visible / content, 24), track)
+    }
 }
