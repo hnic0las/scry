@@ -56,6 +56,10 @@ final class ScryAppDelegate: NSObject, NSApplicationDelegate {
         RootViewModel.mergetoolFiles(in: CommandLine.arguments) == nil ? 0 : 1
     }
 
+    /// Whether the window lets the app quit now; when it does not, it
+    /// asks the user first.
+    @MainActor static var shouldQuit: () -> Bool = { true }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Started by `git-scry resolve` from a terminal, the app would open
         // behind it.
@@ -74,10 +78,16 @@ final class ScryAppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    /// Quits at once without unwritten choices, so a logout or restart
+    /// goes on. Otherwise the merge window comes forward, even minimised
+    /// or hidden, and asks; confirming closes it, which quits the app.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let window = sender.windows.first(where: \.isVisible) else { return .terminateNow }
-        // Closing the last window quits the app once the user agreed.
-        window.performClose(nil)
+        if Self.shouldQuit() { return .terminateNow }
+        let window = sender.windows.first { $0.identifier?.rawValue.hasPrefix(ScryApp.window) == true }
+            ?? sender.windows.first { $0.canBecomeMain && $0.contentViewController != nil }
+        sender.unhide(nil)
+        if window?.isMiniaturized == true { window?.deminiaturize(nil) }
+        window?.makeKeyAndOrderFront(nil)
         return .terminateCancel
     }
 }
@@ -180,7 +190,13 @@ struct RootView: View {
             } else if let overview = viewModel.overview {
                 OverviewView(viewModel: overview)
             } else {
-                EmptyStateView(error: viewModel.openError, open: chooseFile, openRepository: chooseRepository)
+                EmptyStateView(
+                    message: viewModel.emptyMessage,
+                    error: viewModel.openError,
+                    canOpen: viewModel.canOpen,
+                    open: chooseFile,
+                    openRepository: chooseRepository
+                )
             }
         }
         .frame(minWidth: 900, minHeight: 600)
@@ -216,6 +232,7 @@ struct RootView: View {
         }
         .task {
             ScryAppDelegate.exitStatus = { [viewModel] in viewModel.exitStatus }
+            ScryAppDelegate.shouldQuit = { [viewModel] in viewModel.shouldClose() }
             await viewModel.openLaunchFile()
         }
     }
@@ -261,7 +278,11 @@ struct OpeningView: View {
 }
 
 struct EmptyStateView: View {
+    let message: String
     let error: String?
+    /// No under `git mergetool`: the buttons would open a file git did not
+    /// ask about.
+    let canOpen: Bool
     let open: () -> Void
     let openRepository: () -> Void
 
@@ -272,13 +293,16 @@ struct EmptyStateView: View {
                 .foregroundStyle(Theme.Surfaces.textTertiary)
             Text("No file open")
                 .font(.title3.weight(.semibold))
-            Text("Open a repository with an operation in progress, a file with conflict markers, or run Scry from git mergetool.")
+            Text(message)
                 .foregroundStyle(Theme.Surfaces.textSecondary)
-            HStack {
-                // ⌘O and ⇧⌘O are the File menu's (`OpenCommands`), which
-                // work whatever the window shows.
-                Button("Open Repository…", action: openRepository)
-                Button("Open Conflicted File…", action: open)
+                .multilineTextAlignment(.center)
+            if canOpen {
+                HStack {
+                    // ⌘O and ⇧⌘O are the File menu's (`OpenCommands`),
+                    // which work whatever the window shows.
+                    Button("Open Repository…", action: openRepository)
+                    Button("Open Conflicted File…", action: open)
+                }
             }
             if let error {
                 Text(error)
@@ -293,11 +317,21 @@ struct EmptyStateView: View {
 }
 
 #Preview("Empty state", traits: .fixedLayout(width: 900, height: 600)) {
-    EmptyStateView(error: nil, open: {}, openRepository: {})
+    EmptyStateView(message: RootViewModel().emptyMessage, error: nil, canOpen: true, open: {}, openRepository: {})
 }
 
 #Preview("Empty state, file not opened", traits: .fixedLayout(width: 900, height: 600)) {
-    EmptyStateView(error: "Uploader.swift has no conflict markers.", open: {}, openRepository: {})
+    EmptyStateView(
+        message: RootViewModel().emptyMessage, error: "Uploader.swift has no conflict markers.",
+        canOpen: true, open: {}, openRepository: {}
+    )
+}
+
+#Preview("Empty state, under git mergetool", traits: .fixedLayout(width: 900, height: 600)) {
+    EmptyStateView(
+        message: "git mergetool gave Scry a file it could not open. Quit Scry to hand it back to git, which leaves it conflicted.",
+        error: "Uploader.swift has no conflict markers.", canOpen: false, open: {}, openRepository: {}
+    )
 }
 
 #Preview("Opening a file", traits: .fixedLayout(width: 900, height: 600)) {

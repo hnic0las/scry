@@ -19,6 +19,7 @@ struct SpecialFileView: View {
                 content
                     .padding(16)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .disabled(viewModel.isRunning)
             }
             Divider()
             footer
@@ -50,7 +51,7 @@ struct SpecialFileView: View {
                     ChangesList(title: viewModel.changesTitle, lines: viewModel.changeLines)
                 }
             }
-        case .binary:
+        case .binary, .notMerged:
             HStack(alignment: .top, spacing: 12) {
                 ForEach(viewModel.versionCards) { card in
                     BinaryVersionCard(card: card) { viewModel.take(card.version) }
@@ -113,6 +114,10 @@ struct SpecialFileView: View {
                     PackageTable(rows: viewModel.lockfileRows, ours: viewModel.oursLabel, theirs: viewModel.theirsLabel)
                 }
             }
+        case .unusual:
+            if let note = viewModel.folderNote {
+                NoteBanner(text: note, symbol: "folder", color: Theme.Interaction.accent)
+            }
         }
     }
 
@@ -148,38 +153,55 @@ struct SpecialFileView: View {
                     .lineLimit(2)
             }
             Spacer()
+            if viewModel.isRunning {
+                ProgressView()
+                    .controlSize(.small)
+            }
             if viewModel.canOpenInEditor {
                 Button("Open in Merge Editor") { viewModel.openEditor() }
+                    .disabled(viewModel.isRunning)
             }
             Button("Cancel", role: .cancel) { close() }
                 .keyboardShortcut(Shortcut.cancelSheet)
-            switch viewModel.kind {
-            case .projectFile:
-                Button(viewModel.keepBothTitle) { viewModel.keepBoth() }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(Shortcut.confirmSheet)
-                    .disabled(!viewModel.canKeepBoth)
-            case .stringCatalog, .packageResolved:
-                Button(viewModel.writeTitle) { viewModel.writeChoices() }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(Shortcut.confirmSheet)
-                    .disabled(!viewModel.canWriteChoices)
-            case .lockfile:
-                if viewModel.canMergeLines && viewModel.taken == nil {
-                    Button("Keep Both Sides' Lines") { viewModel.mergeLines() }
-                }
-                if viewModel.taken != nil {
-                    Button("Done") { viewModel.finish() }
-                        .buttonStyle(.borderedProminent)
-                        .keyboardShortcut(Shortcut.confirmSheet)
-                }
-            case .deletedOnOneSide, .binary:
-                EmptyView()
-            }
+            actions
+                .disabled(viewModel.isRunning)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(Theme.Surfaces.chrome)
+    }
+
+    /// The footer's buttons for this kind of file.
+    @ViewBuilder
+    private var actions: some View {
+        switch viewModel.kind {
+        case .projectFile:
+            Button(viewModel.keepBothTitle) { viewModel.keepBoth() }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(Shortcut.confirmSheet)
+                .disabled(!viewModel.canKeepBoth)
+        case .stringCatalog, .packageResolved:
+            Button(viewModel.writeTitle) { viewModel.writeChoices() }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(Shortcut.confirmSheet)
+                .disabled(!viewModel.canWriteChoices)
+        case .lockfile:
+            if viewModel.canMergeLines && viewModel.taken == nil {
+                Button("Keep Both Sides' Lines") { viewModel.mergeLines() }
+            }
+            if viewModel.taken != nil {
+                Button("Done") { viewModel.finish() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(Shortcut.confirmSheet)
+            }
+        case .unusual:
+            Button("Mark Resolved") { viewModel.markResolved() }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(Shortcut.confirmSheet)
+                .disabled(!viewModel.canMarkResolved)
+        case .deletedOnOneSide, .binary, .notMerged:
+            EmptyView()
+        }
     }
 }
 
@@ -193,6 +215,8 @@ extension SpecialKind {
         case .stringCatalog: "character.bubble"
         case .packageResolved: "shippingbox"
         case .lockfile: "lock.doc"
+        case .notMerged: "doc.on.doc"
+        case .unusual: "questionmark.folder"
         }
     }
 
@@ -205,6 +229,8 @@ extension SpecialKind {
         case .stringCatalog: "Merge it key by key"
         case .packageResolved: "Merge it package by package"
         case .lockfile: "Take a side, then write it again"
+        case .notMerged: "Take one version"
+        case .unusual: "Settle it in the folder, then mark it resolved"
         }
     }
 }
@@ -631,7 +657,7 @@ struct SpecialSamples: OverviewSource {
         throw CancellationError()
     }
 
-    func apply(action: OverviewAction) throws {}
+    func apply(action: OverviewAction) throws -> OverviewSnapshot { try snapshot() }
 
     func deletion(path: String) throws -> DeletionInfo {
         DeletionInfo(
@@ -703,6 +729,14 @@ struct SpecialSamples: OverviewSource {
         )
     }
 
+    func unusual(path: String) throws -> UnusualInfo {
+        UnusualInfo(
+            what: "Both sides renamed this file, each to its own name.",
+            advice: "The new names are listed as files of their own. Mark this one resolved to drop the old name, unless you want to keep it in the folder.",
+            inFolder: false
+        )
+    }
+
     func lockfile(path: String) throws -> LockfileInfo {
         LockfileInfo(
             oursLabel: "feature/sync-v2 · current branch", theirsLabel: "main · being merged",
@@ -725,10 +759,10 @@ struct SpecialSamples: OverviewSource {
             absolutePath: "/Users/you/Code/atlas/" + path,
             name: String(path.split(separator: "/").last ?? ""),
             directory: path.split(separator: "/").dropLast().joined(separator: "/"),
-            kind: "",
+            kind: kind == .unusual ? "Renamed on both sides" : "",
             state: .unresolved,
             conflicts: nil,
-            openable: kind != .deletedOnOneSide && kind != .binary,
+            openable: ![.deletedOnOneSide, .binary, .notMerged, .unusual].contains(kind),
             special: kind
         )
     }
@@ -745,6 +779,14 @@ struct SpecialSamples: OverviewSource {
 
 #Preview("Binary image") {
     SpecialFileView(viewModel: SpecialSamples.viewModel("ios/Resources/AppIcon.png", .binary)) {}
+}
+
+#Preview("Not merged by git") {
+    SpecialFileView(viewModel: SpecialSamples.viewModel("config/flags.json", .notMerged)) {}
+}
+
+#Preview("Renamed on both sides") {
+    SpecialFileView(viewModel: SpecialSamples.viewModel("ios/Sources/Sync/Engine.swift", .unusual)) {}
 }
 
 #Preview("Xcode project") {

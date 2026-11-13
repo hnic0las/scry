@@ -66,6 +66,13 @@ pub enum Special {
     /// A lockfile (`package-lock.json`, `Podfile.lock`…): take a side, then
     /// let the package manager write it again.
     Lockfile,
+    /// `.gitattributes` tells git not to merge it (`-merge`, `binary`):
+    /// git left ours without markers. Take one version, as for a binary.
+    NotMerged,
+    /// A conflict with no two versions to compare: both sides renamed the
+    /// file, a name only one side has, a submodule, a symbolic link.
+    /// Settle it in the folder, then mark it resolved as it is there.
+    Unusual,
 }
 
 /// One of the two versions of a conflicted file, as git stages them.
@@ -136,6 +143,18 @@ pub struct LockfileReview {
     pub merges_by_lines: bool,
     /// The packages each side changed since the base.
     pub changes: Vec<PackageChange>,
+}
+
+/// A conflict the overview can only settle as it is in the folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnusualConflict {
+    /// What git left, in a sentence.
+    pub what: String,
+    /// What to do in the folder before marking it resolved.
+    pub advice: String,
+    /// The path exists in the folder: marking it resolved stages it;
+    /// otherwise it stages its removal.
+    pub in_folder: bool,
 }
 
 /// Binary versions larger than this are not read for a preview.
@@ -216,11 +235,12 @@ impl Snapshot {
 pub enum OverviewCommand {
     /// Stages every file resolved and not staged yet.
     StageResolved,
-    /// Stages one resolved file, or one to review as the rule left it.
-    Stage { path: String },
-    /// Gives a staged file its conflict back in git, keeping its content
-    /// as resolved: to change a choice before continuing.
-    Unstage { path: String },
+    /// Stages resolved files, or files to review as the rule left them,
+    /// in one git run.
+    Stage { paths: Vec<String> },
+    /// Gives staged files their conflict back in git, keeping their
+    /// content as resolved: to change a choice before continuing.
+    Unstage { paths: Vec<String> },
     /// Goes on with the operation once every file is staged: the next
     /// commit of a rebase, or the merge commit. At a `reword` step,
     /// `message` replaces the commit's message; without it, the message
@@ -254,6 +274,9 @@ pub enum OverviewCommand {
     /// Writes a `Package.resolved` merged package by package, with one
     /// pick per package both sides changed.
     ResolvePackages { path: String, picks: Vec<Version> },
+    /// Stages an unusual conflict as it is in the folder, or its removal
+    /// when it is not there.
+    MarkResolved { path: String },
 }
 
 /// What a command did.
@@ -263,9 +286,9 @@ pub enum OverviewEvent {
     Staged {
         paths: Vec<String>,
     },
-    /// A staged file has its conflict back.
+    /// Staged files have their conflict back.
     Unstaged {
-        path: String,
+        paths: Vec<String>,
     },
     Continued,
     Skipped,
@@ -373,7 +396,17 @@ impl Overview {
         };
         if step != self.step {
             self.step = step;
+            // Files staged at this step before Scry opened: git keeps
+            // their conflict until the step ends (resolve-undo).
             self.paths = unmerged.clone();
+            if operation.is_some() {
+                for path in staged_this_step(git)? {
+                    if !self.paths.contains(&path) {
+                        self.paths.push(path);
+                    }
+                }
+                self.paths.sort();
+            }
         } else {
             for path in &unmerged {
                 if !self.paths.contains(path) {
@@ -438,28 +471,48 @@ impl Overview {
                 .map(|file| file.state)
         };
         match command {
-            OverviewCommand::Stage { path } => {
+            OverviewCommand::Stage { paths } => {
                 // A file to review holds the rule's result: staging it
                 // accepts that result as it is.
-                if !matches!(state(&path), Some(State::Resolved | State::NeedsReview)) {
-                    return Err(OverviewError::NotThatKind(path));
+                if let Some(path) = paths
+                    .iter()
+                    .find(|path| !matches!(state(path), Some(State::Resolved | State::NeedsReview)))
+                {
+                    return Err(OverviewError::NotThatKind(path.clone()));
                 }
-                git.run(&["add", "--", &path])?;
-                Ok(vec![OverviewEvent::Staged { paths: vec![path] }])
+                if paths.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let mut args = vec!["add", "--"];
+                args.extend(paths.iter().map(String::as_str));
+                git.run(&args)?;
+                Ok(vec![OverviewEvent::Staged { paths }])
             }
-            OverviewCommand::Unstage { path } => {
-                if state(&path) != Some(State::Staged) {
-                    return Err(OverviewError::NotThatKind(path));
+            OverviewCommand::Unstage { paths } => {
+                if let Some(path) = paths.iter().find(|path| state(path) != Some(State::Staged)) {
+                    return Err(OverviewError::NotThatKind(path.clone()));
+                }
+                if paths.is_empty() {
+                    return Ok(Vec::new());
                 }
                 // The index keeps each conflict git resolved by `git add`
                 // or `git rm` (resolve-undo): this puts its versions back
                 // and leaves the file in the folder as it is.
-                git.run(&["update-index", "--unresolve", "--", &path])?;
-                if operation::conflicted_paths(git)?.contains(&path) {
-                    Ok(vec![OverviewEvent::Unstaged { path }])
+                let mut args = vec!["update-index", "--unresolve", "--"];
+                args.extend(paths.iter().map(String::as_str));
+                git.run(&args)?;
+                let conflicted = operation::conflicted_paths(git)?;
+                let lost: Vec<&str> = paths
+                    .iter()
+                    .filter(|path| !conflicted.contains(path))
+                    .map(String::as_str)
+                    .collect();
+                if lost.is_empty() {
+                    Ok(vec![OverviewEvent::Unstaged { paths }])
                 } else {
                     Err(OverviewError::Invalid(format!(
-                        "git no longer keeps the conflict of {path}, so it cannot be unstaged"
+                        "git no longer keeps the conflict of {}, so it cannot be unstaged",
+                        lost.join(", ")
                     )))
                 }
             }
@@ -538,6 +591,19 @@ impl Overview {
                 .map_err(OverviewError::Io)?;
                 Ok(vec![OverviewEvent::Written { path }])
             }
+            OverviewCommand::MarkResolved { path } => {
+                let unusual = snapshot.files.iter().any(|file| {
+                    file.path == path
+                        && file.state == State::Unresolved
+                        && file.special == Some(Special::Unusual)
+                });
+                if !unusual {
+                    return Err(OverviewError::NotThatKind(path));
+                }
+                // `--all` also stages a removal, when the path is gone.
+                git.run(&["add", "--all", "--", &path])?;
+                Ok(vec![OverviewEvent::Settled { path }])
+            }
             OverviewCommand::StageResolved => {
                 let paths: Vec<String> = snapshot
                     .files
@@ -614,6 +680,9 @@ impl Overview {
     pub fn deletion(&self, git: &dyn Git, path: &str) -> Result<Deletion, OverviewError> {
         let ours = stage(git, path, Version::Ours)?;
         let theirs = stage(git, path, Version::Theirs)?;
+        if stage_number(git, path, "1")?.is_none() {
+            return Err(OverviewError::NotThatKind(path.to_string()));
+        }
         let (deleted_by, kept) = match (&ours, &theirs) {
             (None, Some(kept)) => (Version::Ours, kept),
             (Some(kept), None) => (Version::Theirs, kept),
@@ -648,6 +717,50 @@ impl Overview {
             kept_lines: std::str::from_utf8(kept)
                 .ok()
                 .map(|text| text.lines().count()),
+        })
+    }
+
+    /// What git left of an unusual conflict, and how to settle it.
+    pub fn unusual(&self, git: &dyn Git, path: &str) -> Result<UnusualConflict, OverviewError> {
+        let stages = Stages::of(git, path)?;
+        let (ours_label, theirs_label) = side_labels(git)?;
+        let (what, advice) = match stages.unusual() {
+            Some(Unusual::Submodule) => (
+                String::from("A submodule both sides moved to different commits."),
+                String::from(
+                    "Check out the commit you want inside the submodule, then mark it resolved: the commit checked out is staged.",
+                ),
+            ),
+            Some(Unusual::Link) => (
+                String::from("A symbolic link both sides changed."),
+                String::from("Point the link where you want in the folder, then mark it resolved."),
+            ),
+            Some(Unusual::RenamedOnBothSides) => (
+                String::from("Both sides renamed this file, each to its own name."),
+                String::from(
+                    "The new names are listed as files of their own. Mark this one resolved to drop the old name, unless you want to keep it in the folder.",
+                ),
+            ),
+            Some(Unusual::OneSideOnly(version)) => {
+                let side = match version {
+                    Version::Ours => ours_label,
+                    Version::Theirs => theirs_label,
+                };
+                (
+                    format!(
+                        "Only {side} has this name, in a conflict on the file's name (both sides renamed it, or added it under different names)."
+                    ),
+                    String::from(
+                        "Keep it as it is in the folder, or delete it there first, then mark it resolved.",
+                    ),
+                )
+            }
+            None => return Err(OverviewError::NotThatKind(path.to_string())),
+        };
+        Ok(UnusualConflict {
+            what,
+            advice,
+            in_folder: self.root.join(path).symlink_metadata().is_ok(),
         })
     }
 
@@ -815,20 +928,15 @@ impl Overview {
             return Ok(view);
         }
         view.state = State::Unresolved;
-        // Stages 2 and 3 are ours and theirs: one missing means that side
-        // deleted the file.
-        let stages = git.run(&["ls-files", "--unmerged", "-z", "--", path])?;
-        let has = |stage: &str| {
-            stages
-                .split('\0')
-                .any(|entry| entry.split_whitespace().nth(2) == Some(stage))
-        };
-        if has("2") != has("3") {
-            view.kind = String::from("Deleted on one side");
-            view.special = Some(Special::DeletedOnOneSide);
+        let stages = Stages::of(git, path)?;
+        if let Some(unusual) = stages.unusual() {
+            view.kind = unusual.kind().to_string();
+            view.special = Some(Special::Unusual);
             return Ok(view);
         }
-        if !(has("2") && has("3")) {
+        if stages.ours.is_none() || stages.theirs.is_none() {
+            view.kind = String::from("Deleted on one side");
+            view.special = Some(Special::DeletedOnOneSide);
             return Ok(view);
         }
         let Ok(bytes) = std::fs::read(self.root.join(path)) else {
@@ -856,11 +964,122 @@ impl Overview {
             view.conflicts = Some(count);
             view.openable = true;
             if count == 0 {
-                view.state = State::Resolved;
+                if self.left_as_ours(git, path, text.as_bytes())? {
+                    view.kind = String::from("Not merged by git");
+                    view.special = Some(Special::NotMerged);
+                    view.openable = false;
+                } else {
+                    view.state = State::Resolved;
+                }
             }
         }
         Ok(view)
     }
+
+    /// Git did not merge the file (`-merge` or `merge=binary` in
+    /// `.gitattributes`) and it still holds ours as git left it: no
+    /// markers, yet nothing was decided.
+    fn left_as_ours(&self, git: &dyn Git, path: &str, content: &[u8]) -> Result<bool, GitError> {
+        let attribute = git.run(&["check-attr", "-z", "merge", "--", path])?;
+        let value = attribute.split('\0').nth(2).unwrap_or_default();
+        if value != "unset" && value != "binary" {
+            return Ok(false);
+        }
+        Ok(stage(git, path, Version::Ours)?.as_deref() == Some(content))
+    }
+}
+
+/// The versions git staged for an unmerged path: the mode of the
+/// base (stage 1), ours (2) and theirs (3), `None` when it has none.
+struct Stages {
+    base: Option<String>,
+    ours: Option<String>,
+    theirs: Option<String>,
+}
+
+/// A conflict shape with no two versions to compare.
+enum Unusual {
+    Submodule,
+    Link,
+    /// Only the base: each side gave it another name.
+    RenamedOnBothSides,
+    /// No base and one side: the name one side gave in a rename, or an
+    /// addition in a conflict on the name.
+    OneSideOnly(Version),
+}
+
+impl Unusual {
+    fn kind(&self) -> &'static str {
+        match self {
+            Unusual::Submodule => "Submodule",
+            Unusual::Link => "Symbolic link",
+            Unusual::RenamedOnBothSides => "Renamed on both sides",
+            Unusual::OneSideOnly(_) => "Name on one side only",
+        }
+    }
+}
+
+impl Stages {
+    fn of(git: &dyn Git, path: &str) -> Result<Stages, GitError> {
+        let output = git.run(&["ls-files", "--unmerged", "-z", "--", path])?;
+        let mut stages = Stages {
+            base: None,
+            ours: None,
+            theirs: None,
+        };
+        // `<mode> <object> <stage>\t<path>`.
+        for entry in output.split('\0') {
+            let Some((info, _)) = entry.split_once('\t') else {
+                continue;
+            };
+            let mut fields = info.split(' ');
+            let (Some(mode), Some(_object), Some(stage)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let mode = Some(mode.to_string());
+            match stage {
+                "1" => stages.base = mode,
+                "2" => stages.ours = mode,
+                "3" => stages.theirs = mode,
+                _ => {}
+            }
+        }
+        Ok(stages)
+    }
+
+    fn unusual(&self) -> Option<Unusual> {
+        let modes = [&self.base, &self.ours, &self.theirs];
+        let any = |wanted: &str| modes.iter().any(|mode| mode.as_deref() == Some(wanted));
+        if any("160000") {
+            return Some(Unusual::Submodule);
+        }
+        if any("120000") {
+            return Some(Unusual::Link);
+        }
+        match (&self.base, &self.ours, &self.theirs) {
+            (Some(_), None, None) => Some(Unusual::RenamedOnBothSides),
+            (None, Some(_), None) => Some(Unusual::OneSideOnly(Version::Ours)),
+            (None, None, Some(_)) => Some(Unusual::OneSideOnly(Version::Theirs)),
+            _ => None,
+        }
+    }
+}
+
+/// Paths whose conflict was resolved at this step, by `git add` or
+/// `git rm`: git keeps their versions (resolve-undo) until the step ends.
+fn staged_this_step(git: &dyn Git) -> Result<Vec<String>, GitError> {
+    let output = git.run(&["ls-files", "--resolve-undo", "-z"])?;
+    let mut paths: Vec<String> = Vec::new();
+    for entry in output.split('\0') {
+        if let Some((_, path)) = entry.split_once('\t')
+            && !paths.iter().any(|known| known == path)
+        {
+            paths.push(path.to_string());
+        }
+    }
+    Ok(paths)
 }
 
 /// A version of the file as git staged it; `None` when that side has

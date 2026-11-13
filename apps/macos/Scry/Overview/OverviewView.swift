@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// S1: the operation in progress and its conflicted files.
@@ -91,7 +92,12 @@ struct OverviewView: View {
                 }
                 .help(Shortcut.refresh.help())
                 .keyboardShortcut(Shortcut.refresh)
+                .disabled(viewModel.isRunning)
             }
+        }
+        // Back from a terminal or another tool: the files may have changed.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            viewModel.refresh()
         }
         .sheet(item: Binding(get: { viewModel.special }, set: { if $0 == nil { viewModel.closeSpecial() } })) { special in
             SpecialFileView(viewModel: special) { viewModel.closeSpecial() }
@@ -184,7 +190,7 @@ struct OverviewView: View {
     private var footer: some View {
         HStack(spacing: 10) {
             Button(viewModel.abortTitle, role: .destructive) { viewModel.confirmingAbort = true }
-                .disabled(!viewModel.hasOperation)
+                .disabled(!viewModel.canAbort)
             if let error = viewModel.error {
                 Text(error)
                     .font(Metrics.callout)
@@ -192,11 +198,16 @@ struct OverviewView: View {
                     .lineLimit(2)
             }
             Spacer()
-            Text(viewModel.continueReason ?? viewModel.unresolvedSummary)
+            if viewModel.isRunning {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            Text(viewModel.footerNote)
                 .font(Metrics.callout)
                 .foregroundStyle(Theme.Surfaces.textSecondary)
             if viewModel.canSkip {
                 Button("Skip commit…") { viewModel.confirmingSkip = true }
+                    .disabled(viewModel.isRunning)
             }
             if viewModel.showsStage {
                 Button(viewModel.stageTitle) { viewModel.stageResolved() }
@@ -367,13 +378,14 @@ private struct PreviewOverview: OverviewSource {
         )
     }
 
-    func apply(action: OverviewAction) throws {}
+    func apply(action: OverviewAction) throws -> OverviewSnapshot { try snapshot() }
     func deletion(path: String) throws -> DeletionInfo { try SpecialSamples().deletion(path: path) }
     func binary(path: String) throws -> BinaryInfo { try SpecialSamples().binary(path: path) }
     func project(path: String) throws -> ProjectInfo { try SpecialSamples().project(path: path) }
     func catalog(path: String) throws -> CatalogInfo { try SpecialSamples().catalog(path: path) }
     func packages(path: String) throws -> PackagesInfo { try SpecialSamples().packages(path: path) }
     func lockfile(path: String) throws -> LockfileInfo { try SpecialSamples().lockfile(path: path) }
+    func unusual(path: String) throws -> UnusualInfo { try SpecialSamples().unusual(path: path) }
     func commitDiff(commit: String, path: String) throws -> [CommitDiffLine] { Self.diff }
 
     /// The same files, in a merge of main into the branch.
@@ -411,13 +423,14 @@ private struct PreviewOverview: OverviewSource {
             )
         }
 
-        func apply(action: OverviewAction) throws {}
+        func apply(action: OverviewAction) throws -> OverviewSnapshot { try snapshot() }
         func deletion(path: String) throws -> DeletionInfo { try SpecialSamples().deletion(path: path) }
         func binary(path: String) throws -> BinaryInfo { try SpecialSamples().binary(path: path) }
         func project(path: String) throws -> ProjectInfo { try SpecialSamples().project(path: path) }
         func catalog(path: String) throws -> CatalogInfo { try SpecialSamples().catalog(path: path) }
         func packages(path: String) throws -> PackagesInfo { try SpecialSamples().packages(path: path) }
         func lockfile(path: String) throws -> LockfileInfo { try SpecialSamples().lockfile(path: path) }
+    func unusual(path: String) throws -> UnusualInfo { try SpecialSamples().unusual(path: path) }
         func commitDiff(commit: String, path: String) throws -> [CommitDiffLine] { [] }
     }
 

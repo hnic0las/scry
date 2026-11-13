@@ -97,6 +97,7 @@ final class SpecialFileViewModel {
     private(set) var catalog: CatalogInfo?
     private(set) var packages: PackagesInfo?
     private(set) var lockfile: LockfileInfo?
+    private(set) var unusual: UnusualInfo?
     /// The side of the lockfile written, waiting for the command.
     private(set) var taken: FileVersion?
     private(set) var picks: [FileVersion?] = []
@@ -105,19 +106,27 @@ final class SpecialFileViewModel {
     var removeMissing = true
 
     @ObservationIgnored private let source: OverviewSource
+    /// Git is writing or staging the file: the buttons wait for it.
+    private(set) var isRunning = false
+
+    @ObservationIgnored private let changed: (OverviewSnapshot) -> Void
     @ObservationIgnored private let done: () -> Void
+    @ObservationIgnored private var work: Task<Void, Never>?
     @ObservationIgnored private let openInEditor: (OverviewFile) -> Void
 
-    /// `done` runs once the file is settled; `openInEditor` hands a text
-    /// file to the merge editor instead.
+    /// `changed` gets the overview as each action leaves it; `done` runs
+    /// once the file is settled; `openInEditor` hands a text file to the
+    /// merge editor instead.
     init(
         file: OverviewFile,
         source: OverviewSource,
+        changed: @escaping (OverviewSnapshot) -> Void = { _ in },
         done: @escaping () -> Void,
         openInEditor: @escaping (OverviewFile) -> Void
     ) {
         self.file = file
         self.source = source
+        self.changed = changed
         self.done = done
         self.openInEditor = openInEditor
         load()
@@ -137,6 +146,8 @@ final class SpecialFileViewModel {
         case .stringCatalog: "String catalog"
         case .packageResolved: "Swift package pins"
         case .lockfile: lockfile.map { "\($0.tool) lockfile, written by \($0.tool) from \($0.manifest)" } ?? "Lockfile"
+        case .notMerged: "Not merged by git"
+        case .unusual: file.kind
         }
     }
 
@@ -149,6 +160,11 @@ final class SpecialFileViewModel {
             return "\(deletion.deletedLabel) deleted it; \(deletion.keptLabel) changed it\(lines). Keep the changed file, or delete it."
         case .binary:
             return "Git cannot merge binary files. Take one version whole."
+        case .notMerged:
+            return ".gitattributes tells git not to merge this file, so it left your version without markers. Take one version whole."
+        case .unusual:
+            guard let unusual else { return "" }
+            return "\(unusual.what) \(unusual.advice)"
         case .projectFile:
             guard let project else { return "" }
             let total = project.conflicts.count
@@ -342,6 +358,18 @@ final class SpecialFileViewModel {
 
     var canMergeLines: Bool { lockfile?.mergesByLines ?? false }
 
+    // MARK: Unusual
+
+    /// What marking it resolved stages.
+    var folderNote: String? {
+        guard let unusual else { return nil }
+        return unusual.inFolder
+            ? "It is in the folder: marking it resolved stages it as it is there."
+            : "It is not in the folder: marking it resolved stages its removal."
+    }
+
+    var canMarkResolved: Bool { unusual != nil }
+
     // MARK: Labels
 
     var oursLabel: String {
@@ -422,6 +450,12 @@ final class SpecialFileViewModel {
         run(.mergeLockfileLines(path: file.path))
     }
 
+    /// Stages the file as it is in the folder, or its removal.
+    func markResolved() {
+        guard canMarkResolved else { return }
+        run(.markResolved(path: file.path))
+    }
+
     /// Closes the sheet once the lockfile is taken.
     func finish() {
         done()
@@ -438,7 +472,8 @@ final class SpecialFileViewModel {
         do {
             switch kind {
             case .deletedOnOneSide: deletion = try source.deletion(path: file.path)
-            case .binary: binary = try source.binary(path: file.path)
+            case .binary, .notMerged: binary = try source.binary(path: file.path)
+            case .unusual: unusual = try source.unusual(path: file.path)
             case .projectFile: project = try source.project(path: file.path)
             case .stringCatalog:
                 let catalog = try source.catalog(path: file.path)
@@ -455,14 +490,30 @@ final class SpecialFileViewModel {
         }
     }
 
+    /// Runs the action off the main actor, one at a time; on success the
+    /// overview gets the snapshot the core read after it.
     private func run(_ action: OverviewAction, then next: (() -> Void)? = nil) {
-        do {
-            try source.apply(action: action)
-            error = nil
-            (next ?? done)()
-        } catch {
-            self.error = "\(error)"
+        guard !isRunning else { return }
+        isRunning = true
+        let source = source
+        work = Task { [weak self] in
+            let result = await Task.detached { Result { try source.apply(action: action) } }.value
+            guard let self else { return }
+            isRunning = false
+            switch result {
+            case .success(let snapshot):
+                error = nil
+                changed(snapshot)
+                (next ?? done)()
+            case .failure(let failure):
+                error = "\(failure)"
+            }
         }
+    }
+
+    /// Waits for the action in flight, if any.
+    func idle() async {
+        await work?.value
     }
 }
 

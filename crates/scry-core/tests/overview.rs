@@ -432,10 +432,10 @@ fn one_file_is_staged_then_unstaged() {
     let git = repo.cli();
     let mut overview = Overview::new(repo.path());
     let stage = |path: &str| OverviewCommand::Stage {
-        path: path.to_string(),
+        paths: vec![path.to_string()],
     };
     let unstage = |path: &str| OverviewCommand::Unstage {
-        path: path.to_string(),
+        paths: vec![path.to_string()],
     };
 
     // Still conflicted: nothing to stage.
@@ -459,7 +459,7 @@ fn one_file_is_staged_then_unstaged() {
     assert_eq!(
         overview.apply(&git, unstage("a.txt")).unwrap(),
         [OverviewEvent::Unstaged {
-            path: String::from("a.txt")
+            paths: vec![String::from("a.txt")]
         }]
     );
     assert_eq!(state(&mut overview, &git, "a.txt"), State::Resolved);
@@ -664,7 +664,7 @@ fn special_files_are_settled_from_the_overview() {
         .apply(
             &git,
             OverviewCommand::Unstage {
-                path: String::from("gone.txt"),
+                paths: vec![String::from("gone.txt")],
             },
         )
         .unwrap();
@@ -932,7 +932,7 @@ fn a_name_with_glob_characters_stages_only_itself() {
         .apply(
             &git,
             OverviewCommand::Stage {
-                path: String::from("file[1].txt"),
+                paths: vec![String::from("file[1].txt")],
             },
         )
         .unwrap();
@@ -1192,4 +1192,301 @@ fn a_failed_skip_is_reported() {
     fs::remove_file(&lock).unwrap();
     assert!(overview.apply(&git, OverviewCommand::Skip).is_ok());
     assert!(overview.refresh(&git).unwrap().operation.is_none());
+}
+
+/// A repository whose `main` and `feature` were made by `setup`, which
+/// stages its own changes; `feature` is merged into `main` with conflicts.
+fn stopped_merge(setup: impl Fn(&Repo, &str)) -> Repo {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("gitconfig"), "").unwrap();
+    fs::create_dir_all(root.path().join("repo")).unwrap();
+    let repo = Repo { root };
+    repo.ok(&["init", "--quiet", "--initial-branch=main"]);
+    setup(&repo, "base");
+    repo.ok(&["commit", "--quiet", "-m", "base"]);
+    repo.ok(&["switch", "--quiet", "-c", "feature"]);
+    setup(&repo, "feature");
+    repo.ok(&["commit", "--quiet", "-m", "feature"]);
+    repo.ok(&["switch", "--quiet", "main"]);
+    setup(&repo, "main");
+    repo.ok(&["commit", "--quiet", "-m", "main"]);
+    assert!(!repo.git(&["merge", "feature"]));
+    repo
+}
+
+/// The file at `path` in the overview.
+fn file(overview: &mut Overview, git: &GitCli, path: &str) -> scry_core::overview::FileView {
+    let snapshot = overview.refresh(git).unwrap();
+    snapshot
+        .files
+        .into_iter()
+        .find(|file| file.path == path)
+        .unwrap()
+}
+
+/// With `-merge` in `.gitattributes`, git leaves ours in the folder
+/// without markers. That is not a resolution: the file waits for a version
+/// to be taken, and Stage resolved leaves it alone, so the other side's
+/// change is never dropped without a decision.
+#[test]
+fn a_file_git_did_not_merge_waits_for_a_version() {
+    let repo = stopped_merge(|repo, side| {
+        fs::write(repo.path().join(".gitattributes"), "*.json -merge\n").unwrap();
+        fs::write(
+            repo.path().join("data.json"),
+            format!("{{\"{side}\": 1}}\n"),
+        )
+        .unwrap();
+        repo.ok(&["add", "--all"]);
+    });
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+
+    let data = file(&mut overview, &git, "data.json");
+    assert_eq!(data.state, State::Unresolved);
+    assert_eq!(data.special, Some(Special::NotMerged));
+    assert!(!data.openable);
+
+    overview
+        .apply(&git, OverviewCommand::StageResolved)
+        .unwrap();
+    assert_eq!(state(&mut overview, &git, "data.json"), State::Unresolved);
+
+    overview
+        .apply(
+            &git,
+            OverviewCommand::TakeVersion {
+                path: String::from("data.json"),
+                version: Version::Theirs,
+            },
+        )
+        .unwrap();
+    assert_eq!(state(&mut overview, &git, "data.json"), State::Staged);
+    assert_eq!(
+        fs::read_to_string(repo.path().join("data.json")).unwrap(),
+        "{\"feature\": 1}\n"
+    );
+
+    // Edited by hand, the same file counts as resolved.
+    let repo = stopped_merge(|repo, side| {
+        fs::write(repo.path().join(".gitattributes"), "*.json -merge\n").unwrap();
+        fs::write(
+            repo.path().join("data.json"),
+            format!("{{\"{side}\": 1}}\n"),
+        )
+        .unwrap();
+        repo.ok(&["add", "--all"]);
+    });
+    fs::write(repo.path().join("data.json"), "{\"both\": 1}\n").unwrap();
+    let mut overview = Overview::new(repo.path());
+    assert_eq!(
+        state(&mut overview, &repo.cli(), "data.json"),
+        State::Resolved
+    );
+}
+
+/// Both sides rename the same file: git leaves the old name with only its
+/// base and each new name with one side. None of them is "deleted on one
+/// side"; each is marked resolved as it is in the folder, and the merge
+/// can then continue.
+#[test]
+fn a_rename_on_both_sides_is_marked_resolved_as_in_the_folder() {
+    let repo = stopped_merge(|repo, side| {
+        let path = repo.path();
+        match side {
+            "base" => {
+                fs::write(path.join("old.txt"), "text\n").unwrap();
+                repo.ok(&["add", "old.txt"]);
+            }
+            "feature" => repo.ok(&["mv", "old.txt", "theirs.txt"]),
+            _ => repo.ok(&["mv", "old.txt", "ours.txt"]),
+        }
+    });
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    for (path, kind) in [
+        ("old.txt", "Renamed on both sides"),
+        ("ours.txt", "Name on one side only"),
+        ("theirs.txt", "Name on one side only"),
+    ] {
+        let view = file(&mut overview, &git, path);
+        assert_eq!(view.special, Some(Special::Unusual), "{path}");
+        assert_eq!(view.kind, kind, "{path}");
+    }
+    let old = overview.unusual(&git, "old.txt").unwrap();
+    assert!(!old.in_folder);
+    assert!(overview.unusual(&git, "ours.txt").unwrap().in_folder);
+
+    for path in ["old.txt", "ours.txt", "theirs.txt"] {
+        overview
+            .apply(
+                &git,
+                OverviewCommand::MarkResolved {
+                    path: String::from(path),
+                },
+            )
+            .unwrap();
+    }
+    let snapshot = overview.refresh(&git).unwrap();
+    assert!(snapshot.can_continue());
+    overview
+        .apply(&git, OverviewCommand::Continue { message: None })
+        .unwrap();
+    assert!(repo.path().join("ours.txt").exists());
+    assert!(repo.path().join("theirs.txt").exists());
+    assert!(!repo.path().join("old.txt").exists());
+}
+
+/// Mark resolved is only for the unusual shapes: an ordinary text
+/// conflict, still full of markers, is refused.
+#[test]
+fn mark_resolved_refuses_an_ordinary_conflict() {
+    let repo = Repo::stopped_rebase();
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    let error = overview
+        .apply(
+            &git,
+            OverviewCommand::MarkResolved {
+                path: String::from("a.txt"),
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, OverviewError::NotThatKind(_)));
+    assert_eq!(state(&mut overview, &git, "a.txt"), State::Unresolved);
+}
+
+/// A submodule both sides moved is not a text file to open: it is marked
+/// resolved once a commit is checked out in it, and git refuses while
+/// none is, so nothing half-done is staged.
+#[test]
+fn a_submodule_conflict_is_marked_resolved_once_a_commit_is_checked_out() {
+    let link = |repo: &Repo, commit: &str| {
+        repo.ok(&[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{},sub", commit.repeat(40)),
+        ]);
+    };
+    let repo = stopped_merge(|repo, side| {
+        fs::write(repo.path().join("f.txt"), "f\n").unwrap();
+        repo.ok(&["add", "f.txt"]);
+        link(
+            repo,
+            match side {
+                "base" => "1",
+                "feature" => "2",
+                _ => "3",
+            },
+        );
+    });
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    let sub = file(&mut overview, &git, "sub");
+    assert_eq!(sub.special, Some(Special::Unusual));
+    assert_eq!(sub.kind, "Submodule");
+
+    let mark = |overview: &mut Overview| {
+        overview.apply(
+            &git,
+            OverviewCommand::MarkResolved {
+                path: String::from("sub"),
+            },
+        )
+    };
+    assert!(mark(&mut overview).is_err());
+
+    let sub_path = repo.path().join("sub");
+    for args in [
+        vec!["init", "--quiet", "--initial-branch=main"],
+        vec!["commit", "--quiet", "--allow-empty", "-m", "chosen"],
+    ] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&sub_path)
+                .args(&args)
+                .envs(Repo::environment(repo.root.path()))
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    mark(&mut overview).unwrap();
+    assert_eq!(state(&mut overview, &git, "sub"), State::Staged);
+}
+
+/// Files staged at this step before the overview opened (by an earlier
+/// Scry window, or `git add` in a terminal) are still listed as staged,
+/// so Unstage stays within reach after a restart.
+#[test]
+fn files_staged_before_opening_are_listed_as_staged() {
+    let repo = Repo::stopped_rebase();
+    fs::write(repo.path().join("a.txt"), "a both\n").unwrap();
+    repo.ok(&["add", "a.txt"]);
+
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    let snapshot = overview.refresh(&git).unwrap();
+    let paths: Vec<&str> = snapshot
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    assert_eq!(paths, ["Sources/b.swift", "a.txt"]);
+    assert_eq!(state(&mut overview, &git, "a.txt"), State::Staged);
+
+    overview
+        .apply(
+            &git,
+            OverviewCommand::Unstage {
+                paths: vec![String::from("a.txt")],
+            },
+        )
+        .unwrap();
+    assert_eq!(state(&mut overview, &git, "a.txt"), State::Resolved);
+}
+
+/// Several rows are staged, or unstaged, in one command and one git run.
+/// With a file not resolved among them, nothing is staged: a selection is
+/// taken whole or not at all.
+#[test]
+fn several_files_are_staged_and_unstaged_in_one_command() {
+    let repo = Repo::stopped_rebase();
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    let both = vec![String::from("a.txt"), String::from("Sources/b.swift")];
+    fs::write(repo.path().join("a.txt"), "a both\n").unwrap();
+
+    let error = overview
+        .apply(
+            &git,
+            OverviewCommand::Stage {
+                paths: both.clone(),
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, OverviewError::NotThatKind(path) if path == "Sources/b.swift"));
+    assert_eq!(state(&mut overview, &git, "a.txt"), State::Resolved);
+
+    fs::write(repo.path().join("Sources/b.swift"), "let b = 3\n").unwrap();
+    overview
+        .apply(
+            &git,
+            OverviewCommand::Stage {
+                paths: both.clone(),
+            },
+        )
+        .unwrap();
+    assert!(overview.refresh(&git).unwrap().can_continue());
+
+    overview
+        .apply(&git, OverviewCommand::Unstage { paths: both })
+        .unwrap();
+    assert_eq!(state(&mut overview, &git, "a.txt"), State::Resolved);
+    assert_eq!(
+        state(&mut overview, &git, "Sources/b.swift"),
+        State::Resolved
+    );
 }

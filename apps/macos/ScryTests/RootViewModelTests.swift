@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Scry
 
@@ -143,7 +144,30 @@ struct RootViewModelTests {
 
         root.leaveEditor()
         #expect(root.editor == nil)
+        await overview.idle()
         #expect(source.reads > readsBefore)
+    }
+
+    /// Under `git mergetool`, a file that cannot be opened leaves no way to
+    /// open another, and nothing else written ever answers 0: git would
+    /// stage its file still conflicted.
+    @Test func aMergetoolFileThatFailsNeverAnswersZero() async throws {
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let root = RootViewModel()
+        await root.open(mergetool: MergetoolFiles(base: missing, local: missing, remote: missing, merged: missing))
+        #expect(root.editor == nil)
+        #expect(root.openError != nil)
+        #expect(!root.canOpen)
+        #expect(root.emptyMessage.hasPrefix("git mergetool gave Scry a file it could not open"))
+
+        // Another file written, as the empty window's buttons once allowed.
+        await root.open(try ConflictFile().url.path)
+        let editor = try #require(root.editor)
+        editor.take("theirs")
+        editor.next()
+        editor.take("ours")
+        editor.markResolved()
+        #expect(root.exitStatus == 1)
     }
 
     /// File > Open works from the empty window and the overview, but never

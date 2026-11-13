@@ -23,6 +23,9 @@ final class RootViewModel {
 
     /// The user agreed to lose the unwritten choices.
     @ObservationIgnored private var closeConfirmed = false
+    /// The editor `git mergetool` gave the window: only its file being
+    /// written answers 0.
+    @ObservationIgnored private var mergetoolEditor: MergeEditorViewModel?
 
     /// Shows every shortcut, those of the screen on display first.
     func showShortcuts() {
@@ -61,18 +64,22 @@ final class RootViewModel {
         opening = URL(fileURLWithPath: path).lastPathComponent
         defer { opening = nil }
         do {
-            let repository = try await Task.detached { try RepositoryOverview.open(path: path) }.value
-            await open(overview: repository)
+            let (repository, snapshot) = try await Task.detached {
+                let repository = try RepositoryOverview.open(path: path)
+                return (repository, try repository.snapshot())
+            }.value
+            await open(overview: repository, snapshot: snapshot)
             openError = nil
         } catch {
             openError = "\(error)"
         }
     }
 
-    /// Shows an overview read from `source`.
-    func open(overview source: OverviewSource) async {
+    /// Shows an overview read from `source`, starting from `snapshot` when
+    /// it was read already.
+    func open(overview source: OverviewSource, snapshot: OverviewSnapshot? = nil) async {
         editor = nil
-        overview = OverviewViewModel(source: source) { [weak self] file in
+        overview = OverviewViewModel(source: source, snapshot: snapshot) { [weak self] file in
             Task { await self?.open(fromOverview: file) }
         }
     }
@@ -102,6 +109,7 @@ final class RootViewModel {
     func open(mergetool files: MergetoolFiles) async {
         isMergetool = true
         await open(named: files.merged) { try await MergeModel.open(mergetool: files) }
+        mergetoolEditor = editor
     }
 
     private func open(named path: String, _ load: () async throws -> MergeModel) async {
@@ -122,7 +130,7 @@ final class RootViewModel {
     /// merge tool, 0.
     var exitStatus: Int32 {
         guard isMergetool else { return 0 }
-        return editor?.everWritten == true ? 0 : 1
+        return mergetoolEditor?.everWritten == true ? 0 : 1
     }
 
     /// Whether File > Open can replace what the window shows: not over a
@@ -178,6 +186,14 @@ final class RootViewModel {
     /// Lets the window close, losing the unwritten choices.
     func closeWithoutWriting() {
         closeConfirmed = true
+    }
+
+    /// What the empty window says: under `git mergetool`, only that the
+    /// file could not be opened, since another one would not answer git.
+    var emptyMessage: String {
+        isMergetool
+            ? "git mergetool gave Scry a file it could not open. Quit Scry to hand it back to git, which leaves it conflicted."
+            : "Open a repository with an operation in progress, a file with conflict markers, or run Scry from git mergetool."
     }
 
     var closeMessage: String {

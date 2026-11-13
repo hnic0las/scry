@@ -621,6 +621,20 @@ pub enum SpecialKind {
     StringCatalog,
     PackageResolved,
     Lockfile,
+    /// `.gitattributes` kept git from merging it: take one version.
+    NotMerged,
+    /// Renamed on both sides, a submodule, a symbolic link…: settled in
+    /// the folder, then marked resolved.
+    Unusual,
+}
+
+/// A conflict the overview can only settle as it is in the folder.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UnusualInfo {
+    pub what: String,
+    pub advice: String,
+    /// Marking it resolved stages it; otherwise it stages its removal.
+    pub in_folder: bool,
 }
 
 /// One of the two versions of a conflicted file.
@@ -914,13 +928,13 @@ pub enum RebaseStepState {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum OverviewAction {
     StageResolved,
-    /// Stages one resolved file, or one to review as the rule left it.
+    /// Stages resolved files, or files to review as the rule left them.
     Stage {
-        path: String,
+        paths: Vec<String>,
     },
-    /// Gives a staged file its conflict back, keeping its content.
+    /// Gives staged files their conflict back, keeping their content.
     Unstage {
-        path: String,
+        paths: Vec<String>,
     },
     /// At a `reword` line, `message` replaces the commit's message.
     Continue {
@@ -958,6 +972,10 @@ pub enum OverviewAction {
     ResolvePackages {
         path: String,
         picks: Vec<FileVersion>,
+    },
+    /// Stages an unusual conflict as it is in the folder.
+    MarkResolved {
+        path: String,
     },
 }
 
@@ -1095,18 +1113,22 @@ impl RepositoryOverview {
                         overview::Special::StringCatalog => SpecialKind::StringCatalog,
                         overview::Special::PackageResolved => SpecialKind::PackageResolved,
                         overview::Special::Lockfile => SpecialKind::Lockfile,
+                        overview::Special::NotMerged => SpecialKind::NotMerged,
+                        overview::Special::Unusual => SpecialKind::Unusual,
                     }),
                 })
                 .collect(),
         })
     }
 
-    /// Runs one of the operation's steps; the UI asks before `Abort`.
-    pub fn apply(&self, action: OverviewAction) -> Result<(), ScryError> {
+    /// Runs one of the operation's steps, then reads the overview again
+    /// and returns it, so the UI needs no read of its own; the UI asks
+    /// before `Abort`.
+    pub fn apply(&self, action: OverviewAction) -> Result<OverviewSnapshot, ScryError> {
         let command = match action {
             OverviewAction::StageResolved => overview::OverviewCommand::StageResolved,
-            OverviewAction::Stage { path } => overview::OverviewCommand::Stage { path },
-            OverviewAction::Unstage { path } => overview::OverviewCommand::Unstage { path },
+            OverviewAction::Stage { paths } => overview::OverviewCommand::Stage { paths },
+            OverviewAction::Unstage { paths } => overview::OverviewCommand::Unstage { paths },
             OverviewAction::Continue { message } => overview::OverviewCommand::Continue { message },
             OverviewAction::Skip => overview::OverviewCommand::Skip,
             OverviewAction::Abort => overview::OverviewCommand::Abort,
@@ -1146,11 +1168,12 @@ impl RepositoryOverview {
                     picks: picks.into_iter().map(core_version).collect(),
                 }
             }
+            OverviewAction::MarkResolved { path } => {
+                overview::OverviewCommand::MarkResolved { path }
+            }
         };
-        self.lock()
-            .apply(&self.git, command)
-            .map(|_| ())
-            .map_err(failed)
+        self.lock().apply(&self.git, command).map_err(failed)?;
+        self.snapshot()
     }
 
     /// The diff `commit` makes to `path`, read only.
@@ -1185,6 +1208,16 @@ impl RepositoryOverview {
             kept_label: deletion.kept_label,
             kept_lines: deletion.kept_lines.map(|lines| lines as u32),
             changes: deletion.changes,
+        })
+    }
+
+    /// What git left of an unusual conflict, and how to settle it.
+    pub fn unusual(&self, path: String) -> Result<UnusualInfo, ScryError> {
+        let unusual = self.lock().unusual(&self.git, &path).map_err(failed)?;
+        Ok(UnusualInfo {
+            what: unusual.what,
+            advice: unusual.advice,
+            in_folder: unusual.in_folder,
         })
     }
 

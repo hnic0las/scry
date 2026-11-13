@@ -4,7 +4,7 @@ import Testing
 
 /// An operation in memory: these tests must never stage, continue or abort
 /// in a real repository.
-final class FakeOverview: OverviewSource {
+final class FakeOverview: OverviewSource, @unchecked Sendable {
     var operation: String? = "rebase"
     var files: [OverviewFile]
     var plan: RebasePlan?
@@ -86,6 +86,10 @@ final class FakeOverview: OverviewSource {
 
     func lockfile(path: String) throws -> LockfileInfo { lockfileInfo }
 
+    var unusualInfo = UnusualInfo(what: "A submodule both sides moved to different commits.", advice: "Check out the commit you want.", inFolder: true)
+
+    func unusual(path: String) throws -> UnusualInfo { unusualInfo }
+
     /// The paths whose diff was asked for, in order.
     private(set) var diffs: [String] = []
 
@@ -98,15 +102,15 @@ final class FakeOverview: OverviewSource {
         ]
     }
 
-    func apply(action: OverviewAction) throws {
+    func apply(action: OverviewAction) throws -> OverviewSnapshot {
         actions.append(action)
         switch action {
         case .stageResolved:
             files = files.map { file($0.path, $0.state == .resolved ? .staged : $0.state, absolutePath: $0.absolutePath) }
-        case .stage(let path):
-            files = files.map { $0.path == path ? file(path, .staged) : $0 }
-        case .unstage(let path):
-            files = files.map { $0.path == path ? file(path, .resolved) : $0 }
+        case .stage(let paths):
+            files = files.map { paths.contains($0.path) ? file($0.path, .staged) : $0 }
+        case .unstage(let paths):
+            files = files.map { paths.contains($0.path) ? file($0.path, .resolved) : $0 }
         case .continue, .abort:
             reword = nil
             operation = nil
@@ -118,7 +122,10 @@ final class FakeOverview: OverviewSource {
         case .keepBothAdditions(let path, _), .resolveCatalog(let path, _), .resolvePackages(let path, _),
              .takeLockfile(let path, _), .mergeLockfileLines(let path):
             files = files.map { $0.path == path ? file(path, .resolved) : $0 }
+        case .markResolved(let path):
+            files = files.map { $0.path == path ? file(path, .staged) : $0 }
         }
+        return try snapshot()
     }
 }
 
@@ -183,18 +190,21 @@ struct OverviewViewModelTests {
 
     /// Continue waits until git has every file: staging the resolved ones
     /// goes through the core, then continue is offered and finishes.
-    @Test func stagesThenContinues() {
+    @Test func stagesThenContinues() async {
         let source = FakeOverview(files: [file("A.swift", .resolved), file("B.swift", .staged)])
         let overview = OverviewViewModel(source: source) { _ in }
         #expect(overview.stageTitle == "Stage resolved (1)")
         #expect(!overview.canContinue)
 
         overview.continueOperation()
+        await overview.idle()
         #expect(source.actions.isEmpty)
 
         overview.stageResolved()
+        await overview.idle()
         #expect(overview.canContinue)
         overview.continueOperation()
+        await overview.idle()
 
         #expect(source.actions == [.stageResolved, .continue(message: nil)])
         #expect(!overview.hasOperation)
@@ -204,7 +214,7 @@ struct OverviewViewModelTests {
     /// One file is staged once resolved, and unstaged to change it again;
     /// files in other states offer neither, so a click never asks git for
     /// what it would refuse.
-    @Test func stagesAndUnstagesOneFile() {
+    @Test func stagesAndUnstagesOneFile() async {
         let source = FakeOverview(files: [
             file("A.swift", .resolved), file("B.swift", .staged), file("C.swift", .unresolved),
         ])
@@ -213,12 +223,16 @@ struct OverviewViewModelTests {
         #expect(overview.rows.map(\.canUnstage) == [false, true, false])
 
         overview.stage("C.swift")
+        await overview.idle()
         overview.unstage("A.swift")
+        await overview.idle()
         #expect(source.actions.isEmpty)
 
         overview.stage("A.swift")
+        await overview.idle()
         overview.unstage("B.swift")
-        #expect(source.actions == [.stage(path: "A.swift"), .unstage(path: "B.swift")])
+        await overview.idle()
+        #expect(source.actions == [.stage(paths: ["A.swift"]), .unstage(paths: ["B.swift"])])
         #expect(overview.rows.map(\.state) == [.staged, .resolved, .unresolved])
     }
 
@@ -258,7 +272,7 @@ struct OverviewViewModelTests {
     /// With several rows selected, the second item counts them and works
     /// only if it applies to every row; the File menu acts on the same
     /// selection.
-    @Test func rowMenuActsOnEverySelectedRow() throws {
+    @Test func rowMenuActsOnEverySelectedRow() async throws {
         let source = FakeOverview(files: [
             file("A.swift", .resolved), file("B.swift", .resolved), file("C.swift", .staged), file("D.swift", .unresolved),
         ])
@@ -274,12 +288,48 @@ struct OverviewViewModelTests {
         #expect(mixed.stage.title == "Stage 2 Files")
         #expect(!mixed.stage.enabled)
         overview.stageOrUnstage(mixed.paths)
+        await overview.idle()
         #expect(source.actions.isEmpty)
         #expect(try #require(overview.menu(for: ["A.swift", "D.swift"])).stage.detail == "Resolve every file first")
 
         overview.stageOrUnstage(both.paths)
-        #expect(source.actions == [.stage(path: "A.swift"), .stage(path: "B.swift")])
+        await overview.idle()
+        #expect(source.actions == [.stage(paths: ["A.swift", "B.swift"])])
         #expect(try #require(overview.menu(for: ["A.swift", "B.swift", "C.swift"])).stage.title == "Unstage 3 Files")
+    }
+
+    /// While git runs an action, the steps wait: a second click never
+    /// reaches git, so it cannot act on the stop git moves to next.
+    @Test func aSecondActionWaitsForTheFirst() async {
+        let source = FakeOverview(files: [file("A.swift", .resolved)])
+        let overview = OverviewViewModel(source: source) { _ in }
+
+        overview.stageResolved()
+        #expect(overview.isRunning)
+        #expect(!overview.canStage)
+        #expect(overview.footerNote == "Git is running…")
+        overview.stageResolved()
+        overview.refresh()
+        await overview.idle()
+
+        #expect(!overview.isRunning)
+        #expect(source.actions == [.stageResolved])
+        #expect(overview.canContinue)
+    }
+
+    /// Cancelling a file's sheet reads the list again: the user may have
+    /// taken a lockfile's side, or changed the file in a terminal.
+    @Test func cancellingASheetReadsTheListAgain() async {
+        let source = FakeOverview(files: [file("Podfile.lock", .unresolved, openable: false, special: .lockfile)])
+        let overview = OverviewViewModel(source: source) { _ in }
+        overview.open("Podfile.lock")
+        #expect(overview.special != nil)
+        source.files = [file("Podfile.lock", .resolved)]
+
+        overview.closeSpecial()
+        await overview.idle()
+        #expect(overview.special == nil)
+        #expect(overview.rows.first?.state == .resolved)
     }
 
     /// The overview's hint strip offers ↩ only while a file can open, and
@@ -308,7 +358,7 @@ struct OverviewViewModelTests {
     /// At a reword step the message starts from the commit's own, can be
     /// edited and put back, and Continue hands git the edited message: the
     /// point of a reword.
-    @Test func continuesARewordWithTheMessageWritten() {
+    @Test func continuesARewordWithTheMessageWritten() async {
         let source = FakeOverview(files: [])
         source.reword = RewordInfo(message: "Retry uploads", committed: true, commit: nil)
         let overview = OverviewViewModel(source: source) { _ in }
@@ -325,13 +375,14 @@ struct OverviewViewModelTests {
 
         overview.rewordMessage = "Retry uploads twice\n\nWith a body.\n\n"
         overview.continueOperation()
+        await overview.idle()
         #expect(source.actions == [.continue(message: "Retry uploads twice\n\nWith a body.")])
         #expect(!overview.isRewording)
     }
 
     /// Git refuses an empty message, so Continue waits for one instead of
     /// failing in git.
-    @Test func anEmptyRewordMessageCannotContinue() {
+    @Test func anEmptyRewordMessageCannotContinue() async {
         let source = FakeOverview(files: [])
         source.reword = RewordInfo(message: "Retry uploads", committed: true, commit: nil)
         let overview = OverviewViewModel(source: source) { _ in }
@@ -341,17 +392,19 @@ struct OverviewViewModelTests {
         #expect(overview.rewordNote == .init(text: "Continue needs a message.", warning: true))
         #expect(overview.continueReason == "Write a message to continue")
         overview.continueOperation()
+        await overview.idle()
         #expect(source.actions.isEmpty)
     }
 
     /// Reading the operation again, after resolving a file in the editor
     /// for instance, keeps the message being typed.
-    @Test func aRefreshKeepsTheMessageBeingTyped() {
+    @Test func aRefreshKeepsTheMessageBeingTyped() async {
         let source = FakeOverview(files: [file("A.swift", .unresolved)])
         source.reword = RewordInfo(message: "Retry uploads", committed: false, commit: nil)
         let overview = OverviewViewModel(source: source) { _ in }
         overview.rewordMessage = "Retry uploads, reworded"
         overview.refresh()
+        await overview.idle()
         #expect(overview.rewordMessage == "Retry uploads, reworded")
         // Files to resolve first: the list stays, the message goes below.
         #expect(!overview.rewordOnly)
@@ -386,7 +439,7 @@ struct OverviewViewModelTests {
     /// While writing the message the user reads what the commit changes:
     /// its files, the first selected, and the selected file's diff, with
     /// who wrote it and when. Nothing to stage at such a step.
-    @Test func aCommittedRewordShowsWhatTheCommitChanges() {
+    @Test func aCommittedRewordShowsWhatTheCommitChanges() async {
         let source = FakeOverview(files: [])
         source.plan = Self.plan(current: 2)
         source.reword = RewordInfo(
@@ -419,6 +472,7 @@ struct OverviewViewModelTests {
         #expect(overview.rewordDiff.last?.text == "var outbox icon.png")
         // A refresh keeps the file being read.
         overview.refresh()
+        await overview.idle()
         #expect(overview.rewordSelection == "icon.png")
         #expect(source.diffs == ["Sources/SyncQueue.swift", "icon.png"])
     }
@@ -447,19 +501,20 @@ struct OverviewViewModelTests {
     }
 
     /// Abort only runs once confirmed: the view asks, then calls abort.
-    @Test func abortsOnlyWhenAsked() {
+    @Test func abortsOnlyWhenAsked() async {
         let source = FakeOverview(files: [file("A.swift", .unresolved)])
         let overview = OverviewViewModel(source: source) { _ in }
 
         overview.confirmingAbort = true
         #expect(source.actions.isEmpty)
         overview.abort()
+        await overview.idle()
         #expect(source.actions == [.abort])
     }
 
     /// Skip throws away the commit and the choices made in its files, so
     /// it asks first, as Abort does: the view asks, then calls skip.
-    @Test func skipsOnlyWhenAsked() {
+    @Test func skipsOnlyWhenAsked() async {
         let source = FakeOverview(files: [file("A.swift", .unresolved)])
         let overview = OverviewViewModel(source: source) { _ in }
 
@@ -467,6 +522,7 @@ struct OverviewViewModelTests {
         #expect(source.actions.isEmpty)
         #expect(overview.skipMessage.hasPrefix("Leaves the commit being applied out of the rebase"))
         overview.skip()
+        await overview.idle()
         #expect(source.actions == [.skip])
     }
 
@@ -493,7 +549,7 @@ struct OverviewViewModelTests {
 
     /// When git runs steps without conflicts after Continue, the overview
     /// says which, so a jump from step 1 to step 5 is explained.
-    @Test func explainsTheStepsGitRanOnItsOwn() {
+    @Test func explainsTheStepsGitRanOnItsOwn() async {
         let source = FakeOverview(files: [file("A.swift", .unresolved)])
         source.plan = Self.plan(current: 5)
         source.applied = [2, 3, 4]
@@ -504,6 +560,7 @@ struct OverviewViewModelTests {
 
         source.applied = [4]
         overview.refresh()
+        await overview.idle()
         #expect(overview.appliedNote == "Git ran step 4 (drop) without conflicts, then stopped at step 5.")
     }
 

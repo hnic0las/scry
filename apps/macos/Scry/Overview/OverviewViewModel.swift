@@ -4,15 +4,18 @@ import Observation
 /// Where the overview reads the operation and sends its steps: the core
 /// (`RepositoryOverview`) in the app, a fake in tests and previews, which
 /// must never stage, continue or abort in a real repository.
-protocol OverviewSource {
+/// Its calls run git, so the view models make them off the main actor.
+protocol OverviewSource: Sendable {
     func snapshot() throws -> OverviewSnapshot
-    func apply(action: OverviewAction) throws
+    /// Runs the action, then returns the overview read again.
+    func apply(action: OverviewAction) throws -> OverviewSnapshot
     func deletion(path: String) throws -> DeletionInfo
     func binary(path: String) throws -> BinaryInfo
     func project(path: String) throws -> ProjectInfo
     func catalog(path: String) throws -> CatalogInfo
     func packages(path: String) throws -> PackagesInfo
     func lockfile(path: String) throws -> LockfileInfo
+    func unusual(path: String) throws -> UnusualInfo
     func commitDiff(commit: String, path: String) throws -> [CommitDiffLine]
 }
 
@@ -177,6 +180,9 @@ final class OverviewViewModel {
 
     private(set) var snapshot: OverviewSnapshot?
     private(set) var error: String?
+    /// Git is running an action or a read: the steps wait for it, so a
+    /// second click never lands on the next stop.
+    private(set) var isRunning = false
     private(set) var filter: Filter = .all
     /// Asking before giving up the whole operation.
     var confirmingAbort = false
@@ -200,13 +206,26 @@ final class OverviewViewModel {
 
     @ObservationIgnored private let source: OverviewSource
     @ObservationIgnored private let openFile: (OverviewFile) -> Void
+    /// The git action or read in flight.
+    @ObservationIgnored private var work: Task<Void, Never>?
 
-    /// `openFile` opens a file in the merge editor; the root screen owns it.
-    init(source: OverviewSource, now: @escaping () -> Date = Date.init, openFile: @escaping (OverviewFile) -> Void) {
+    /// Starts from `snapshot`, which the app reads off the main actor;
+    /// without one (previews, tests), reads it here, at once. `openFile`
+    /// opens a file in the merge editor; the root screen owns it.
+    init(
+        source: OverviewSource,
+        snapshot: OverviewSnapshot? = nil,
+        now: @escaping () -> Date = Date.init,
+        openFile: @escaping (OverviewFile) -> Void
+    ) {
         self.source = source
         self.now = now
         self.openFile = openFile
-        refresh()
+        do {
+            show(try snapshot ?? source.snapshot())
+        } catch {
+            self.error = "\(error)"
+        }
     }
 
     // MARK: Header
@@ -521,9 +540,9 @@ final class OverviewViewModel {
     /// The menu's second item: stages the rows, or unstages them.
     func stageOrUnstage(_ paths: [String]) {
         let rows = rows.filter { paths.contains($0.path) }
-        guard Self.stageItem(rows).enabled else { return }
-        let actions: [OverviewAction] = rows.map { $0.canUnstage ? .unstage(path: $0.path) : .stage(path: $0.path) }
-        run(actions)
+        guard !rows.isEmpty, Self.stageItem(rows).enabled else { return }
+        let paths = rows.map(\.path)
+        run(rows.allSatisfy(\.canUnstage) ? .unstage(paths: paths) : .stage(paths: paths))
     }
 
     private static func openItem(_ row: FileRow) -> MenuItem {
@@ -593,6 +612,12 @@ final class OverviewViewModel {
         return left == 0 ? "" : "\(left) \(left == 1 ? "file" : "files") still unresolved"
     }
 
+    /// The footer's sentence: git at work, why Continue waits for the
+    /// message, or what is left.
+    var footerNote: String {
+        isRunning ? "Git is running…" : continueReason ?? unresolvedSummary
+    }
+
     /// Why Continue is disabled, when the message is the reason: the
     /// only sentence the footer has beside it.
     var continueReason: String? {
@@ -603,7 +628,7 @@ final class OverviewViewModel {
     var showsStage: Bool { !rewordOnly }
 
     var stageTitle: String { "Stage resolved (\(count(.resolved)))" }
-    var canStage: Bool { count(.resolved) > 0 }
+    var canStage: Bool { !isRunning && count(.resolved) > 0 }
     var continueTitle: String { "Continue \(verb)" }
     /// Every file staged, and a message when rewording: git refuses an
     /// empty one.
@@ -619,26 +644,43 @@ final class OverviewViewModel {
     }
 
     var canContinue: Bool {
-        (snapshot?.canContinue ?? false)
+        !isRunning
+            && (snapshot?.canContinue ?? false)
             && (!isRewording || !rewordMessageIsEmpty)
     }
     var canSkip: Bool { snapshot?.canSkip ?? false }
+    var canAbort: Bool { hasOperation && !isRunning }
 
     // MARK: Intents
 
-    /// Reads the operation again: files change as they are resolved in the
-    /// editor, or by hand in another tool.
+    /// Reads the operation again, off the main actor: files change as they
+    /// are resolved in the editor, or by hand in another tool. Skipped while
+    /// git runs, whose result is read anyway.
     func refresh() {
-        do {
-            snapshot = try source.snapshot()
-            error = nil
-        } catch {
-            self.error = "\(error)"
+        guard !isRunning else { return }
+        let source = source
+        perform {
+            do {
+                return (try source.snapshot(), nil)
+            } catch {
+                return (nil, "\(error)")
+            }
         }
-        let step = snapshot?.reword.map { "\(snapshot?.step ?? 0) \($0.message)" }
+    }
+
+    /// Waits for the git action or read in flight, if any.
+    func idle() async {
+        await work?.value
+    }
+
+    /// Shows a snapshot read elsewhere: by a special file's view, or after
+    /// an action.
+    func show(_ snapshot: OverviewSnapshot) {
+        self.snapshot = snapshot
+        let step = snapshot.reword.map { "\(snapshot.step ?? 0) \($0.message)" }
         if step != rewordStep {
             rewordStep = step
-            rewordMessage = snapshot?.reword?.message ?? ""
+            rewordMessage = snapshot.reword?.message ?? ""
         }
         let files = rewordFiles
         if !files.contains(where: { $0.path == rewordSelection }) {
@@ -684,12 +726,10 @@ final class OverviewViewModel {
             special = SpecialFileViewModel(
                 file: file,
                 source: source,
-                done: { [weak self] in
-                    self?.closeSpecial()
-                    self?.refresh()
-                },
+                changed: { [weak self] snapshot in self?.show(snapshot) },
+                done: { [weak self] in self?.special = nil },
                 openInEditor: { [weak self] file in
-                    self?.closeSpecial()
+                    self?.special = nil
                     self?.openFile(file)
                 }
             )
@@ -698,8 +738,12 @@ final class OverviewViewModel {
         }
     }
 
+    /// Cancel: closes the sheet and reads the list again, as the user may
+    /// have changed the file meanwhile, in a terminal or with Take Yours.
     func closeSpecial() {
+        guard special != nil else { return }
         special = nil
+        refresh()
     }
 
     func stageResolved() {
@@ -710,13 +754,13 @@ final class OverviewViewModel {
     /// Stages one resolved file.
     func stage(_ path: String) {
         guard rows.first(where: { $0.path == path })?.canStage == true else { return }
-        run(.stage(path: path))
+        run(.stage(paths: [path]))
     }
 
     /// Gives a staged file its conflict back, keeping what was resolved.
     func unstage(_ path: String) {
         guard rows.first(where: { $0.path == path })?.canUnstage == true else { return }
-        run(.unstage(path: path))
+        run(.unstage(paths: [path]))
     }
 
     func continueOperation() {
@@ -732,7 +776,7 @@ final class OverviewViewModel {
 
     /// Gives up the operation, once the user confirmed.
     func abort() {
-        guard hasOperation else { return }
+        guard canAbort else { return }
         run(.abort)
     }
 
@@ -765,23 +809,32 @@ final class OverviewViewModel {
         files.filter { $0.state == state }.count
     }
 
+    /// Runs the action off the main actor, one at a time; the core reads
+    /// the operation again after it. A failure stays shown with the
+    /// operation read again, as git may have moved anyway.
     private func run(_ action: OverviewAction) {
-        run([action])
+        guard !isRunning else { return }
+        let source = source
+        perform {
+            do {
+                return (try source.apply(action: action), nil)
+            } catch {
+                return (try? source.snapshot(), "\(error)")
+            }
+        }
     }
 
-    /// Runs the actions in order, stopping at the first that fails, then
-    /// reads the operation again; a failure stays shown after the read.
-    private func run(_ actions: [OverviewAction]) {
-        var failure: String?
-        do {
-            for action in actions {
-                try source.apply(action: action)
-            }
-        } catch {
-            failure = "\(error)"
+    /// Runs `body` off the main actor while `isRunning`, then shows the
+    /// snapshot it read and its failure, if any.
+    private func perform(_ body: @escaping @Sendable () -> (OverviewSnapshot?, String?)) {
+        isRunning = true
+        work = Task { [weak self] in
+            let (snapshot, failure) = await Task.detached { body() }.value
+            guard let self else { return }
+            isRunning = false
+            if let snapshot { show(snapshot) }
+            error = failure
         }
-        refresh()
-        if let failure { error = failure }
     }
 
     private static func commits(_ count: Int) -> String {
