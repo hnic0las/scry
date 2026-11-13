@@ -30,7 +30,9 @@ struct ScryApp: App {
             CommandGroup(after: .toolbar) {
                 LayoutCommands()
             }
-            CommandGroup(after: .help) {
+            // Scry has no help book: the default "Scry Help" item only
+            // says help is unavailable.
+            CommandGroup(replacing: .help) {
                 KeyboardShortcutsCommand()
             }
         }

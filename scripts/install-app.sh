@@ -27,6 +27,9 @@ fi
 
 echo "Building Scry (Release)…"
 derived="$workspace/target/xcode"
+# An incremental build keeps resources the project no longer has, such as
+# the old AppIcon.icns, and they would be installed with the app.
+rm -rf "$derived/Build/Products/Release/Scry.app"
 xcodebuild -project apps/macos/Scry.xcodeproj -scheme Scry -configuration Release \
   -destination 'platform=macOS' -derivedDataPath "$derived" -quiet build
 built="$derived/Build/Products/Release/Scry.app"
