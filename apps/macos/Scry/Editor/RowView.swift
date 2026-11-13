@@ -66,6 +66,11 @@ struct RowView: View {
                 CellView(cell: code.ours, pane: .ours, invalid: false, scroll: scroll, codeWidth: widths.code(widths.side))
                     .frame(width: widths.side)
                 Connector(color: Theme.Sides.ours, active: code.conflict != nil)
+                    .overlay {
+                        if code.startsBlock, let conflict = code.conflict {
+                            ConnectorButton(side: .ours, enabled: code.canTake) { take("ours", conflict) }
+                        }
+                    }
                     .frame(width: widths.connector)
                 CellView(
                     cell: code.result, pane: .result, invalid: code.resultInvalid,
@@ -74,6 +79,11 @@ struct RowView: View {
                 )
                     .frame(width: widths.result)
                 Connector(color: Theme.Sides.theirs, active: code.conflict != nil)
+                    .overlay {
+                        if code.startsBlock, let conflict = code.conflict {
+                            ConnectorButton(side: .theirs, enabled: code.canTake) { take("theirs", conflict) }
+                        }
+                    }
                     .frame(width: widths.connector)
                 CellView(cell: code.theirs, pane: .theirs, invalid: false, scroll: scroll, codeWidth: widths.code(widths.side))
                     .frame(width: widths.side)
@@ -302,6 +312,38 @@ struct Connector: View {
     var body: some View {
         Rectangle().fill(active ? color.opacity(0.12) : Theme.Surfaces.pane)
     }
+}
+
+/// The 18 pt button on a connector, on a conflict's first line: › takes
+/// ours, ‹ takes theirs, pointing at the result.
+struct ConnectorButton: View {
+    enum Side {
+        case ours, theirs
+    }
+
+    let side: Side
+    let enabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: side == .ours ? "chevron.right" : "chevron.left")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+                .frame(width: 18, height: 18)
+                .background(RoundedRectangle(cornerRadius: 4).fill(Theme.Surfaces.pane))
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Theme.Surfaces.hairline))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+        .help(shortcut.help("\(title) into the result"))
+        .accessibilityLabel("\(title) into the result")
+    }
+
+    private var title: String { side == .ours ? "Take ours" : "Take theirs" }
+    private var shortcut: Shortcut { side == .ours ? .takeOurs : .takeTheirs }
 }
 
 /// Above each conflict: its number and the state of its resolution.

@@ -203,6 +203,11 @@ final class MergeEditorViewModel {
         /// The chosen resolution does not parse.
         let resultInvalid: Bool
         let resultProvenance: Provenance
+        /// The first line of a conflict's block (after any base lines): the
+        /// connectors hold their › ‹ take buttons here.
+        var startsBlock = false
+        /// The take buttons work: no conflict is open for editing.
+        var canTake = true
     }
 
     /// The rows, built again only when the model changes: SwiftUI reads
@@ -223,19 +228,26 @@ final class MergeEditorViewModel {
     private func buildRows() -> [RowState] {
         // Once per conflict, not once per line.
         let chosen = model.conflicts.map(\.chosen)
+        let canTake = model.editing == nil
+        var lastBlock: Int?
         return model.rows.map { row in
             switch row {
             case .lens(let conflict):
                 return .lens(lensRow(Int(conflict)))
             case .code(let ours, let result, let theirs, let conflict):
                 let candidate = conflict.flatMap { chosen[Int($0)] }
+                let index = conflict.map { Int($0) }
+                let startsBlock = index != nil && result.kind != .base && index != lastBlock
+                if startsBlock { lastBlock = index }
                 return .code(CodeRowState(
                     ours: ours,
                     result: result,
                     theirs: theirs,
-                    conflict: conflict.map { Int($0) },
+                    conflict: index,
                     resultInvalid: candidate?.doesNotParse ?? false,
-                    resultProvenance: candidate?.provenance ?? .git
+                    resultProvenance: candidate?.provenance ?? .git,
+                    startsBlock: startsBlock,
+                    canTake: canTake
                 ))
             }
         }

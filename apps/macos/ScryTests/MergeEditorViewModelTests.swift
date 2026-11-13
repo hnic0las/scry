@@ -218,6 +218,27 @@ struct MergeEditorViewModelTests {
         #expect(editor.currentConflict == 1)
     }
 
+    /// The › ‹ buttons sit on each conflict's first line, under any base
+    /// lines, once per conflict, and are disabled while editing by hand.
+    @Test func connectorButtonsStartEachBlock() throws {
+        let editor = try ConflictFile().editor()
+        editor.toggleBase()
+        let starts = editor.rows.compactMap { row -> MergeEditorViewModel.CodeRowState? in
+            guard case .code(let code) = row, code.startsBlock else { return nil }
+            return code
+        }
+        #expect(starts.compactMap(\.conflict) == [0, 1])
+        #expect(starts.filter { $0.result.kind == .base }.isEmpty)
+        #expect(starts.filter { !$0.canTake }.isEmpty)
+
+        editor.startEditing()
+        let editing = editor.rows.compactMap { row -> Bool? in
+            guard case .code(let code) = row, code.startsBlock else { return nil }
+            return code.canTake
+        }
+        #expect(editing == [false, false])
+    }
+
     /// Taking the side already taken changes nothing: one undo takes the
     /// choice back, rather than an undo that seems to do nothing.
     @Test func takingTheSameSideTwiceIsOneStep() throws {
