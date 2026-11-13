@@ -35,7 +35,7 @@ export PATH="/opt/homebrew/opt/rustup/bin:$PATH"   # rustup is keg-only
 rustup default stable
 ```
 
-Check, lint and test, as the CI does on macOS, Linux and Windows:
+Check, lint and test before each commit, as the CI does on macOS, Linux and Windows. The CI runs only when a tag is pushed (`git tag v0.1.0 && git push origin v0.1.0`):
 
 ```sh
 cargo fmt --all --check

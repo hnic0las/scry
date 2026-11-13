@@ -1,8 +1,11 @@
 name: CI
 
+# Only when a tag is pushed (decided on 2026-11-13): run the checks
+# locally before each commit, as the README says.
 on:
   push:
-  pull_request:
+    tags:
+      - "*"
 
 jobs:
   rust:
