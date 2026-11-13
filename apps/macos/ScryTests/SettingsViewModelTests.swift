@@ -80,8 +80,8 @@ struct SettingsViewModelTests {
         #expect(settings.status.contains("no git-scry"))
     }
 
-    /// When git refuses the change, the settings say why and stay as they
-    /// were.
+    /// When git refuses the change, the settings say why, in the core's
+    /// sentence rather than `Failed(message: …)`, and stay as they were.
     @Test func showsWhyInstallingFailed() {
         let installer = FakeInstaller(.notSet)
         installer.failure = .Failed(message: "could not lock config file")
@@ -90,7 +90,7 @@ struct SettingsViewModelTests {
 
         settings.install()
 
-        #expect(settings.error?.contains("could not lock") == true)
+        #expect(settings.error == "could not lock config file")
         #expect(!settings.isInstalled)
     }
 

@@ -657,12 +657,21 @@ struct SpecialSamples: OverviewSource {
         throw CancellationError()
     }
 
-    func apply(action: OverviewAction) throws -> OverviewSnapshot { try snapshot() }
+    func apply(action: OverviewAction) throws -> OverviewOutcome { OverviewOutcome(events: [], snapshot: try snapshot()) }
 
     func deletion(path: String) throws -> DeletionInfo {
         DeletionInfo(
             deletedBy: .ours, deletedLabel: "feature/sync-v2 · current branch", keptLabel: "main · being merged", keptLines: 18,
-            changes: "@@ -4,7 +4,9 @@\n \n - (nullable NSData *)dataForKey:(NSString *)key {\n-    return [self.storage objectForKey:key];\n+    @synchronized (self) {\n+        return [self.storage objectForKey:key];\n+    }\n }\n"
+            changes: [
+                CommitDiffLine(kind: .hunk, oldNumber: nil, newNumber: nil, text: "@implementation OldCache"),
+                CommitDiffLine(kind: .context, oldNumber: 4, newNumber: 4, text: ""),
+                CommitDiffLine(kind: .context, oldNumber: 5, newNumber: 5, text: "- (nullable NSData *)dataForKey:(NSString *)key {"),
+                CommitDiffLine(kind: .removed, oldNumber: 6, newNumber: nil, text: "    return [self.storage objectForKey:key];"),
+                CommitDiffLine(kind: .added, oldNumber: nil, newNumber: 6, text: "    @synchronized (self) {"),
+                CommitDiffLine(kind: .added, oldNumber: nil, newNumber: 7, text: "        return [self.storage objectForKey:key];"),
+                CommitDiffLine(kind: .added, oldNumber: nil, newNumber: 8, text: "    }"),
+                CommitDiffLine(kind: .context, oldNumber: 7, newNumber: 9, text: "}"),
+            ]
         )
     }
 
@@ -717,13 +726,13 @@ struct SpecialSamples: OverviewSource {
         PackagesInfo(
             oursLabel: "feature/sync-v2 · current branch", theirsLabel: "main · being merged",
             automatic: [
-                PinChangeInfo(identity: "kingfisher", base: "7.9.0", ours: "7.9.0", theirs: "7.10.0"),
-                PinChangeInfo(identity: "lottie-ios", base: nil, ours: "4.4.1", theirs: nil),
-                PinChangeInfo(identity: "swift-collections", base: "1.0.6", ours: "1.0.6", theirs: nil),
+                PinChangeInfo(identity: "kingfisher", base: "7.9.0", ours: "7.9.0", theirs: "7.10.0", movedByOurs: false),
+                PinChangeInfo(identity: "lottie-ios", base: nil, ours: "4.4.1", theirs: nil, movedByOurs: true),
+                PinChangeInfo(identity: "swift-collections", base: "1.0.6", ours: "1.0.6", theirs: nil, movedByOurs: false),
             ],
             conflicts: [
-                PinChangeInfo(identity: "alamofire", base: "5.8.0", ours: "5.8.1", theirs: "5.9.0"),
-                PinChangeInfo(identity: "swift-snapshot-testing", base: "1.15.0", ours: "main @ 3f2a9c1", theirs: "1.16.0"),
+                PinChangeInfo(identity: "alamofire", base: "5.8.0", ours: "5.8.1", theirs: "5.9.0", movedByOurs: true),
+                PinChangeInfo(identity: "swift-snapshot-testing", base: "1.15.0", ours: "main @ 3f2a9c1", theirs: "1.16.0", movedByOurs: true),
             ],
             originHashStale: true
         )
@@ -763,7 +772,10 @@ struct SpecialSamples: OverviewSource {
             state: .unresolved,
             conflicts: nil,
             openable: ![.deletedOnOneSide, .binary, .notMerged, .unusual].contains(kind),
-            special: kind
+            special: kind,
+            canOpen: true,
+            canStage: false,
+            canUnstage: false
         )
     }
 

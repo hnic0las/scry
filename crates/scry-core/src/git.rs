@@ -5,7 +5,7 @@
 
 use std::fmt;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// What a git command produced.
@@ -71,6 +71,21 @@ impl GitCli {
         GitCli::with_program(PathBuf::from("git"), dir)
     }
 
+    /// Runs the git the user runs (`program`), as if started in `dir`: what
+    /// the app and the CLI use.
+    pub fn discover(dir: PathBuf) -> GitCli {
+        GitCli::with_program(program(), dir)
+    }
+
+    /// The user's git run from the folder of the file at `path`.
+    pub fn beside(path: &Path) -> GitCli {
+        let directory = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        GitCli::discover(directory)
+    }
+
     /// Runs `program` as git, as if started in `dir`: a front end that
     /// knows better than the `PATH` it was given which git the user runs.
     pub fn with_program(program: PathBuf, dir: PathBuf) -> GitCli {
@@ -86,6 +101,35 @@ impl GitCli {
         self.environment.push((key.to_string(), value.to_string()));
         self
     }
+}
+
+/// The git the user runs. Opened from the Finder, the Mac app gets
+/// launchd's `PATH`, where `git` is Apple's `/usr/bin/git`: without Xcode
+/// or its command-line tools, it asks to install them instead of running.
+/// A git elsewhere on the `PATH`, or else Homebrew's, is the one the
+/// user's terminal runs. Elsewhere than macOS those paths do not exist, and
+/// the `PATH` decides.
+pub fn program() -> PathBuf {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    choose_program(std::env::split_paths(&path).collect(), |candidate| {
+        candidate.is_file()
+    })
+}
+
+/// `program`'s choice among the `PATH`'s folders, with `exists` telling
+/// which files exist.
+pub fn choose_program(path: Vec<PathBuf>, exists: impl Fn(&Path) -> bool) -> PathBuf {
+    let apple = Path::new("/usr/bin/git");
+    let homebrew = [
+        PathBuf::from("/opt/homebrew/bin/git"),
+        PathBuf::from("/usr/local/bin/git"),
+    ];
+    path.into_iter()
+        .map(|directory| directory.join("git"))
+        .filter(|candidate| candidate != apple)
+        .chain(homebrew)
+        .find(|candidate| exists(candidate))
+        .unwrap_or_else(|| PathBuf::from("git"))
 }
 
 impl GitCli {
@@ -180,3 +224,39 @@ impl fmt::Display for GitError {
 }
 
 impl std::error::Error for GitError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Opened from the Finder, the app must not pick Apple's `/usr/bin/git`
+    /// over the git the user installed, which may ask to install Xcode's
+    /// tools; a git on the user's own `PATH` comes first.
+    #[test]
+    fn picks_the_users_git() {
+        let installed = |found: &'static [&'static str]| {
+            move |candidate: &Path| found.iter().any(|path| candidate == Path::new(path))
+        };
+        let launchd = vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")];
+
+        assert_eq!(
+            choose_program(
+                launchd.clone(),
+                installed(&["/usr/bin/git", "/opt/homebrew/bin/git"])
+            ),
+            PathBuf::from("/opt/homebrew/bin/git")
+        );
+        assert_eq!(
+            choose_program(
+                vec![PathBuf::from("/nix/bin"), PathBuf::from("/usr/bin")],
+                installed(&["/nix/bin/git", "/opt/homebrew/bin/git"])
+            ),
+            PathBuf::from("/nix/bin/git")
+        );
+        // Only Apple's: plain `git`, found on the PATH as before.
+        assert_eq!(
+            choose_program(launchd, installed(&["/usr/bin/git"])),
+            PathBuf::from("git")
+        );
+    }
+}

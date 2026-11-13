@@ -20,7 +20,7 @@ pub fn run(path: Option<PathBuf>, app: Option<PathBuf>) -> ExitCode {
             }
         },
     };
-    let Ok(root) = overview::root(&GitCli::new(folder.clone())) else {
+    let Ok(root) = overview::root(&GitCli::discover(folder.clone())) else {
         eprintln!("git-scry: {} is not in a git repository", folder.display());
         return ExitCode::from(2);
     };

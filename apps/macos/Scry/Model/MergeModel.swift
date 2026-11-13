@@ -123,10 +123,10 @@ final class MergeModel {
             return .written
         } catch let error as ScryError {
             if case .ChangedOnDisk = error { return .changedOnDisk }
-            failure = "\(error)"
+            failure = error.message
             return .failed
         } catch {
-            failure = "\(error)"
+            failure = error.message
             return .failed
         }
     }
@@ -180,7 +180,7 @@ final class MergeModel {
             try apply(command)
             return true
         } catch {
-            failure = "\(error)"
+            failure = error.message
             return false
         }
     }

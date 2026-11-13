@@ -11,8 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use scry_core::blame;
 use scry_core::command::{self as core, CommandError};
 use scry_core::commit_changes;
-use scry_core::conflict;
-use scry_core::git::GitCli;
+use scry_core::git::{GitCli, GitError};
 use scry_core::highlight;
 use scry_core::layout;
 use scry_core::mergetool;
@@ -22,12 +21,13 @@ use scry_core::presentation;
 use scry_core::rebase_plan;
 use scry_core::resolution::CandidateKind;
 use scry_core::session::{self, MergeSession, MergetoolFiles};
-use scry_core::syntax::{Language, ParseCheck};
+use scry_core::syntax::ParseCheck;
 use scry_core::theme;
 use scry_core::words;
 
 uniffi::setup_scaffolding!();
 
+/// Why a call failed, by kind, each with a sentence the UI shows as it is.
 #[derive(Debug, uniffi::Error)]
 pub enum ScryError {
     Failed {
@@ -38,23 +38,85 @@ pub enum ScryError {
     ChangedOnDisk {
         message: String,
     },
+    /// The action does not fit the operation as it stands: a file not in
+    /// conflict, a merge to skip, files left to stage.
+    Refused {
+        message: String,
+    },
+    /// Git ran and reported a failure (a hook, a lock file, a conflict).
+    Git {
+        message: String,
+    },
+    /// Git itself cannot be run.
+    GitMissing {
+        message: String,
+    },
+    /// The folder is not in a git repository.
+    NotARepository {
+        message: String,
+    },
+}
+
+impl ScryError {
+    fn message(&self) -> &str {
+        match self {
+            ScryError::Failed { message }
+            | ScryError::ChangedOnDisk { message }
+            | ScryError::Refused { message }
+            | ScryError::Git { message }
+            | ScryError::GitMissing { message }
+            | ScryError::NotARepository { message } => message,
+        }
+    }
 }
 
 impl fmt::Display for ScryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ScryError::Failed { message } | ScryError::ChangedOnDisk { message } => {
-                write!(f, "{message}")
-            }
-        }
+        write!(f, "{}", self.message())
     }
 }
 
 impl std::error::Error for ScryError {}
 
+impl From<GitError> for ScryError {
+    fn from(error: GitError) -> ScryError {
+        let message = sentence(&error);
+        match error {
+            GitError::Spawn(_) => ScryError::GitMissing { message },
+            GitError::Failed { .. } | GitError::UnexpectedOutput { .. } => {
+                ScryError::Git { message }
+            }
+        }
+    }
+}
+
+impl From<overview::OverviewError> for ScryError {
+    fn from(error: overview::OverviewError) -> ScryError {
+        match error {
+            overview::OverviewError::Git(error) => ScryError::from(error),
+            overview::OverviewError::Io(error) => failed(error),
+            refused => ScryError::Refused {
+                message: sentence(&refused),
+            },
+        }
+    }
+}
+
 fn failed(message: impl fmt::Display) -> ScryError {
     ScryError::Failed {
-        message: message.to_string(),
+        message: sentence(&message),
+    }
+}
+
+/// The core's messages start in lower case, for the CLI's `git-scry: …`;
+/// the app shows them as sentences.
+fn sentence(message: &impl fmt::Display) -> String {
+    let text = message.to_string();
+    let text = text.trim();
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
@@ -342,17 +404,8 @@ impl MergeDocument {
     #[uniffi::constructor]
     pub fn open(path: String) -> Result<Arc<MergeDocument>, ScryError> {
         let path = PathBuf::from(path);
-        let text = std::fs::read_to_string(&path)
-            .map_err(|error| failed(format!("cannot read {}: {error}", path.display())))?;
-        let language = Language::from_path(&path);
-        let git = git_beside(&path);
-        let marker_size = match path.file_name() {
-            Some(name) => conflict::marker_size(&git, Path::new(name)),
-            None => conflict::DEFAULT_MARKER_SIZE,
-        };
-        let session = MergeSession::from_text_with_marker_size(&text, language, marker_size)
-            .map_err(failed)?
-            .with_file(path.clone());
+        let git = GitCli::beside(&path);
+        let session = session::open_file(&git, &path).map_err(failed)?;
         let operation = operation::current(&git).ok().flatten();
         Ok(MergeDocument::new(&path, session, &git, operation))
     }
@@ -373,10 +426,8 @@ impl MergeDocument {
             remote: PathBuf::from(remote),
             merged: PathBuf::from(merged),
         };
-        let git = git_beside(&files.merged);
-        let operation = operation::current(&git).ok().flatten();
-        let (ours, theirs) = presentation::side_labels(operation.as_ref());
-        let session = session::load(&git, &files, &ours, &theirs).map_err(failed)?;
+        let git = GitCli::beside(&files.merged);
+        let (session, operation) = session::open_mergetool(&git, &files).map_err(failed)?;
         Ok(MergeDocument::new(&files.merged, session, &git, operation))
     }
 
@@ -446,16 +497,14 @@ impl MergeDocument {
     }
 
     pub fn status(&self) -> Status {
-        let session = self.lock();
+        let status = self.lock().status();
         Status {
-            can_undo: session.can_undo(),
-            can_redo: session.can_redo(),
-            resolved: (session.conflict_count() - session.unresolved()) as u32,
-            total: session.conflict_count() as u32,
-            merged: parse_status(session.merged_check()),
-            language: session
-                .language()
-                .map(|language| language.name().to_string()),
+            can_undo: status.can_undo,
+            can_redo: status.can_redo,
+            resolved: status.resolved as u32,
+            total: status.total as u32,
+            merged: parse_status(status.merged),
+            language: status.language.map(|language| language.name().to_string()),
         }
     }
 }
@@ -610,6 +659,12 @@ pub struct OverviewFile {
     pub openable: bool,
     /// The view that settles it, when it has one.
     pub special: Option<SpecialKind>,
+    /// It opens from the overview, in the editor or its own view.
+    pub can_open: bool,
+    /// Git can take it as it is.
+    pub can_stage: bool,
+    /// Its conflict can come back.
+    pub can_unstage: bool,
 }
 
 /// A conflicted file the overview settles with its own view.
@@ -653,8 +708,8 @@ pub struct DeletionInfo {
     pub deleted_label: String,
     pub kept_label: String,
     pub kept_lines: Option<u32>,
-    /// What the side that kept it changed, as a unified diff.
-    pub changes: String,
+    /// What the side that kept it changed, line by line.
+    pub changes: Vec<CommitDiffLine>,
 }
 
 /// One version of a binary file.
@@ -730,6 +785,9 @@ pub struct PinChangeInfo {
     pub base: Option<String>,
     pub ours: Option<String>,
     pub theirs: Option<String>,
+    /// Ours moved it; otherwise theirs did. For a pin taken automatically,
+    /// the side it was taken from.
+    pub moved_by_ours: bool,
 }
 
 /// A `Package.resolved` merged package by package.
@@ -784,6 +842,8 @@ pub struct OverviewSnapshot {
     pub operation: Option<String>,
     /// The operation in plain words.
     pub summary: Option<String>,
+    /// The same without a rebase's step: "Rebasing feature onto main".
+    pub headline: Option<String>,
     /// Rebase only: the commit being applied, from 1, and how many.
     pub step: Option<u32>,
     pub steps: Option<u32>,
@@ -900,8 +960,9 @@ pub struct RebasePlan {
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct RebaseStep {
     pub number: u32,
+    pub action: StepAction,
     /// Git's word: "pick", "reword", "fixup", "drop", "exec"…
-    pub action: String,
+    pub action_name: String,
     /// The todo list's commit, which stays once the step is done.
     pub short_id: Option<String>,
     /// The commit's subject, or an `exec`'s command; once done, the
@@ -914,6 +975,21 @@ pub struct RebaseStep {
     pub state: RebaseStepState,
     /// A fixup or squash joins the commit of this step.
     pub joins: Option<u32>,
+}
+
+/// A todo list line's action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum StepAction {
+    Pick,
+    Reword,
+    Edit,
+    Squash,
+    Fixup,
+    Drop,
+    Exec,
+    Break,
+    /// `label`, `reset`, `merge`, `update-ref`.
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -979,6 +1055,89 @@ pub enum OverviewAction {
     },
 }
 
+fn diff_line(line: commit_changes::DiffLine) -> CommitDiffLine {
+    CommitDiffLine {
+        kind: match line.kind {
+            commit_changes::LineKind::Hunk => DiffLineKind::Hunk,
+            commit_changes::LineKind::Context => DiffLineKind::Context,
+            commit_changes::LineKind::Added => DiffLineKind::Added,
+            commit_changes::LineKind::Removed => DiffLineKind::Removed,
+        },
+        old_number: line.old_number.map(|number| number as u32),
+        new_number: line.new_number.map(|number| number as u32),
+        text: line.text,
+    }
+}
+
+/// What a commit message gets wrong, if anything.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MessageCheck {
+    pub empty: bool,
+    pub subject_length: u32,
+    pub subject_too_long: bool,
+    pub second_line_is_text: bool,
+}
+
+/// The subject's length that `git log`, GitHub and the rebase plan show
+/// whole.
+#[uniffi::export]
+pub fn commit_subject_limit() -> u32 {
+    scry_core::commit_message::SUBJECT_LIMIT as u32
+}
+
+/// Checks a commit message as git and forges read it.
+#[uniffi::export]
+pub fn check_message(message: String) -> MessageCheck {
+    let check = scry_core::commit_message::check(&message);
+    MessageCheck {
+        empty: check.empty,
+        subject_length: check.subject_length as u32,
+        subject_too_long: check.subject_too_long,
+        second_line_is_text: check.second_line_is_text,
+    }
+}
+
+/// What an overview action did, mirroring the core's `OverviewEvent`.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum OverviewEvent {
+    Staged {
+        paths: Vec<String>,
+    },
+    Unstaged {
+        paths: Vec<String>,
+    },
+    Continued,
+    Skipped,
+    Aborted,
+    /// A file kept, deleted or taken whole, and staged.
+    Settled {
+        path: String,
+    },
+    /// A file written without markers, to stage with the others.
+    Written {
+        path: String,
+    },
+}
+
+/// An action's events, and the overview it leaves.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct OverviewOutcome {
+    pub events: Vec<OverviewEvent>,
+    pub snapshot: OverviewSnapshot,
+}
+
+fn overview_event(event: overview::OverviewEvent) -> OverviewEvent {
+    match event {
+        overview::OverviewEvent::Staged { paths } => OverviewEvent::Staged { paths },
+        overview::OverviewEvent::Unstaged { paths } => OverviewEvent::Unstaged { paths },
+        overview::OverviewEvent::Continued => OverviewEvent::Continued,
+        overview::OverviewEvent::Skipped => OverviewEvent::Skipped,
+        overview::OverviewEvent::Aborted => OverviewEvent::Aborted,
+        overview::OverviewEvent::Settled { path } => OverviewEvent::Settled { path },
+        overview::OverviewEvent::Written { path } => OverviewEvent::Written { path },
+    }
+}
+
 /// The operation overview of one repository (S1).
 #[derive(uniffi::Object)]
 pub struct RepositoryOverview {
@@ -991,11 +1150,15 @@ impl RepositoryOverview {
     /// The overview of the repository holding `path`, any folder in it.
     #[uniffi::constructor]
     pub fn open(path: String) -> Result<Arc<RepositoryOverview>, ScryError> {
-        let probe = GitCli::with_program(git_program(), PathBuf::from(&path));
-        let root = overview::root(&probe)
-            .map_err(|_| failed(format!("{path} is not in a git repository")))?;
+        let probe = GitCli::discover(PathBuf::from(&path));
+        let root = overview::root(&probe).map_err(|error| match error {
+            GitError::Spawn(_) => ScryError::from(error),
+            _ => ScryError::NotARepository {
+                message: format!("{path} is not in a git repository."),
+            },
+        })?;
         Ok(Arc::new(RepositoryOverview {
-            git: GitCli::with_program(git_program(), root.clone()),
+            git: GitCli::discover(root.clone()),
             overview: Mutex::new(overview::Overview::new(root)),
         }))
     }
@@ -1003,7 +1166,7 @@ impl RepositoryOverview {
     /// Reads the operation and its files again.
     pub fn snapshot(&self) -> Result<OverviewSnapshot, ScryError> {
         let mut overview = self.lock();
-        let snapshot = overview.refresh(&self.git).map_err(failed)?;
+        let snapshot = overview.refresh(&self.git)?;
         let root = overview.root().to_path_buf();
         let operation = snapshot.operation.as_ref();
         Ok(OverviewSnapshot {
@@ -1022,6 +1185,7 @@ impl RepositoryOverview {
                 .to_string()
             }),
             summary: operation.map(|operation| operation.summary()),
+            headline: operation.map(|operation| operation.headline()),
             step: operation
                 .and_then(|operation| operation.progress)
                 .map(|progress| progress.current as u32),
@@ -1080,7 +1244,18 @@ impl RepositoryOverview {
                     .iter()
                     .map(|step| RebaseStep {
                         number: step.number as u32,
-                        action: step.action.name().to_string(),
+                        action: match step.action {
+                            rebase_plan::Action::Pick => StepAction::Pick,
+                            rebase_plan::Action::Reword => StepAction::Reword,
+                            rebase_plan::Action::Edit => StepAction::Edit,
+                            rebase_plan::Action::Squash => StepAction::Squash,
+                            rebase_plan::Action::Fixup => StepAction::Fixup,
+                            rebase_plan::Action::Drop => StepAction::Drop,
+                            rebase_plan::Action::Exec => StepAction::Exec,
+                            rebase_plan::Action::Break => StepAction::Break,
+                            rebase_plan::Action::Other => StepAction::Other,
+                        },
+                        action_name: step.action.name().to_string(),
                         short_id: step.short_id.clone(),
                         subject: step.subject.clone(),
                         replayed_id: step.replayed_id.clone(),
@@ -1099,6 +1274,9 @@ impl RepositoryOverview {
                 .into_iter()
                 .map(|file| OverviewFile {
                     absolute_path: root.join(&file.path).display().to_string(),
+                    can_open: file.can_open(),
+                    can_stage: file.can_stage(),
+                    can_unstage: file.can_unstage(),
                     path: file.path,
                     name: file.name,
                     directory: file.directory,
@@ -1121,10 +1299,10 @@ impl RepositoryOverview {
         })
     }
 
-    /// Runs one of the operation's steps, then reads the overview again
-    /// and returns it, so the UI needs no read of its own; the UI asks
-    /// before `Abort`.
-    pub fn apply(&self, action: OverviewAction) -> Result<OverviewSnapshot, ScryError> {
+    /// Runs one of the operation's steps: what it did, and the overview
+    /// read again, so the UI needs no read of its own. The UI asks before
+    /// `Abort`.
+    pub fn apply(&self, action: OverviewAction) -> Result<OverviewOutcome, ScryError> {
         let command = match action {
             OverviewAction::StageResolved => overview::OverviewCommand::StageResolved,
             OverviewAction::Stage { paths } => overview::OverviewCommand::Stage { paths },
@@ -1172,8 +1350,11 @@ impl RepositoryOverview {
                 overview::OverviewCommand::MarkResolved { path }
             }
         };
-        self.lock().apply(&self.git, command).map_err(failed)?;
-        self.snapshot()
+        let events = self.lock().apply(&self.git, command)?;
+        Ok(OverviewOutcome {
+            events: events.into_iter().map(overview_event).collect(),
+            snapshot: self.snapshot()?,
+        })
     }
 
     /// The diff `commit` makes to `path`, read only.
@@ -1182,38 +1363,25 @@ impl RepositoryOverview {
         commit: String,
         path: String,
     ) -> Result<Vec<CommitDiffLine>, ScryError> {
-        let lines = commit_changes::diff(&self.git, &commit, &path).map_err(failed)?;
-        Ok(lines
-            .into_iter()
-            .map(|line| CommitDiffLine {
-                kind: match line.kind {
-                    commit_changes::LineKind::Hunk => DiffLineKind::Hunk,
-                    commit_changes::LineKind::Context => DiffLineKind::Context,
-                    commit_changes::LineKind::Added => DiffLineKind::Added,
-                    commit_changes::LineKind::Removed => DiffLineKind::Removed,
-                },
-                old_number: line.old_number.map(|number| number as u32),
-                new_number: line.new_number.map(|number| number as u32),
-                text: line.text,
-            })
-            .collect())
+        let lines = commit_changes::diff(&self.git, &commit, &path)?;
+        Ok(lines.into_iter().map(diff_line).collect())
     }
 
     /// Who deleted a file the other side changed.
     pub fn deletion(&self, path: String) -> Result<DeletionInfo, ScryError> {
-        let deletion = self.lock().deletion(&self.git, &path).map_err(failed)?;
+        let deletion = self.lock().deletion(&self.git, &path)?;
         Ok(DeletionInfo {
             deleted_by: ffi_version(deletion.deleted_by),
             deleted_label: deletion.deleted_label,
             kept_label: deletion.kept_label,
             kept_lines: deletion.kept_lines.map(|lines| lines as u32),
-            changes: deletion.changes,
+            changes: deletion.changes.into_iter().map(diff_line).collect(),
         })
     }
 
     /// What git left of an unusual conflict, and how to settle it.
     pub fn unusual(&self, path: String) -> Result<UnusualInfo, ScryError> {
-        let unusual = self.lock().unusual(&self.git, &path).map_err(failed)?;
+        let unusual = self.lock().unusual(&self.git, &path)?;
         Ok(UnusualInfo {
             what: unusual.what,
             advice: unusual.advice,
@@ -1223,7 +1391,7 @@ impl RepositoryOverview {
 
     /// Both versions of a file to take whole.
     pub fn binary(&self, path: String) -> Result<BinaryInfo, ScryError> {
-        let (ours, theirs) = self.lock().binary(&self.git, &path).map_err(failed)?;
+        let (ours, theirs) = self.lock().binary(&self.git, &path)?;
         let version = |version: overview::BinaryVersion| BinaryVersionInfo {
             label: version.label,
             size: version.size,
@@ -1237,8 +1405,8 @@ impl RepositoryOverview {
 
     /// What each side adds to an Xcode project file.
     pub fn project(&self, path: String) -> Result<ProjectInfo, ScryError> {
-        let review = self.lock().project(&self.git, &path).map_err(failed)?;
-        let (ours_label, theirs_label) = overview::side_labels(&self.git).map_err(failed)?;
+        let review = self.lock().project(&self.git, &path)?;
+        let (ours_label, theirs_label) = overview::side_labels(&self.git)?;
         Ok(ProjectInfo {
             ours_label,
             theirs_label,
@@ -1264,8 +1432,8 @@ impl RepositoryOverview {
 
     /// A string catalog merged key by key, and the values left to choose.
     pub fn catalog(&self, path: String) -> Result<CatalogInfo, ScryError> {
-        let merge = self.lock().catalog(&self.git, &path).map_err(failed)?;
-        let (ours_label, theirs_label) = overview::side_labels(&self.git).map_err(failed)?;
+        let merge = self.lock().catalog(&self.git, &path)?;
+        let (ours_label, theirs_label) = overview::side_labels(&self.git)?;
         Ok(CatalogInfo {
             ours_label,
             theirs_label,
@@ -1289,12 +1457,13 @@ impl RepositoryOverview {
 impl RepositoryOverview {
     /// A `Package.resolved` merged package by package.
     pub fn packages(&self, path: String) -> Result<PackagesInfo, ScryError> {
-        let merge = self.lock().packages(&self.git, &path).map_err(failed)?;
-        let (ours_label, theirs_label) = overview::side_labels(&self.git).map_err(failed)?;
+        let merge = self.lock().packages(&self.git, &path)?;
+        let (ours_label, theirs_label) = overview::side_labels(&self.git)?;
         let pins = |changes: Vec<scry_core::resolved::PinChange>| {
             changes
                 .into_iter()
                 .map(|change| PinChangeInfo {
+                    moved_by_ours: change.moved_by_ours(),
                     identity: change.identity,
                     base: change.base,
                     ours: change.ours,
@@ -1313,8 +1482,8 @@ impl RepositoryOverview {
 
     /// What each side changed in a lockfile, and how to write it again.
     pub fn lockfile(&self, path: String) -> Result<LockfileInfo, ScryError> {
-        let review = self.lock().lockfile(&self.git, &path).map_err(failed)?;
-        let (ours_label, theirs_label) = overview::side_labels(&self.git).map_err(failed)?;
+        let review = self.lock().lockfile(&self.git, &path)?;
+        let (ours_label, theirs_label) = overview::side_labels(&self.git)?;
         Ok(LockfileInfo {
             ours_label,
             theirs_label,
@@ -1404,42 +1573,7 @@ pub fn install_mergetool(cli: String, app: String) -> Result<(), ScryError> {
 /// Git for the global configuration, run from the home folder.
 fn global_git() -> GitCli {
     let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
-    GitCli::with_program(git_program(), home)
-}
-
-/// Git, run from the directory of the file at `path`.
-fn git_beside(path: &Path) -> GitCli {
-    let directory = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
-    GitCli::with_program(git_program(), directory)
-}
-
-/// The git the user runs. Opened from the Finder, the app gets launchd's
-/// `PATH`, where `git` is Apple's `/usr/bin/git`: without Xcode or its
-/// command-line tools, it asks to install them instead of running. A git
-/// elsewhere on the `PATH`, or else Homebrew's, is the one the user's
-/// terminal runs.
-fn git_program() -> PathBuf {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    choose_git(std::env::split_paths(&path).collect(), |candidate| {
-        candidate.is_file()
-    })
-}
-
-fn choose_git(path: Vec<PathBuf>, exists: impl Fn(&Path) -> bool) -> PathBuf {
-    let apple = Path::new("/usr/bin/git");
-    let homebrew = [
-        PathBuf::from("/opt/homebrew/bin/git"),
-        PathBuf::from("/usr/local/bin/git"),
-    ];
-    path.into_iter()
-        .map(|directory| directory.join("git"))
-        .filter(|candidate| candidate != apple)
-        .chain(homebrew)
-        .find(|candidate| exists(candidate))
-        .unwrap_or_else(|| PathBuf::from("git"))
+    GitCli::discover(home)
 }
 
 fn core_command(command: Command) -> Result<core::Command, ScryError> {
@@ -1594,6 +1728,34 @@ mod tests {
         document.apply(Command::Save { overwrite })
     }
 
+    /// Errors reach the app by kind, each a sentence to show as it is:
+    /// a folder outside git is not reported like a refused action, and
+    /// neither prints as `Failed(message: …)`.
+    #[test]
+    fn errors_say_what_failed_in_a_sentence() {
+        let outside = tempfile::tempdir().unwrap();
+        let Err(error) = RepositoryOverview::open(outside.path().display().to_string()) else {
+            panic!("a folder outside git opened");
+        };
+        assert!(matches!(error, ScryError::NotARepository { .. }));
+        assert!(error.to_string().ends_with("is not in a git repository."));
+
+        let repository = tempfile::tempdir().unwrap();
+        let initialised = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(repository.path())
+            .status()
+            .unwrap();
+        assert!(initialised.success());
+        let overview = RepositoryOverview::open(repository.path().display().to_string()).unwrap();
+        let error = overview.apply(OverviewAction::Abort).unwrap_err();
+        assert!(matches!(error, ScryError::Refused { .. }));
+        assert_eq!(
+            error.to_string(),
+            "No merge, rebase, cherry-pick or revert in progress"
+        );
+    }
+
     /// The Swift-facing API end to end: open a file, read its header and candidates, choose,
     /// refuse saving while unresolved, save once resolved, then edit by hand and undo.
     #[test]
@@ -1715,37 +1877,6 @@ mod tests {
         document.newline(7, String::from("{"), String::new());
         document.typed_indent(7, String::from("{\n"), String::from("}"));
         assert!(!document.status().can_undo);
-    }
-
-    /// Opened from the Finder, the app must not pick Apple's `/usr/bin/git`
-    /// over the git the user installed, which may ask to install Xcode's
-    /// tools; a git on the user's own `PATH` comes first.
-    #[test]
-    fn picks_the_users_git() {
-        let installed = |found: &'static [&'static str]| {
-            move |candidate: &Path| found.iter().any(|path| candidate == Path::new(path))
-        };
-        let launchd = vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")];
-
-        assert_eq!(
-            choose_git(
-                launchd.clone(),
-                installed(&["/usr/bin/git", "/opt/homebrew/bin/git"])
-            ),
-            PathBuf::from("/opt/homebrew/bin/git")
-        );
-        assert_eq!(
-            choose_git(
-                vec![PathBuf::from("/nix/bin"), PathBuf::from("/usr/bin")],
-                installed(&["/nix/bin/git", "/opt/homebrew/bin/git"])
-            ),
-            PathBuf::from("/nix/bin/git")
-        );
-        // Only Apple's: plain `git`, found on the PATH as before.
-        assert_eq!(
-            choose_git(launchd, installed(&["/usr/bin/git"])),
-            PathBuf::from("git")
-        );
     }
 
     /// Opened by `git mergetool`, a file in the `merge` style shows its

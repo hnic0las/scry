@@ -92,7 +92,7 @@ final class SettingsViewModel {
             error = nil
         } catch {
             setup = nil
-            self.error = "\(error)"
+            self.error = error.message
         }
     }
 
@@ -102,7 +102,7 @@ final class SettingsViewModel {
             try installer.install()
             refresh()
         } catch {
-            self.error = "\(error)"
+            self.error = error.message
         }
     }
 }

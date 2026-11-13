@@ -97,7 +97,7 @@ struct PlanStepRow: View {
                 .foregroundStyle(Theme.Surfaces.textTertiary)
                 .frame(minWidth: 12, alignment: .trailing)
                 .padding(.top, 6)
-            ActionPill(action: row.action)
+            ActionPill(action: row.action, kind: row.kind)
                 .padding(.top, 4)
             VStack(alignment: .leading, spacing: 1) {
                 Text(row.subject)
@@ -176,7 +176,7 @@ struct PlanStepRow: View {
                 .stroke(lineColor, style: StrokeStyle(lineWidth: 1.5, dash: row.state == .pending ? [2, 2] : []))
             }
             PlanNode(
-                state: row.state, dropped: row.dropped, joined: row.joined, conflicted: row.conflicted, action: row.action
+                state: row.state, dropped: row.dropped, joined: row.joined, conflicted: row.conflicted, kind: row.kind
             )
                 .position(x: x, y: middle)
         }
@@ -200,7 +200,7 @@ struct PlanNode: View {
     let joined: Bool
     /// Stopped on conflicts: the unresolved triangle, in red.
     var conflicted = false
-    let action: String
+    let kind: StepAction
 
     var body: some View {
         let size: CGFloat = joined ? 9 : state == .current ? 16 : 14
@@ -265,12 +265,12 @@ struct PlanNode: View {
         switch state {
         case .done: return "checkmark"
         case .current:
-            switch action {
-            case "edit", "break": return "pause.fill"
-            case "reword": return "pencil"
+            switch kind {
+            case .edit, .break: return "pause.fill"
+            case .reword: return "pencil"
             default: return "exclamationmark"
             }
-        case .pending: return action == "exec" ? "chevron.right" : nil
+        case .pending: return kind == .exec ? "chevron.right" : nil
         }
     }
 }
@@ -278,6 +278,7 @@ struct PlanNode: View {
 /// The action, coloured by what it does to the commit.
 struct ActionPill: View {
     let action: String
+    let kind: StepAction
 
     var body: some View {
         Text(action)
@@ -289,13 +290,13 @@ struct ActionPill: View {
     }
 
     private var color: Color {
-        switch action {
-        case "pick": Theme.Surfaces.textSecondary
-        case "reword": Theme.Provenance.analyzer
-        case "edit", "break": Theme.Severity.warning
-        case "fixup", "squash": Theme.Provenance.structural
-        case "drop": Theme.Severity.error
-        default: Theme.Provenance.rule
+        switch kind {
+        case .pick: Theme.Surfaces.textSecondary
+        case .reword: Theme.Provenance.analyzer
+        case .edit, .break: Theme.Severity.warning
+        case .fixup, .squash: Theme.Provenance.structural
+        case .drop: Theme.Severity.error
+        case .exec, .other: Theme.Provenance.rule
         }
     }
 }

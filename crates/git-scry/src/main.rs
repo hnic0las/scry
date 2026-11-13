@@ -7,15 +7,14 @@ mod highlight;
 mod open;
 mod resolve;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use scry_core::conflict;
 use scry_core::git::GitCli;
 use scry_core::operation;
-use scry_core::session::MergeSession;
-use scry_core::syntax::{Language, ParseCheck};
+use scry_core::session::{self, LoadError};
+use scry_core::syntax::ParseCheck;
 
 #[derive(Parser)]
 #[command(
@@ -149,23 +148,15 @@ fn main() -> ExitCode {
     }
 }
 
-fn list_conflicts(file: &PathBuf) -> ExitCode {
-    let text = match std::fs::read_to_string(file) {
-        Ok(text) => text,
-        Err(error) => {
-            eprintln!("git-scry: cannot read {}: {error}", file.display());
+fn list_conflicts(file: &Path) -> ExitCode {
+    let session = match session::open_file(&GitCli::beside(file), file) {
+        Ok(session) => session,
+        Err(LoadError::Parse(error)) => {
+            eprintln!("git-scry: {}: {error}", file.display());
             return ExitCode::from(2);
         }
-    };
-    let marker_size = conflict::marker_size(&GitCli::new(PathBuf::from(".")), file);
-    let session = match MergeSession::from_text_with_marker_size(
-        &text,
-        Language::from_path(file),
-        marker_size,
-    ) {
-        Ok(session) => session,
         Err(error) => {
-            eprintln!("git-scry: {}: {error}", file.display());
+            eprintln!("git-scry: {error}");
             return ExitCode::from(2);
         }
     };
@@ -227,7 +218,7 @@ fn list_conflicts(file: &PathBuf) -> ExitCode {
 }
 
 fn show_session() -> ExitCode {
-    let git = GitCli::new(PathBuf::from("."));
+    let git = GitCli::discover(PathBuf::from("."));
     let result = operation::current(&git)
         .and_then(|operation| Ok((operation, operation::conflicted_paths(&git)?)));
     let (operation, paths) = match result {

@@ -4,6 +4,7 @@
 //! side's changes back from the merged manifest. This reads each version's
 //! packages, to show what each side changed and what the tool must redo.
 
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
@@ -139,7 +140,7 @@ impl Format {
 /// A package one side or both changed: its version in each, joined
 /// ("1.2.0, 2.0.1") when a version holds it several times; `None` where
 /// that version does not have it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PackageChange {
     pub name: String,
     pub base: Option<String>,

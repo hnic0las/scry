@@ -5,6 +5,7 @@
 //! many rows as its longest pane; shorter panes get spacer rows. With the
 //! base shown, a conflict's base lines come first, in the result pane only.
 
+use serde::Serialize;
 use std::ops::Range;
 
 use unicode_width::UnicodeWidthChar;
@@ -17,7 +18,8 @@ use crate::words::{self, LineChange};
 /// Tab stops every this many columns, as most editors show code.
 pub const TAB_WIDTH: usize = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum CellKind {
     /// A line outside any conflict.
     Common,
@@ -36,7 +38,7 @@ pub enum CellKind {
     Base,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Cell {
     /// The line number in this pane's own file; `None` for rows without a
     /// line (spacer, unresolved, removed).
@@ -61,7 +63,8 @@ pub struct Cell {
 // Almost every row is a code row, so boxing the large variant would add an
 // allocation per row and save no memory.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Row {
     /// Above each conflict, across the three panes.
     Lens { conflict: usize },

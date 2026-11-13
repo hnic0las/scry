@@ -19,6 +19,14 @@ pub struct PinChange {
     pub theirs: Option<String>,
 }
 
+impl PinChange {
+    /// Ours moved it: an automatic pin is taken from the side that moved
+    /// it, ours unless only theirs did.
+    pub fn moved_by_ours(&self) -> bool {
+        self.ours != self.base
+    }
+}
+
 /// The three versions merged.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedMerge {

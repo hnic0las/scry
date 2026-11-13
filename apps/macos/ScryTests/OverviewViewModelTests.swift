@@ -25,6 +25,7 @@ final class FakeOverview: OverviewSource, @unchecked Sendable {
             root: "/r",
             operation: operation,
             summary: operation.map { _ in "Rebasing feature onto main · commit 2 of 3: a1b2c3d Retry" },
+            headline: operation.map { _ in "Rebasing feature onto main" },
             step: operation == nil ? nil : 2,
             steps: operation == nil ? nil : 3,
             plan: operation == nil ? nil : plan,
@@ -40,7 +41,12 @@ final class FakeOverview: OverviewSource, @unchecked Sendable {
     func deletion(path: String) throws -> DeletionInfo {
         DeletionInfo(
             deletedBy: .ours, deletedLabel: "main · rebase target", keptLabel: "Your commit a1b2c3d · Retry", keptLines: 12,
-            changes: "@@ -1,2 +1,2 @@\n keep\n-old\n+new\n"
+            changes: [
+                CommitDiffLine(kind: .hunk, oldNumber: nil, newNumber: nil, text: "-1,2 +1,2"),
+                CommitDiffLine(kind: .context, oldNumber: 1, newNumber: 1, text: "keep"),
+                CommitDiffLine(kind: .removed, oldNumber: 2, newNumber: nil, text: "old"),
+                CommitDiffLine(kind: .added, oldNumber: nil, newNumber: 2, text: "new"),
+            ]
         )
     }
 
@@ -70,10 +76,10 @@ final class FakeOverview: OverviewSource, @unchecked Sendable {
         PackagesInfo(
             oursLabel: "main", theirsLabel: "feature",
             automatic: [
-                PinChangeInfo(identity: "kingfisher", base: "7.9.0", ours: "7.9.0", theirs: "7.10.0"),
-                PinChangeInfo(identity: "lottie-ios", base: nil, ours: "4.4.1", theirs: nil),
+                PinChangeInfo(identity: "kingfisher", base: "7.9.0", ours: "7.9.0", theirs: "7.10.0", movedByOurs: false),
+                PinChangeInfo(identity: "lottie-ios", base: nil, ours: "4.4.1", theirs: nil, movedByOurs: true),
             ],
-            conflicts: [PinChangeInfo(identity: "alamofire", base: "5.8.0", ours: "5.8.1", theirs: "5.9.0")],
+            conflicts: [PinChangeInfo(identity: "alamofire", base: "5.8.0", ours: "5.8.1", theirs: "5.9.0", movedByOurs: true)],
             originHashStale: true
         )
     }
@@ -102,7 +108,7 @@ final class FakeOverview: OverviewSource, @unchecked Sendable {
         ]
     }
 
-    func apply(action: OverviewAction) throws -> OverviewSnapshot {
+    func apply(action: OverviewAction) throws -> OverviewOutcome {
         actions.append(action)
         switch action {
         case .stageResolved:
@@ -125,7 +131,7 @@ final class FakeOverview: OverviewSource, @unchecked Sendable {
         case .markResolved(let path):
             files = files.map { $0.path == path ? file(path, .staged) : $0 }
         }
-        return try snapshot()
+        return OverviewOutcome(events: [], snapshot: try snapshot())
     }
 }
 
@@ -150,7 +156,11 @@ func file(
         state: state,
         conflicts: state == .unresolved ? 2 : 0,
         openable: openable,
-        special: special
+        special: special,
+        // The core's rules (`FileView::can_open` and its siblings).
+        canOpen: (openable || special != nil) && state != .staged,
+        canStage: state == .resolved || state == .needsReview,
+        canUnstage: state == .staged
     )
 }
 
@@ -565,9 +575,9 @@ struct OverviewViewModelTests {
     }
 
     private static func plan(current: UInt32) -> RebasePlan {
-        let lines: [(String, String, UInt32?)] = [
-            ("pick", "change a", nil), ("reword", "add notes", nil), ("fixup", "fixup! add notes", 2),
-            ("drop", "debug", nil), ("pick", "change b", nil),
+        let lines: [(StepAction, String, UInt32?)] = [
+            (.pick, "change a", nil), (.reword, "add notes", nil), (.fixup, "fixup! add notes", 2),
+            (.drop, "debug", nil), (.pick, "change b", nil),
         ]
         return RebasePlan(
             ontoName: "main",
@@ -579,6 +589,7 @@ struct OverviewViewModelTests {
                 return RebaseStep(
                     number: number,
                     action: line.0,
+                    actionName: "\(line.0)",
                     shortId: "abc000\(number)",
                     subject: line.1,
                     replayedId: nil,

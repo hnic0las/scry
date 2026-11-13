@@ -3,19 +3,20 @@
 //! draws them as two lanes.
 
 use crate::git::{Git, GitError};
+use serde::Serialize;
 
 /// How many commits each side lists; the rest are counted.
 pub const LIMIT: usize = 12;
 
 /// A commit of the graph.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GraphCommit {
     pub short_id: String,
     pub subject: String,
 }
 
 /// One branch of the merge, newest commit first.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Lane {
     /// The branch, or the commit's id when no branch points at it.
     pub name: String,
@@ -25,7 +26,7 @@ pub struct Lane {
 }
 
 /// Both branches since their merge base.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MergeGraph {
     /// Git's "ours": the branch checked out.
     pub ours: Lane,

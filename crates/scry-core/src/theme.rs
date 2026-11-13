@@ -4,8 +4,11 @@
 //! (`layout::CellKind`) are roles too; these are the rest of the design's
 //! colour tokens that the core assigns.
 
+use serde::Serialize;
+
 /// Where a resolution comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Provenance {
     /// A side as git produced it.
     Git,
@@ -22,7 +25,8 @@ pub enum Provenance {
 }
 
 /// Where a conflict or a file stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum State {
     Unresolved,
     /// Resolved by something other than the user, to look at before
@@ -34,7 +38,8 @@ pub enum State {
 }
 
 /// How serious a check's finding is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Severity {
     Error,
     Warning,
@@ -42,7 +47,8 @@ pub enum Severity {
 }
 
 /// The role that colours a badge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Role {
     Provenance(Provenance),
     State(State),
@@ -51,7 +57,7 @@ pub enum Role {
 
 /// A short label with its role, such as a lens row's "Theirs" in git's
 /// colour or "Does not parse" as an error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Badge {
     pub text: String,
     pub role: Role,

@@ -22,7 +22,7 @@ struct SpecialFileViewModelTests {
         #expect(viewModel.explanation == "main · rebase target deleted it; Your commit a1b2c3d · Retry changed it (12 lines). Keep the changed file, or delete it.")
         #expect(viewModel.changesTitle == "What Your commit a1b2c3d · Retry changed, lost if you delete the file")
         #expect(viewModel.changeLines.map(\.kind) == [.hunk, .context, .removed, .added])
-        #expect(viewModel.changeLines.map(\.text) == ["@@ -1,2 +1,2 @@", "keep", "old", "new"])
+        #expect(viewModel.changeLines.map(\.text) == ["@@ -1,2 +1,2", "keep", "old", "new"])
         viewModel.keepFile()
         await viewModel.idle()
         viewModel.deleteFile()

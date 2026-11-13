@@ -2,6 +2,7 @@
 //!
 //! The same grammars will drive syntax highlighting (decision 0003).
 
+use serde::Serialize;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -123,7 +124,8 @@ impl Language {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ParseCheck {
     /// No grammar for the file, or no reference version of the file that
     /// parses, so a failure could not be blamed on this text.

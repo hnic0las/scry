@@ -7,8 +7,8 @@ import Observation
 /// Its calls run git, so the view models make them off the main actor.
 protocol OverviewSource: Sendable {
     func snapshot() throws -> OverviewSnapshot
-    /// Runs the action, then returns the overview read again.
-    func apply(action: OverviewAction) throws -> OverviewSnapshot
+    /// Runs the action: what it did, and the overview read again.
+    func apply(action: OverviewAction) throws -> OverviewOutcome
     func deletion(path: String) throws -> DeletionInfo
     func binary(path: String) throws -> BinaryInfo
     func project(path: String) throws -> ProjectInfo
@@ -51,6 +51,7 @@ final class OverviewViewModel {
         let number: Int
         /// Git's word: "pick", "reword", "fixup", "drop"…
         let action: String
+        let kind: StepAction
         /// The todo list's id, the one the user wrote.
         let shortId: String?
         let subject: String
@@ -224,7 +225,7 @@ final class OverviewViewModel {
         do {
             show(try snapshot ?? source.snapshot())
         } catch {
-            self.error = "\(error)"
+            self.error = error.message
         }
     }
 
@@ -235,10 +236,10 @@ final class OverviewViewModel {
     /// The operation in plain words, or that there is none.
     var summary: String {
         guard let summary = snapshot?.summary else { return "No merge, rebase, cherry-pick or revert in progress." }
-        // The step line under it names the commit: "Rebasing feature onto
-        // main", without the core's " · commit 2 of 7: …".
-        if stepLine != nil, let cut = summary.range(of: " · commit ") {
-            return String(summary[..<cut.lowerBound])
+        // The step line under it names the commit: the core's headline,
+        // without " · commit 2 of 7: …".
+        if stepLine != nil, let headline = snapshot?.headline {
+            return headline
         }
         return summary
     }
@@ -250,7 +251,7 @@ final class OverviewViewModel {
     var stepLine: String? {
         guard let steps = snapshot?.plan?.steps, let step = currentStep else { return nil }
         let id = step.shortId.map { " \($0)" } ?? ""
-        return "Step \(step.number) of \(steps.count) · \(step.action)\(id) “\(step.subject)”"
+        return "Step \(step.number) of \(steps.count) · \(step.actionName)\(id) “\(step.subject)”"
     }
 
     // MARK: Reword
@@ -259,7 +260,10 @@ final class OverviewViewModel {
     var isRewording: Bool { snapshot?.reword != nil }
 
     /// The subject's length that git log, GitHub and the plan show whole.
-    static let subjectLimit = 72
+    static let subjectLimit = Int(commitSubjectLimit())
+
+    /// The core's check of the message being written.
+    private var messageCheck: MessageCheck { checkMessage(message: rewordMessage) }
 
     /// "Commit message · 351410c", over the editor in place of the files.
     var rewordTitle: String {
@@ -272,13 +276,9 @@ final class OverviewViewModel {
         "Message for \(currentStep?.shortId ?? "this commit") · used when you continue"
     }
 
-    /// The first line, which git takes as the subject.
-    private var subject: String {
-        String(rewordMessage.prefix { $0 != "\n" })
-    }
-
-    var subjectLength: Int { subject.count }
-    var subjectTooLong: Bool { subjectLength > Self.subjectLimit }
+    var subjectLength: Int { Int(messageCheck.subjectLength) }
+    var subjectLimit: Int { Self.subjectLimit }
+    var subjectTooLong: Bool { messageCheck.subjectTooLong }
 
     /// What the editor's note says: a problem first, then whether the
     /// message is the commit's own.
@@ -288,7 +288,7 @@ final class OverviewViewModel {
         }
         if subjectTooLong {
             return MessageNote(
-                text: "The subject is \(subjectLength) characters. git log, GitHub and the rebase plan cut it at about \(Self.subjectLimit); consider moving the end to the body.",
+                text: "The subject is \(subjectLength) characters. git log, GitHub and the rebase plan cut it at about \(subjectLimit); consider moving the end to the body.",
                 warning: true
             )
         }
@@ -304,7 +304,7 @@ final class OverviewViewModel {
     /// The docked editor's short status, beside Revert to Original.
     var rewordStatus: MessageNote {
         if rewordMessageIsEmpty { return MessageNote(text: "No message", warning: true) }
-        if subjectTooLong { return MessageNote(text: "Subject: \(subjectLength) of \(Self.subjectLimit)", warning: true) }
+        if subjectTooLong { return MessageNote(text: "Subject: \(subjectLength) of \(subjectLimit)", warning: true) }
         if secondLineIsText { return MessageNote(text: "Line 2 not empty", warning: true) }
         return MessageNote(text: rewordEdited ? "Edited" : "Original message", warning: false)
     }
@@ -409,10 +409,11 @@ final class OverviewViewModel {
     var planRows: [PlanRow] {
         guard let plan = snapshot?.plan else { return [] }
         return plan.steps.reversed().map { step in
-            let joined = step.action == "fixup" || step.action == "squash"
+            let joined = step.action == .fixup || step.action == .squash
             return PlanRow(
                 number: Int(step.number),
-                action: step.action,
+                action: step.actionName,
+                kind: step.action,
                 shortId: step.shortId,
                 subject: step.subject,
                 idHelp: step.replayedId.map { "Replayed as \($0)" },
@@ -420,10 +421,10 @@ final class OverviewViewModel {
                 state: step.state,
                 joined: joined,
                 note: joined ? step.joins.map { "into \($0)" } : nil,
-                dropped: step.action == "drop",
+                dropped: step.action == .drop,
                 conflicted: step.state == .current && (
-                    step.action == "reword" ? snapshot?.reword?.committed == false
-                        : step.action != "edit" && step.action != "break"
+                    step.action == .reword ? snapshot?.reword?.committed == false
+                        : step.action != .edit && step.action != .break
                 ),
                 detail: detail(step)
             )
@@ -456,7 +457,7 @@ final class OverviewViewModel {
               let current = plan.steps.first(where: { $0.state == .current })
         else { return nil }
         let actions = applied.compactMap { number in
-            plan.steps.first { $0.number == number }?.action
+            plan.steps.first { $0.number == number }?.actionName
         }
         let steps = first == last ? "step \(first)" : last == first + 1 ? "steps \(first) and \(last)" : "steps \(first) to \(last)"
         return "Git ran \(steps) (\(actions.joined(separator: ", "))) without conflicts, then stopped at step \(current.number)."
@@ -508,10 +509,10 @@ final class OverviewViewModel {
                     state: file.state,
                     stateLabel: Self.label(file.state),
                     conflicts: file.conflicts.map(String.init) ?? "—",
-                    canOpen: (file.openable || file.special != nil) && file.state != .staged,
+                    canOpen: file.canOpen,
                     special: file.state == .staged ? nil : file.special,
-                    canStage: file.state == .resolved || file.state == .needsReview,
-                    canUnstage: file.state == .staged,
+                    canStage: file.canStage,
+                    canUnstage: file.canUnstage,
                     isSpecial: file.special != nil,
                     absolutePath: file.absolutePath
                 )
@@ -663,7 +664,7 @@ final class OverviewViewModel {
             do {
                 return (try source.snapshot(), nil)
             } catch {
-                return (nil, "\(error)")
+                return (nil, error.message)
             }
         }
     }
@@ -706,7 +707,7 @@ final class OverviewViewModel {
             }
         } catch {
             rewordDiff = []
-            self.error = "\(error)"
+            self.error = error.message
         }
     }
 
@@ -788,15 +789,10 @@ final class OverviewViewModel {
         snapshot?.plan?.steps.first { $0.state == .current }
     }
 
-    private var rewordMessageIsEmpty: Bool {
-        rewordMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
+    private var rewordMessageIsEmpty: Bool { messageCheck.empty }
 
     /// Text on line 2, where git expects the blank line after the subject.
-    private var secondLineIsText: Bool {
-        let lines = rewordMessage.split(separator: "\n", omittingEmptySubsequences: false)
-        return lines.count > 1 && !lines[1].trimmingCharacters(in: .whitespaces).isEmpty
-    }
+    private var secondLineIsText: Bool { messageCheck.secondLineIsText }
 
     /// Without the trailing blank lines and spaces git drops anyway.
     private static func trimmed(_ message: String) -> String {
@@ -817,9 +813,9 @@ final class OverviewViewModel {
         let source = source
         perform {
             do {
-                return (try source.apply(action: action), nil)
+                return (try source.apply(action: action).snapshot, nil)
             } catch {
-                return (try? source.snapshot(), "\(error)")
+                return (try? source.snapshot(), error.message)
             }
         }
     }
@@ -846,30 +842,30 @@ final class OverviewViewModel {
         switch step.state {
         case .current:
             switch step.action {
-            case "edit", "break": return "Git stopped here, as the plan asks. Continue when ready."
-            case "reword" where snapshot?.reword?.committed == false:
+            case .edit, .break: return "Git stopped here, as the plan asks. Continue when ready."
+            case .reword where snapshot?.reword?.committed == false:
                 return "Git stopped on conflicts: resolve and stage the files, write the commit’s message, then continue."
-            case "reword": return "Git stopped here: write the commit’s message, then continue."
+            case .reword: return "Git stopped here: write the commit’s message, then continue."
             default: return "Git stopped here: resolve its files, then continue."
             }
         case .done:
             switch step.action {
-            case "drop": return "Dropped: this commit was not replayed."
-            case "fixup", "squash": return "Folded into \(target)."
-            case "exec": return "Ran: \(step.subject)"
+            case .drop: return "Dropped: this commit was not replayed."
+            case .fixup, .squash: return "Folded into \(target)."
+            case .exec: return "Ran: \(step.subject)"
             default: return "Replayed."
             }
         case .pending:
             switch step.action {
-            case "pick": return "To come: git replays this commit."
-            case "reword": return "To come: git replays it, then stops so you can write its message."
-            case "edit": return "To come: git replays it, then stops so you can amend it."
-            case "fixup": return "To come: folded into \(target), keeping that commit's message."
-            case "squash": return "To come: folded into \(target), messages combined."
-            case "drop": return "Dropped: this commit will not be replayed."
-            case "exec": return "To come: git runs `\(step.subject)`."
-            case "break": return "To come: git pauses here."
-            default: return "To come."
+            case .pick: return "To come: git replays this commit."
+            case .reword: return "To come: git replays it, then stops so you can write its message."
+            case .edit: return "To come: git replays it, then stops so you can amend it."
+            case .fixup: return "To come: folded into \(target), keeping that commit's message."
+            case .squash: return "To come: folded into \(target), messages combined."
+            case .drop: return "Dropped: this commit will not be replayed."
+            case .exec: return "To come: git runs `\(step.subject)`."
+            case .break: return "To come: git pauses here."
+            case .other: return "To come."
             }
         }
     }

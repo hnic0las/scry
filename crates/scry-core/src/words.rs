@@ -7,9 +7,11 @@
 //! similar base line is added. Whitespace never counts as a changed word, so
 //! a re-indented line is edited with no word marked.
 
+use serde::Serialize;
 use std::ops::Range;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum LineChange {
     /// Equal to a base line.
     Unchanged,

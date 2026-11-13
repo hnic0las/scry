@@ -4,6 +4,7 @@
 //! colours code the same way. The core names roles; each UI maps them to
 //! colours (portability rule 5).
 
+use serde::Serialize;
 use std::ops::Range;
 
 use tree_sitter::{Query, QueryCursor, StreamingIterator};
@@ -12,7 +13,8 @@ use crate::syntax::{Language, ParsedFile};
 
 /// The syntax roles of the design tokens (`syntax` group). Text without a
 /// span is plain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SyntaxRole {
     Keyword,
     String,
@@ -30,7 +32,7 @@ pub enum SyntaxRole {
 
 /// A run of one role inside a line, in UTF-8 bytes from the line's start,
 /// end excluded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Span {
     pub start: usize,
     pub end: usize,

@@ -16,6 +16,8 @@ use crate::conflict::{self, Conflict, ParseError, Segment};
 use crate::git::{Git, GitError};
 use crate::highlight::{Highlighter, Span};
 use crate::indent::{self, Newline};
+use crate::operation::{self, Operation};
+use crate::presentation;
 use crate::resolution::{self, Analysis, Candidate, CandidateKind};
 use crate::syntax::{Language, ParseCheck, ParsedFile};
 
@@ -33,6 +35,18 @@ pub struct MergetoolFiles {
     pub local: PathBuf,
     pub remote: PathBuf,
     pub merged: PathBuf,
+}
+
+/// Where a merge stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Status {
+    pub resolved: usize,
+    pub total: usize,
+    /// The merged file's parse check, once every conflict has a choice.
+    pub merged: ParseCheck,
+    pub language: Option<Language>,
+    pub can_undo: bool,
+    pub can_redo: bool,
 }
 
 /// How a conflict is resolved.
@@ -632,6 +646,18 @@ impl MergeSession {
         (step.command, conflicts, previous)
     }
 
+    /// Where the merge stands, as a status bar shows it.
+    pub fn status(&self) -> Status {
+        Status {
+            resolved: self.conflict_count() - self.unresolved(),
+            total: self.conflict_count(),
+            merged: self.merged_check(),
+            language: self.language,
+            can_undo: self.can_undo(),
+            can_redo: self.can_redo(),
+        }
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo_history.is_empty()
     }
@@ -896,6 +922,33 @@ pub(crate) fn merge_file(
         }
     }
     String::from_utf8(output.stdout).map_err(|_| LoadError::NotText(files.merged.clone()))
+}
+
+/// Opens a file with conflict markers, saved back where it was read.
+/// `git` runs in the file's folder (`GitCli::beside`): it reads the
+/// marker size `.gitattributes` gives the file.
+pub fn open_file(git: &dyn Git, path: &Path) -> Result<MergeSession, LoadError> {
+    let text = read_text(path)?;
+    let marker_size = match path.file_name() {
+        Some(name) => conflict::marker_size(git, Path::new(name)),
+        None => conflict::DEFAULT_MARKER_SIZE,
+    };
+    Ok(
+        MergeSession::from_text_with_marker_size(&text, Language::from_path(path), marker_size)
+            .map_err(LoadError::Parse)?
+            .with_file(path.to_path_buf()),
+    )
+}
+
+/// Opens the files `git mergetool` passes (`load`), with the sides named
+/// after the operation git has in progress, which it returns too.
+pub fn open_mergetool(
+    git: &dyn Git,
+    files: &MergetoolFiles,
+) -> Result<(MergeSession, Option<Operation>), LoadError> {
+    let operation = operation::current(git).ok().flatten();
+    let (ours, theirs) = presentation::side_labels(operation.as_ref());
+    Ok((load(git, files, &ours, &theirs)?, operation))
 }
 
 fn read_text(path: &Path) -> Result<String, LoadError> {

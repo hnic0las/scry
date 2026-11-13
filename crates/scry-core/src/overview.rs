@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{self, CatalogMerge};
-use crate::commit_changes::{self, ChangedFile};
+use crate::commit_changes::{self, ChangedFile, DiffLine};
 use crate::conflict;
 use crate::git::{Git, GitError};
 use crate::lockfile::{self, PackageChange};
@@ -26,8 +26,26 @@ use crate::session::{self, MergetoolFiles, write_atomically};
 use crate::syntax::Language;
 use crate::theme::State;
 
+impl FileView {
+    /// It opens from the overview: in the merge editor, or in its own
+    /// view. A staged file is unstaged first.
+    pub fn can_open(&self) -> bool {
+        (self.openable || self.special.is_some()) && self.state != State::Staged
+    }
+
+    /// Git can take it as it is: resolved, or a rule's result to accept.
+    pub fn can_stage(&self) -> bool {
+        matches!(self.state, State::Resolved | State::NeedsReview)
+    }
+
+    /// Its conflict can come back, to change it.
+    pub fn can_unstage(&self) -> bool {
+        self.state == State::Staged
+    }
+}
+
 /// One file of the overview.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FileView {
     /// From the repository root, as git names it.
     pub path: String,
@@ -51,7 +69,8 @@ pub struct FileView {
 }
 
 /// A conflicted file the overview settles with its own view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Special {
     /// One side deleted it, the other changed it: keep it or delete it.
     DeletedOnOneSide,
@@ -102,7 +121,7 @@ impl Version {
 }
 
 /// Who deleted a file the other side changed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Deletion {
     pub deleted_by: Version,
     /// The sides as the editor names them ("main · rebase target").
@@ -110,13 +129,13 @@ pub struct Deletion {
     pub kept_label: String,
     /// The lines of the version that changed it.
     pub kept_lines: Option<usize>,
-    /// What that side changed since the base, as a unified diff without
-    /// its headers: what deleting the file would throw away.
-    pub changes: String,
+    /// What that side changed since the base, line by line: what deleting
+    /// the file would throw away.
+    pub changes: Vec<DiffLine>,
 }
 
 /// One version of a binary file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BinaryVersion {
     pub label: String,
     /// Bytes; `None` when that side has no such file.
@@ -127,7 +146,7 @@ pub struct BinaryVersion {
 }
 
 /// A lockfile's two sides, and how to write it again.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LockfileReview {
     /// "npm", "CocoaPods"…
     pub tool: String,
@@ -146,7 +165,7 @@ pub struct LockfileReview {
 }
 
 /// A conflict the overview can only settle as it is in the folder.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UnusualConflict {
     /// What git left, in a sentence.
     pub what: String,
@@ -161,7 +180,7 @@ pub struct UnusualConflict {
 pub const BINARY_PREVIEW_LIMIT: u64 = 8 * 1024 * 1024;
 
 /// The operation and its files, as the overview shows them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Snapshot {
     /// `None` once the operation is finished or aborted.
     pub operation: Option<Operation>,
@@ -180,7 +199,7 @@ pub struct Snapshot {
 
 /// A rebase stopped on a `reword` line: the user writes the commit's
 /// message, which Continue gives git.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Reword {
     /// The message to start from: the commit's own.
     pub message: String,
@@ -197,7 +216,7 @@ pub struct Reword {
 }
 
 /// The commit a reword stopped on, as git replayed it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RewordCommit {
     /// The full id, to ask for a file's diff.
     pub id: String,
@@ -277,6 +296,30 @@ pub enum OverviewCommand {
     /// Stages an unusual conflict as it is in the folder, or its removal
     /// when it is not there.
     MarkResolved { path: String },
+}
+
+impl OverviewCommand {
+    /// The file a command writes or settles; `None` for the operation's
+    /// own steps and for staging, which check their paths themselves.
+    fn settled_path(&self) -> Option<&str> {
+        match self {
+            OverviewCommand::KeepFile { path }
+            | OverviewCommand::DeleteFile { path }
+            | OverviewCommand::TakeVersion { path, .. }
+            | OverviewCommand::KeepBothAdditions { path, .. }
+            | OverviewCommand::ResolveCatalog { path, .. }
+            | OverviewCommand::TakeLockfile { path, .. }
+            | OverviewCommand::MergeLockfileLines { path }
+            | OverviewCommand::ResolvePackages { path, .. }
+            | OverviewCommand::MarkResolved { path } => Some(path),
+            OverviewCommand::StageResolved
+            | OverviewCommand::Stage { .. }
+            | OverviewCommand::Unstage { .. }
+            | OverviewCommand::Continue { .. }
+            | OverviewCommand::Skip
+            | OverviewCommand::Abort => None,
+        }
+    }
 }
 
 /// What a command did.
@@ -470,6 +513,17 @@ impl Overview {
                 .find(|file| file.path == path)
                 .map(|file| file.state)
         };
+        // A command that writes or settles a file acts only on a file git
+        // still has in conflict at this step: never on a clean file, nor
+        // on a path outside the list (an absolute path, `../`).
+        if let Some(path) = command.settled_path()
+            && !matches!(
+                state(path),
+                Some(State::Unresolved | State::NeedsReview | State::Resolved)
+            )
+        {
+            return Err(OverviewError::NotThatKind(path.to_string()));
+        }
         match command {
             OverviewCommand::Stage { paths } => {
                 // A file to review holds the rule's result: staging it
@@ -704,11 +758,7 @@ impl Overview {
             &format!(":1:{path}"),
             &format!(":{}:{path}", kept_stage.stage()),
         ])?;
-        let changes = String::from_utf8_lossy(&changes.stdout)
-            .lines()
-            .skip_while(|line| !line.starts_with("@@"))
-            .map(|line| format!("{line}\n"))
-            .collect();
+        let changes = commit_changes::parse_diff(&String::from_utf8_lossy(&changes.stdout));
         Ok(Deletion {
             deleted_by,
             deleted_label,
@@ -1116,16 +1166,9 @@ fn stage_number(git: &dyn Git, path: &str, stage: &str) -> Result<Option<Vec<u8>
 
 /// Ours and theirs as the editor names them.
 pub fn side_labels(git: &dyn Git) -> Result<(String, String), GitError> {
-    Ok(match operation::current(git)? {
-        Some(operation) => (
-            operation.ours.label(),
-            operation
-                .theirs
-                .map(|side| side.label())
-                .unwrap_or_else(|| String::from("theirs")),
-        ),
-        None => (String::from("ours"), String::from("theirs")),
-    })
+    Ok(crate::presentation::side_labels(
+        operation::current(git)?.as_ref(),
+    ))
 }
 
 /// What the file is, in words.

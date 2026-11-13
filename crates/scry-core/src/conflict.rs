@@ -7,6 +7,7 @@
 //! Text is kept byte for byte, line endings included, so that a file can be
 //! rebuilt exactly; CRLF files from Windows stay CRLF.
 
+use serde::Serialize;
 use std::fmt;
 use std::path::Path;
 
@@ -25,7 +26,7 @@ pub enum Segment {
 }
 
 /// One side of a conflict: the label git wrote after the marker, and the text.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Side {
     /// Label after the marker, for example `HEAD` or `abc1234 (commit message)`.
     /// Empty when git wrote none.

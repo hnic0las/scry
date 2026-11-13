@@ -71,7 +71,7 @@ final class RootViewModel {
             await open(overview: repository, snapshot: snapshot)
             openError = nil
         } catch {
-            openError = "\(error)"
+            openError = error.message
         }
     }
 
@@ -119,7 +119,7 @@ final class RootViewModel {
             editor = MergeEditorViewModel(model: try await load())
             openError = nil
         } catch {
-            openError = "\(error)"
+            openError = error.message
         }
     }
 

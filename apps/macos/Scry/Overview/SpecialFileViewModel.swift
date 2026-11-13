@@ -212,15 +212,15 @@ final class SpecialFileViewModel {
     /// The changes the side that kept the file made since the base.
     var changeLines: [DiffLine] {
         guard let deletion else { return [] }
-        return deletion.changes.split(separator: "\n", omittingEmptySubsequences: false)
-            .dropLast(deletion.changes.hasSuffix("\n") ? 1 : 0)
-            .enumerated()
-            .map { index, line in
-                let kind: DiffLine.Kind = line.hasPrefix("@@") ? .hunk
-                    : line.hasPrefix("+") ? .added
-                    : line.hasPrefix("-") ? .removed : .context
-                return DiffLine(id: index, kind: kind, text: kind == .hunk ? String(line) : String(line.dropFirst()))
+        return deletion.changes.enumerated().map { index, line in
+            let kind: DiffLine.Kind = switch line.kind {
+            case .hunk: .hunk
+            case .added: .added
+            case .removed: .removed
+            case .context: .context
             }
+            return DiffLine(id: index, kind: kind, text: kind == .hunk ? "@@ \(line.text)" : line.text)
+        }
     }
 
     // MARK: Binary
@@ -301,7 +301,7 @@ final class SpecialFileViewModel {
     var pinRows: [PinRow] {
         guard let packages else { return [] }
         return packages.automatic.enumerated().map { index, pin in
-            let side: FileVersion = pin.ours != pin.base ? .ours : .theirs
+            let side: FileVersion = pin.movedByOurs ? .ours : .theirs
             let now = (side == .ours ? pin.ours : pin.theirs) ?? "removed"
             let change = pin.base.map { "\($0) → \(now)" } ?? "added \(now)"
             return PinRow(id: index, identity: pin.identity, change: change, side: side)
@@ -486,7 +486,7 @@ final class SpecialFileViewModel {
             case .lockfile: lockfile = try source.lockfile(path: file.path)
             }
         } catch {
-            self.error = "\(error)"
+            self.error = error.message
         }
     }
 
@@ -497,7 +497,7 @@ final class SpecialFileViewModel {
         isRunning = true
         let source = source
         work = Task { [weak self] in
-            let result = await Task.detached { Result { try source.apply(action: action) } }.value
+            let result = await Task.detached { Result { try source.apply(action: action).snapshot } }.value
             guard let self else { return }
             isRunning = false
             switch result {
@@ -506,7 +506,7 @@ final class SpecialFileViewModel {
                 changed(snapshot)
                 (next ?? done)()
             case .failure(let failure):
-                error = "\(failure)"
+                error = failure.message
             }
         }
     }

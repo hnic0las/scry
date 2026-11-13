@@ -348,6 +348,7 @@ private struct PreviewOverview: OverviewSource {
             root: "/Users/you/Code/offline-sync",
             operation: operation,
             summary: operation == nil ? nil : "Rebasing feature/sync-v2 onto main · commit \(current) of \(Self.steps.count): \(Self.steps[Int(current) - 1].shortId ?? "") \(Self.steps[Int(current) - 1].subject)",
+            headline: operation == nil ? nil : "Rebasing feature/sync-v2 onto main",
             step: operation == nil ? nil : current,
             steps: operation == nil ? nil : UInt32(Self.steps.count),
             plan: operation == nil ? nil : RebasePlan(
@@ -358,9 +359,9 @@ private struct PreviewOverview: OverviewSource {
                 steps: Self.steps.map { step in
                     var step = step
                     step.state = step.number < current ? .done : step.number == current ? .current : .pending
-                    if step.state == .done, step.shortId != nil, step.action != "drop" {
+                    if step.state == .done, step.shortId != nil, step.action != .drop {
                         step.replayedId = "6b7c8d\(step.number)"
-                        if step.action == "reword" {
+                        if step.action == .reword {
                             step.was = step.subject
                             step.subject = "Document the sync queue"
                         }
@@ -378,7 +379,7 @@ private struct PreviewOverview: OverviewSource {
         )
     }
 
-    func apply(action: OverviewAction) throws -> OverviewSnapshot { try snapshot() }
+    func apply(action: OverviewAction) throws -> OverviewOutcome { OverviewOutcome(events: [], snapshot: try snapshot()) }
     func deletion(path: String) throws -> DeletionInfo { try SpecialSamples().deletion(path: path) }
     func binary(path: String) throws -> BinaryInfo { try SpecialSamples().binary(path: path) }
     func project(path: String) throws -> ProjectInfo { try SpecialSamples().project(path: path) }
@@ -399,6 +400,7 @@ private struct PreviewOverview: OverviewSource {
                 root: "/Users/you/Code/atlas",
                 operation: "merge",
                 summary: "Merging main into feature/sync-v2",
+                headline: "Merging main into feature/sync-v2",
                 step: nil,
                 steps: nil,
                 plan: nil,
@@ -423,7 +425,7 @@ private struct PreviewOverview: OverviewSource {
             )
         }
 
-        func apply(action: OverviewAction) throws -> OverviewSnapshot { try snapshot() }
+        func apply(action: OverviewAction) throws -> OverviewOutcome { OverviewOutcome(events: [], snapshot: try snapshot()) }
         func deletion(path: String) throws -> DeletionInfo { try SpecialSamples().deletion(path: path) }
         func binary(path: String) throws -> BinaryInfo { try SpecialSamples().binary(path: path) }
         func project(path: String) throws -> ProjectInfo { try SpecialSamples().project(path: path) }
@@ -448,13 +450,16 @@ private struct PreviewOverview: OverviewSource {
             special: kind == "Deleted on one side" ? .deletedOnOneSide
                 : kind == "Xcode project" ? .projectFile
                 : kind == "String catalog" ? .stringCatalog
-                : kind == "Binary" ? .binary : nil
+                : kind == "Binary" ? .binary : nil,
+            canOpen: state != .staged,
+            canStage: state == .resolved || state == .needsReview,
+            canUnstage: state == .staged
         )
     }
 
-    static func step(_ number: UInt32, _ action: String, _ id: String?, _ subject: String, joins: UInt32? = nil) -> RebaseStep {
+    static func step(_ number: UInt32, _ action: StepAction, _ id: String?, _ subject: String, joins: UInt32? = nil) -> RebaseStep {
         RebaseStep(
-            number: number, action: action, shortId: id, subject: subject, replayedId: nil, was: nil,
+            number: number, action: action, actionName: "\(action)", shortId: id, subject: subject, replayedId: nil, was: nil,
             state: .pending, joins: joins
         )
     }
@@ -487,14 +492,14 @@ private struct PreviewOverview: OverviewSource {
     }()
 
     static let steps = [
-        step(1, "pick", "0572f71", "Queue uploads while offline"),
-        step(2, "reword", "e076115", "Explain the sync queue in the README"),
-        step(3, "pick", "d66f4d4", "Show the user's full name"),
-        step(4, "fixup", "9d65bc2", "fixup! Show the user's full name", joins: 3),
-        step(5, "pick", "1d18a33", "Upgrade dependencies and CI"),
-        step(6, "drop", "e3e1c07", "WIP debug logging"),
-        step(7, "exec", nil, "make test"),
-        step(8, "pick", "c439f41", "Translate the sync messages"),
+        step(1, .pick, "0572f71", "Queue uploads while offline"),
+        step(2, .reword, "e076115", "Explain the sync queue in the README"),
+        step(3, .pick, "d66f4d4", "Show the user's full name"),
+        step(4, .fixup, "9d65bc2", "fixup! Show the user's full name", joins: 3),
+        step(5, .pick, "1d18a33", "Upgrade dependencies and CI"),
+        step(6, .drop, "e3e1c07", "WIP debug logging"),
+        step(7, .exec, nil, "make test"),
+        step(8, .pick, "c439f41", "Translate the sync messages"),
     ]
 
     static let mixed = [

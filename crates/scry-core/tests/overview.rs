@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use scry_core::commit_changes;
+use scry_core::commit_changes::{self, LineKind};
 use scry_core::git::GitCli;
 use scry_core::overview::{
     Overview, OverviewCommand, OverviewError, OverviewEvent, Special, Version,
@@ -634,9 +634,18 @@ fn special_files_are_settled_from_the_overview() {
     assert_eq!(deletion.deleted_by, Version::Ours);
     assert!(deletion.kept_label.starts_with("main"));
     assert_eq!(deletion.kept_lines, Some(1));
+    let changes: Vec<(LineKind, &str)> = deletion
+        .changes
+        .iter()
+        .map(|line| (line.kind, line.text.as_str()))
+        .collect();
     assert_eq!(
-        deletion.changes,
-        "@@ -1 +1 @@\n-old\n+old, changed on main\n"
+        changes,
+        [
+            (LineKind::Hunk, "-1 +1"),
+            (LineKind::Removed, "old"),
+            (LineKind::Added, "old, changed on main"),
+        ]
     );
     overview
         .apply(
@@ -1488,5 +1497,76 @@ fn several_files_are_staged_and_unstaged_in_one_command() {
     assert_eq!(
         state(&mut overview, &git, "Sources/b.swift"),
         State::Resolved
+    );
+}
+
+/// Commands that write a file act only on a file in conflict at this
+/// step: on a clean `go.sum`, or a path outside the repository, they are
+/// refused and the file is left as it is.
+#[test]
+fn file_commands_refuse_a_path_not_in_conflict() {
+    let repo = Repo::stopped_rebase();
+    fs::write(repo.path().join("go.sum"), "kept v1.0.0 h1:abc=\n").unwrap();
+    let outside = repo.root.path().join("outside.txt");
+    fs::write(&outside, "kept\n").unwrap();
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+
+    for path in [String::from("go.sum"), outside.display().to_string()] {
+        let error = overview
+            .apply(
+                &git,
+                OverviewCommand::MergeLockfileLines { path: path.clone() },
+            )
+            .unwrap_err();
+        assert!(matches!(error, OverviewError::NotThatKind(_)), "{path}");
+        let error = overview
+            .apply(
+                &git,
+                OverviewCommand::TakeVersion {
+                    path,
+                    version: Version::Theirs,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error, OverviewError::NotThatKind(_)));
+    }
+    assert_eq!(
+        fs::read_to_string(repo.path().join("go.sum")).unwrap(),
+        "kept v1.0.0 h1:abc=\n"
+    );
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "kept\n");
+}
+
+/// What the core shows reads as JSON (portability rule 2): another front
+/// end, or an MCP server, can take the overview and a file's rows,
+/// conflicts and header as they are, without a mapping of its own.
+#[test]
+fn the_overview_and_a_file_read_as_json() {
+    let repo = Repo::stopped_rebase();
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    let snapshot = overview.refresh(&git).unwrap();
+    let json = serde_json::to_value(&snapshot).unwrap();
+    assert_eq!(json["operation"]["kind"], "rebase");
+    assert_eq!(json["files"][0]["path"], "Sources/b.swift");
+    assert_eq!(json["files"][0]["state"], "unresolved");
+
+    let path = repo.path().join("a.txt");
+    let session = scry_core::session::open_file(&git, &path).unwrap();
+    let operation = snapshot.operation.as_ref();
+    let header = scry_core::presentation::header(&path, &session, operation);
+    let conflict = session.conflict_view(0, "ours", "theirs");
+    let rows = session.rows(false);
+    for value in [
+        serde_json::to_value(&header).unwrap(),
+        serde_json::to_value(&conflict).unwrap(),
+        serde_json::to_value(&rows).unwrap(),
+    ] {
+        assert!(!value.is_null());
+    }
+    assert_eq!(
+        serde_json::to_value(&conflict).unwrap()["state"],
+        "unresolved"
     );
 }

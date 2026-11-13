@@ -4,6 +4,7 @@
 //! One source for every UI (portability rule 1), so the CLI, the Mac app
 //! and the MCP server say the same thing; they only lay it out.
 
+use serde::Serialize;
 use std::path::Path;
 
 use crate::operation::{Operation, Side, SideRole};
@@ -63,7 +64,7 @@ impl CandidateKind {
 
 /// A candidate as a card or a menu shows it. Text written by hand is shown
 /// the same way, with `EDITED_ID`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CandidateView {
     pub id: String,
     pub title: String,
@@ -79,7 +80,7 @@ pub struct CandidateView {
 }
 
 /// A conflict as the inspector or the CLI shows it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConflictView {
     pub id: String,
     /// From 1.
@@ -190,7 +191,7 @@ impl MergeSession {
 }
 
 /// One side's pane heading.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PaneSide {
     /// "main + 1 rebased commit · rebase target".
     pub label: String,
@@ -199,7 +200,7 @@ pub struct PaneSide {
 }
 
 /// What the editor shows above the panes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Header {
     pub file_name: String,
     pub path: String,

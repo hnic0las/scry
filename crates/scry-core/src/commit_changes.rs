@@ -3,9 +3,10 @@
 //! while the user writes a reworded commit's message.
 
 use crate::git::{Git, GitError};
+use serde::Serialize;
 
 /// A file the commit changes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChangedFile {
     pub path: String,
     /// The last component of the path.
@@ -18,7 +19,8 @@ pub struct ChangedFile {
 }
 
 /// What a line of a diff is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum LineKind {
     /// A hunk's start: its text is the heading git found, such as the
     /// enclosing function, or the line ranges when there is none.
@@ -29,7 +31,7 @@ pub enum LineKind {
 }
 
 /// One line of a file's diff.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiffLine {
     pub kind: LineKind,
     /// In the file before the commit; `None` for added lines and hunks.

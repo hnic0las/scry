@@ -4,13 +4,15 @@
 //! `rebase-merge/git-rebase-todo`; the last line done is the one git
 //! stopped on.
 
+use serde::Serialize;
 use std::fs;
 use std::path::Path;
 
 use crate::git::{Git, GitError};
 
 /// What a line of the todo list does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Action {
     Pick,
     Reword,
@@ -70,7 +72,8 @@ impl Action {
 }
 
 /// Where git stands on a line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum StepState {
     Done,
     /// The line git stopped on: conflicts, an `edit` or a `break`.
@@ -79,7 +82,7 @@ pub enum StepState {
 }
 
 /// One line of the todo list.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Step {
     /// From 1, as git counts them.
     pub number: usize,
@@ -101,7 +104,7 @@ pub struct Step {
 }
 
 /// The rebase's commits, from the first replayed to the last.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Plan {
     /// The commit the branch is replayed onto.
     pub onto_short_id: String,

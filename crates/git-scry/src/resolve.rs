@@ -11,7 +11,6 @@ use std::process::ExitCode;
 
 use scry_core::command::{Command, CommandError};
 use scry_core::git::GitCli;
-use scry_core::operation;
 use scry_core::presentation;
 use scry_core::resolution::{Candidate, CandidateKind};
 use scry_core::session::{self, MergeSession, MergetoolFiles, Origin, SaveError};
@@ -28,18 +27,18 @@ pub struct Options {
 
 pub fn run(options: Options) -> ExitCode {
     let files = &options.files;
-    let git = GitCli::new(PathBuf::from("."));
-    let operation = operation::current(&git).ok().flatten();
-    let (ours, theirs) = presentation::side_labels(operation.as_ref());
-    let summary = operation.as_ref().map(|operation| operation.summary());
-
-    let mut session = match session::load(&git, files, &ours, &theirs) {
-        Ok(session) => session,
+    // `git mergetool` runs the tool from the repository's root, with
+    // paths from there.
+    let git = GitCli::discover(PathBuf::from("."));
+    let (mut session, operation) = match session::open_mergetool(&git, files) {
+        Ok(opened) => opened,
         Err(error) => {
             eprintln!("git-scry: {error}");
             return ExitCode::from(2);
         }
     };
+    let (ours, theirs) = presentation::side_labels(operation.as_ref());
+    let summary = operation.as_ref().map(|operation| operation.summary());
     let name = files.merged.display().to_string();
 
     if options.suggested

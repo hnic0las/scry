@@ -4,12 +4,14 @@
 //! branch being rebased onto and "theirs" is the user's own commit: the
 //! opposite of what people expect. Scry shows a human label for each side.
 
+use serde::Serialize;
 use std::fs;
 use std::path::Path;
 
 use crate::git::{Git, GitError};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum OperationKind {
     Merge,
     Rebase,
@@ -17,14 +19,15 @@ pub enum OperationKind {
     Revert,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Commit {
     pub id: String,
     pub short_id: String,
     pub subject: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SideRole {
     /// Merge, cherry-pick or revert: the branch checked out.
     CurrentBranch,
@@ -41,7 +44,7 @@ pub enum SideRole {
     RevertedCommit,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Side {
     pub role: SideRole,
     /// A branch name when one points at this side, otherwise a short commit
@@ -98,14 +101,14 @@ impl Side {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Progress {
     /// The step being applied, from 1.
     pub current: usize,
     pub total: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Operation {
     pub kind: OperationKind,
     /// Git's "ours".
@@ -123,6 +126,19 @@ pub struct Operation {
 impl Operation {
     /// The operation in plain words, for example
     /// "Rebasing feature onto main · commit 3 of 7: a1b2c3d Retry uploads".
+    /// The summary without the rebase's step: "Rebasing feature onto
+    /// main", for a header that shows the step on its own line.
+    pub fn headline(&self) -> String {
+        match self.kind {
+            OperationKind::Rebase => format!(
+                "Rebasing {} onto {}",
+                self.branch.as_deref().unwrap_or("detached HEAD"),
+                self.ours.name
+            ),
+            _ => self.summary(),
+        }
+    }
+
     pub fn summary(&self) -> String {
         let branch = self.branch.as_deref().unwrap_or("detached HEAD");
         let theirs_commit = match &self.theirs {
