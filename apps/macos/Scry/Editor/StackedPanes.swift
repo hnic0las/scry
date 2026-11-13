@@ -79,6 +79,7 @@ struct StackedPanes: View {
                         twin: hovered == offset,
                         take: { viewModel.take($0, in: $1) },
                         takeBoth: { viewModel.takeBoth(in: $0) },
+                        editByHand: { viewModel.editByHand(in: $0) },
                         focus: { viewModel.focus($0) }
                     )
                     .id(offset)

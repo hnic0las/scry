@@ -15,6 +15,7 @@ struct RowView: View {
     /// A lens row's take buttons, with the candidate and the conflict.
     var take: (String, Int) -> Void = { _, _ in }
     var takeBoth: (Int) -> Void = { _ in }
+    var editByHand: (Int) -> Void = { _ in }
     /// Focuses a conflict.
     let focus: (Int) -> Void
 
@@ -23,7 +24,8 @@ struct RowView: View {
         case .lens(let lens):
             LensRow(
                 state: lens, widths: widths, part: part,
-                take: { take($0, lens.conflict) }, takeBoth: { takeBoth(lens.conflict) }
+                take: { take($0, lens.conflict) }, takeBoth: { takeBoth(lens.conflict) },
+                editByHand: { editByHand(lens.conflict) }
             ) { focus(lens.conflict) }
         case .code(let code):
             cells(code)
@@ -307,9 +309,10 @@ struct LensRow: View {
     let state: MergeEditorViewModel.LensRowState
     let widths: PaneWidths
     var part: RowPart = .all
-    /// Stacked: takes a candidate for this conflict.
+    /// Takes a candidate for this conflict.
     var take: (String) -> Void = { _ in }
     var takeBoth: () -> Void = {}
+    var editByHand: () -> Void = {}
     let focus: () -> Void
 
     var body: some View {
@@ -319,8 +322,13 @@ struct LensRow: View {
                 LensCommitView(commit: state.oursCommit)
                     .frame(width: widths.side)
                 Color.clear.frame(width: widths.connector)
-                title
-                    .frame(width: widths.result)
+                HStack(spacing: 6) {
+                    title
+                    takeMenu
+                }
+                .controlSize(.small)
+                .padding(.trailing, 10)
+                .frame(width: widths.result)
                 Color.clear.frame(width: widths.connector)
                 LensCommitView(commit: state.theirsCommit)
                     .frame(width: widths.side)
@@ -341,11 +349,11 @@ struct LensRow: View {
                 HStack(spacing: 6) {
                     title
                     Button("Take both", action: takeBoth)
+                        .disabled(!state.canTake)
                         .help(Shortcut.takeBoth.help("Take both, ours first; again for theirs first"))
                     takeMenu
                 }
                 .controlSize(.small)
-                .disabled(!state.canTake)
                 .padding(.trailing, 10)
                 .frame(width: widths.result)
             }
@@ -373,20 +381,32 @@ struct LensRow: View {
         .padding(.trailing, 8)
     }
 
-    /// Every take action, Take base included.
+    /// The candidates the core offers for this conflict, then Edit by Hand
+    /// (SPEC: lens row). Each item's keys are a second line, not bound: a
+    /// pop-up menu answers its key equivalents, so every row's menu would
+    /// claim them, and the editor's own commands act on the focused
+    /// conflict.
     private var takeMenu: some View {
         Menu {
-            Button("Take ours") { take("ours") }
-            Button("Take theirs") { take("theirs") }
-            Button("Take both, ours first") { take("ours-then-theirs") }
-            Button("Take both, theirs first") { take("theirs-then-ours") }
-            Button("Take base") { take("base") }
-            Button("Take none") { take("neither") }
+            ForEach(state.menu, id: \.id) { item in
+                Button { take(item.id) } label: {
+                    Text(item.title)
+                    if let shortcut = item.shortcut {
+                        Text(shortcut.keys)
+                    }
+                }
+            }
+            Divider()
+            Button { editByHand() } label: {
+                Text("Edit by Hand")
+                Text(Shortcut.editByHand.keys)
+            }
         } label: {
             Image(systemName: "ellipsis")
         }
         .menuIndicator(.hidden)
         .fixedSize()
+        .disabled(!state.canTake)
         .help("More ways to resolve this conflict")
         .accessibilityLabel("More ways to resolve this conflict")
     }

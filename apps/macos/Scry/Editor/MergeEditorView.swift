@@ -119,6 +119,8 @@ struct MergeEditorView: View {
                             row: row,
                             widths: widths,
                             scroll: scroll,
+                            take: { viewModel.take($0, in: $1) },
+                            editByHand: { viewModel.editByHand(in: $0) },
                             focus: { viewModel.focus($0) }
                         )
                         .id(offset)

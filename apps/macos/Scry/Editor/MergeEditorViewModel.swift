@@ -170,6 +170,28 @@ final class MergeEditorViewModel {
         let editing: Bool
         /// The take buttons work: no conflict is open for editing.
         let canTake: Bool
+        /// The ••• menu: the candidates the core offers, in its order.
+        let menu: [LensMenuItem]
+    }
+
+    /// A candidate in the lens row's ••• menu, with its direct key when it
+    /// has one.
+    struct LensMenuItem: Equatable {
+        let id: String
+        let title: String
+        let shortcut: Shortcut?
+    }
+
+    /// The keys that take a candidate directly, by its ID.
+    private static func shortcut(for candidate: String) -> Shortcut? {
+        switch candidate {
+        case "ours": .takeOurs
+        case "theirs": .takeTheirs
+        case "ours-then-theirs": .takeBoth
+        case "neither": .takeNone
+        case "base": .takeBase
+        default: nil
+        }
     }
 
     struct CodeRowState {
@@ -244,7 +266,10 @@ final class MergeEditorViewModel {
             theirsCommit: info?.theirsCommit,
             badges: info?.badges ?? [],
             editing: model.editing == conflict,
-            canTake: model.editing == nil
+            canTake: model.editing == nil,
+            menu: (info?.candidates ?? []).map {
+                LensMenuItem(id: $0.id, title: $0.title, shortcut: Self.shortcut(for: $0.id))
+            }
         )
     }
 
@@ -392,6 +417,14 @@ final class MergeEditorViewModel {
         guard !isEditing else { return }
         model.focus(conflict)
         take(candidate)
+    }
+
+    /// The ••• menu's Edit by Hand: opens this conflict, not the focused
+    /// one.
+    func editByHand(in conflict: Int) {
+        guard !isEditing else { return }
+        model.focus(conflict)
+        startEditing(conflict)
     }
 
     func takeBoth(in conflict: Int) {

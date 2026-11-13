@@ -195,6 +195,29 @@ struct MergeEditorViewModelTests {
         #expect(!noBase.showsBase)
     }
 
+    /// The lens row's ••• menu lists exactly the candidates the core
+    /// offers, in its order, with the direct keys of those that have one,
+    /// so it never offers a resolution the inspector does not.
+    @Test func lensMenuListsTheCoreCandidates() throws {
+        let editor = try ConflictFile().editor()
+        guard case .lens(let lens) = editor.rows[try #require(editor.lensRowIndex(of: 0))] else {
+            Issue.record("expected a lens row")
+            return
+        }
+        #expect(lens.menu.map(\.id) == editor.inspector.cards.map(\.id))
+        #expect(lens.menu.first { $0.id == "ours" }?.shortcut == .takeOurs)
+        #expect(lens.menu.first { $0.id == "theirs-then-ours" }?.shortcut == nil)
+    }
+
+    /// Edit by Hand from a lens row opens that row's conflict, not the
+    /// focused one.
+    @Test func lensMenuEditsItsOwnConflict() throws {
+        let editor = try ConflictFile().editor()
+        editor.editByHand(in: 1)
+        #expect(editor.editBlock?.conflict == 1)
+        #expect(editor.currentConflict == 1)
+    }
+
     /// Taking the side already taken changes nothing: one undo takes the
     /// choice back, rather than an undo that seems to do nothing.
     @Test func takingTheSameSideTwiceIsOneStep() throws {
