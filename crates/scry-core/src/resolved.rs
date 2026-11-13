@@ -7,7 +7,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::catalog::{Pick, apple_json};
+use crate::catalog::{Pick, apple_json, check_picks};
 
 /// A package one side or both changed, as people read its pin: "1.2.0",
 /// "main @ 3f2a9c1" or "3f2a9c1"; `None` where that version has none.
@@ -144,8 +144,9 @@ pub fn merge(base: &str, ours: &str, theirs: &str) -> Result<ResolvedMerge, Stri
 
 impl ResolvedMerge {
     /// The file with one pick per conflicting package, in order, written
-    /// as SwiftPM writes it. Missing picks keep ours.
-    pub fn resolve(&self, picks: &[Pick]) -> String {
+    /// as SwiftPM writes it. Every conflict needs its pick.
+    pub fn resolve(&self, picks: &[Pick]) -> Result<String, String> {
+        check_picks(picks.len(), self.conflicts.len())?;
         let mut conflict = 0;
         let mut list = Vec::new();
         for (identity, settled) in &self.pins {
@@ -180,7 +181,7 @@ impl ResolvedMerge {
         if let Value::Object(map) = node {
             map.insert(last.clone(), Value::Array(list));
         }
-        apple_json(&value)
+        Ok(apple_json(&value))
     }
 
     /// The key naming a pin, for messages.
@@ -280,7 +281,7 @@ mod tests {
         assert!(merge.conflicts.is_empty());
         assert_eq!(merge.automatic.len(), 2);
         assert_eq!(
-            merge.resolve(&[]),
+            merge.resolve(&[]).unwrap(),
             resolved(
                 "h0",
                 &[
@@ -305,7 +306,7 @@ mod tests {
         assert_eq!(conflict.ours.as_deref(), Some("5.8.1"));
         assert_eq!(conflict.theirs.as_deref(), Some("5.9.0"));
         assert_eq!(
-            merge.resolve(&[Pick::Theirs]),
+            merge.resolve(&[Pick::Theirs]).unwrap(),
             resolved("h0", &[pin("alamofire", "5.9.0", "a2")])
         );
     }
@@ -340,7 +341,7 @@ mod tests {
         assert!(merge.conflicts.is_empty());
         assert!(merge.origin_hash_stale);
         assert_eq!(
-            merge.resolve(&[]),
+            merge.resolve(&[]).unwrap(),
             resolved(
                 "h1",
                 &[
@@ -363,6 +364,11 @@ mod tests {
         let merge = merge(&file("5.8.0"), &file("5.8.1"), &file("5.8.0")).unwrap();
         assert_eq!(merge.identity_key(), "package");
         assert_eq!(merge.automatic[0].identity, "Alamofire");
-        assert!(merge.resolve(&[]).contains("\"version\" : \"5.8.1\""));
+        assert!(
+            merge
+                .resolve(&[])
+                .unwrap()
+                .contains("\"version\" : \"5.8.1\"")
+        );
     }
 }

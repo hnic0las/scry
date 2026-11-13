@@ -180,6 +180,8 @@ final class OverviewViewModel {
     private(set) var filter: Filter = .all
     /// Asking before giving up the whole operation.
     var confirmingAbort = false
+    /// Asking before leaving the current commit out.
+    var confirmingSkip = false
     /// The view settling a special file, while it is shown.
     private(set) var special: SpecialFileViewModel?
     /// The message being written at a `reword` step; Continue gives it to
@@ -580,6 +582,11 @@ final class OverviewViewModel {
         "Gives up the whole \(verb) and puts the branch back as it was before. Choices made in its files are lost."
     }
 
+    var skipTitle: String { "Skip this commit?" }
+    var skipMessage: String {
+        "Leaves the commit being applied out of the \(verb): its changes and the choices made in its files are lost. Git keeps the original commit in its reflog."
+    }
+
     /// "3 files still unresolved".
     var unresolvedSummary: String {
         let left = count(.unresolved) + count(.needsReview)
@@ -717,6 +724,7 @@ final class OverviewViewModel {
         run(.continue(message: isRewording ? Self.trimmed(rewordMessage) : nil))
     }
 
+    /// Leaves the commit out, once the user confirmed.
     func skip() {
         guard canSkip else { return }
         run(.skip)

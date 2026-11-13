@@ -172,6 +172,9 @@ pub struct Reword {
     /// The commit git made, once `committed`: what it changes, to read
     /// while writing its message.
     pub commit: Option<RewordCommit>,
+    /// The original commit the line rewords (`stopped-sha`), so a message
+    /// prepared for it never reaches another commit.
+    pub original: String,
 }
 
 /// The commit a reword stopped on, as git replayed it.
@@ -495,8 +498,13 @@ impl Overview {
             }
             OverviewCommand::ResolveCatalog { path, picks } => {
                 let merge = self.catalog(git, &path)?;
-                write_atomically(&self.root.join(&path), &merge.resolve(&picks_of(&picks)))
-                    .map_err(OverviewError::Io)?;
+                write_atomically(
+                    &self.root.join(&path),
+                    &merge
+                        .resolve(&picks_of(&picks))
+                        .map_err(OverviewError::Invalid)?,
+                )
+                .map_err(OverviewError::Io)?;
                 Ok(vec![OverviewEvent::Written { path }])
             }
             OverviewCommand::TakeLockfile { path, version } => {
@@ -521,8 +529,13 @@ impl Overview {
             }
             OverviewCommand::ResolvePackages { path, picks } => {
                 let merge = self.packages(git, &path)?;
-                write_atomically(&self.root.join(&path), &merge.resolve(&picks_of(&picks)))
-                    .map_err(OverviewError::Io)?;
+                write_atomically(
+                    &self.root.join(&path),
+                    &merge
+                        .resolve(&picks_of(&picks))
+                        .map_err(OverviewError::Invalid)?,
+                )
+                .map_err(OverviewError::Io)?;
                 Ok(vec![OverviewEvent::Written { path }])
             }
             OverviewCommand::StageResolved => {
@@ -549,7 +562,7 @@ impl Overview {
                 if left > 0 {
                     return Err(OverviewError::NotStaged(left));
                 }
-                let editor = Editor::new(git)?;
+                let mut editor = Editor::new(git)?;
                 match (&snapshot.reword, message) {
                     (None, Some(_)) => {
                         return Err(OverviewError::Invalid(String::from(
@@ -566,8 +579,10 @@ impl Overview {
                         }
                         if !reword.committed {
                             // The commit is made on Continue: the editor
-                            // hands git this message.
-                            editor.prepare(&message).map_err(OverviewError::Io)?;
+                            // hands git this message, for this commit only.
+                            editor
+                                .prepare(&message, &reword.original)
+                                .map_err(OverviewError::Io)?;
                         } else if message.trim_end() != reword.message.trim_end() {
                             git.run_with_input(
                                 &["commit", "--amend", "--file=-"],
@@ -949,19 +964,28 @@ fn reword(git: &dyn Git, plan: Option<&Plan>, merged: bool) -> Result<Option<Rew
     };
     let stopped = stopped.trim();
     // Git stops after making the commit when its editor fails: HEAD is
-    // then the commit replayed, with the author and date of the original.
-    let author = |commit: &str| {
+    // then the commit replayed, with the author, date and message of the
+    // original, and nothing left in the index. Author and date alone are
+    // not enough: the commit before may share them (scripts, `commit -C`),
+    // and after a conflict the staged resolution is not committed yet.
+    // Git writes no marker for this stop (no `rebase-merge/amend`).
+    let identity = |commit: &str| {
         git.run(&[
             "show",
             "--no-patch",
             "--no-show-signature",
             "--date=raw",
-            "--format=%an%x00%ae%x00%ad",
+            "--format=%an%x00%ae%x00%ad%x00%B",
             commit,
             "--",
         ])
     };
-    let committed = merged && author("HEAD")? == author(stopped)?;
+    let committed = merged
+        && identity("HEAD")? == identity(stopped)?
+        && git
+            .output(&["diff", "--cached", "--quiet", "HEAD", "--"])?
+            .status
+            == Some(0);
     // The commit's own message: git's `message` file adds comments
     // listing the conflicts.
     let message = message_of(git, if committed { "HEAD" } else { stopped })?;
@@ -974,6 +998,7 @@ fn reword(git: &dyn Git, plan: Option<&Plan>, merged: bool) -> Result<Option<Rew
         message: message.trim_end().to_string(),
         committed,
         commit,
+        original: stopped.to_string(),
     }))
 }
 
@@ -1037,26 +1062,57 @@ fn git_dir(git: &dyn Git) -> Result<PathBuf, GitError> {
 struct Editor {
     /// The prepared message, in the git folder.
     message: PathBuf,
+    /// The commit the message is for: git's line running must name it.
+    commit: String,
+    /// The comment character git is given, when the message has lines
+    /// starting with `#` (`#42 Fix the queue`) that git would strip.
+    comment: Option<char>,
     /// The rebase's lines done, the last one being the line running.
     done: PathBuf,
 }
 
+/// A comment character for git that no line of `message` starts with, so
+/// git strips its own comments and none of the message; `None` when `#`,
+/// git's own, is fine.
+fn comment_char(message: &str) -> Option<char> {
+    let starts = |c: char| message.lines().any(|line| line.trim_start().starts_with(c));
+    if !starts('#') {
+        return None;
+    }
+    [';', '@', '!', '$', '%', '^', '&', '|', ':']
+        .into_iter()
+        .find(|c| !starts(*c))
+}
+
 /// Run by git's shell with the file to write as `$1`. The paths come in
-/// the environment, so they need no quoting.
-const EDITOR: &str = "sh -c 'if [ -f \"$SCRY_MESSAGE\" ]; then \
-     cat \"$SCRY_MESSAGE\" > \"$1\" && rm -f \"$SCRY_MESSAGE\"; exit; fi; \
+/// the environment, so they need no quoting. The prepared message is used
+/// only when the line running (the last of `done`, `reword <id> …`) names
+/// the commit it was written for: a reword that became empty is dropped by
+/// git, and its message must not land on the next commit.
+const EDITOR: &str = "sh -c 'file=\"$1\"; \
+     if [ -f \"$SCRY_MESSAGE\" ]; then \
+     set -- $(tail -n 1 \"$SCRY_DONE\" 2>/dev/null); \
+     if [ -n \"$2\" ]; then case \"$SCRY_FOR\" in \"$2\"*) \
+     cat \"$SCRY_MESSAGE\" > \"$file\" && rm -f \"$SCRY_MESSAGE\"; exit;; esac; fi; fi; \
      case \"$(tail -n 1 \"$SCRY_DONE\" 2>/dev/null)\" in r\\ *|reword\\ *) exit 1;; esac' scry-editor";
 
 impl Editor {
+    /// Discards a message left by an earlier run that stopped half-way.
     fn new(git: &dyn Git) -> Result<Editor, GitError> {
         let dir = git_dir(git)?;
-        Ok(Editor {
+        let editor = Editor {
             message: dir.join("scry-message"),
+            commit: String::new(),
+            comment: None,
             done: dir.join("rebase-merge").join("done"),
-        })
+        };
+        editor.discard();
+        Ok(editor)
     }
 
-    fn prepare(&self, message: &str) -> std::io::Result<()> {
+    fn prepare(&mut self, message: &str, commit: &str) -> std::io::Result<()> {
+        self.commit = commit.to_string();
+        self.comment = comment_char(message);
         fs::write(&self.message, message)
     }
 
@@ -1071,16 +1127,30 @@ impl Editor {
     fn go_on(&self, git: &dyn Git, args: &[&str]) -> Result<(), GitError> {
         let message = self.message.display().to_string();
         let done = self.done.display().to_string();
+        let comment = self.comment.map(|c| format!("core.commentChar={c}"));
+        let mut full: Vec<&str> = Vec::new();
+        if let Some(comment) = &comment {
+            full.extend(["-c", comment]);
+        }
+        full.extend(args);
+        // The commit being applied, to tell git stopping on the next one
+        // from git failing on this one (a leftover `index.lock`).
+        let before = operation::current(git)?.as_ref().map(step);
         let output = git.output_with_env(
-            args,
+            &full,
             &[
                 // GIT_EDITOR comes before core.editor, even one inherited.
                 ("GIT_EDITOR", EDITOR),
                 ("SCRY_MESSAGE", &message),
+                ("SCRY_FOR", &self.commit),
                 ("SCRY_DONE", &done),
             ],
         )?;
-        if output.status == Some(0) || !operation::conflicted_paths(git)?.is_empty() {
+        if output.status == Some(0) {
+            return Ok(());
+        }
+        let after = operation::current(git)?.as_ref().map(step);
+        if after != before && !operation::conflicted_paths(git)?.is_empty() {
             return Ok(());
         }
         let plan = rebase_plan::read(git)?;

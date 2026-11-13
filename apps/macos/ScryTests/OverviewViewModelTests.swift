@@ -457,6 +457,19 @@ struct OverviewViewModelTests {
         #expect(source.actions == [.abort])
     }
 
+    /// Skip throws away the commit and the choices made in its files, so
+    /// it asks first, as Abort does: the view asks, then calls skip.
+    @Test func skipsOnlyWhenAsked() {
+        let source = FakeOverview(files: [file("A.swift", .unresolved)])
+        let overview = OverviewViewModel(source: source) { _ in }
+
+        overview.confirmingSkip = true
+        #expect(source.actions.isEmpty)
+        #expect(overview.skipMessage.hasPrefix("Leaves the commit being applied out of the rebase"))
+        overview.skip()
+        #expect(source.actions == [.skip])
+    }
+
     /// The plan reads as a log, newest step first, down to the commit
     /// replayed onto; a fixup says which commit it joins, a drop is
     /// marked, and each step says what git does with it.

@@ -129,6 +129,10 @@ struct CodeTextView: NSViewRepresentable {
         static let italic = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
 
         var parent: CodeTextView
+        /// Set while the coordinator inserts a re-indented line: AppKit
+        /// asks the delegate again for that insertion, which must go through
+        /// as it is.
+        private var isReindenting = false
 
         init(parent: CodeTextView) {
             self.parent = parent
@@ -184,20 +188,29 @@ struct CodeTextView: NSViewRepresentable {
             shouldChangeTextIn range: NSRange,
             replacementString text: String?
         ) -> Bool {
-            guard let text, range.length == 0, Self.closing.contains(text) else { return true }
+            guard !isReindenting, let text, range.length == 0, Self.closing.contains(text) else { return true }
             let string = textView.string as NSString
             let before = string.substring(to: range.location)
             guard let indentation = parent.typedIndent(before, text) else { return true }
             let lineStart = string.lineRange(for: NSRange(location: range.location, length: 0)).location
             let typed = string.substring(with: NSRange(location: lineStart, length: range.location - lineStart))
-            let content = typed.drop { $0 == " " || $0 == "\t" }
+            guard let line = Self.reindented(typed, to: indentation) else { return true }
             // The line's new indentation, its text and the character in one
             // edit, so ⌘Z undoes them together.
+            isReindenting = true
+            defer { isReindenting = false }
             textView.insertText(
-                indentation + content + text,
+                line + text,
                 replacementRange: NSRange(location: lineStart, length: range.location - lineStart)
             )
             return false
+        }
+
+        /// The line up to the cursor moved to `indentation`; `nil` when it
+        /// already has it, so the character is typed as it is.
+        nonisolated static func reindented(_ typed: String, to indentation: String) -> String? {
+            let line = indentation + typed.drop { $0 == " " || $0 == "\t" }
+            return line == typed ? nil : line
         }
 
         /// Applies the core's spans to the text, without changing it.

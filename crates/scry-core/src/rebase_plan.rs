@@ -258,10 +258,11 @@ fn step(number: usize, line: &str, state: StepState) -> Step {
             rest = rest[3..].trim_start();
         }
         let (id, subject) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-        (
-            Some(id.chars().take(7).collect()),
-            subject.trim().to_string(),
-        )
+        // Git writes `pick <id> # <subject>`, the subject as a comment;
+        // older versions and hand-written lists leave the `#` out.
+        let subject = subject.trim();
+        let subject = subject.strip_prefix("# ").unwrap_or(subject);
+        (Some(id.chars().take(7).collect()), subject.to_string())
     } else if action == Action::Other {
         (None, line.to_string())
     } else {

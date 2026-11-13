@@ -101,6 +101,9 @@ impl GitCli {
             // Scry reads while the user's own git commands may run: never take
             // the index lock just to refresh it.
             .env("GIT_OPTIONAL_LOCKS", "0")
+            // Paths are file names, never patterns: `[id].tsx` must not
+            // also match `i.tsx` or `d.tsx`.
+            .env("GIT_LITERAL_PATHSPECS", "1")
             .envs(self.environment.iter().map(|(key, value)| (key, value)));
         command
     }

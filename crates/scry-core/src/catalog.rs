@@ -72,8 +72,10 @@ pub fn merge(base: &str, ours: &str, theirs: &str) -> Result<CatalogMerge, Strin
 
 impl CatalogMerge {
     /// The catalog with one pick per conflict, in order, written as Xcode
-    /// writes catalogs. Fewer picks than conflicts keep ours for the rest.
-    pub fn resolve(&self, picks: &[Pick]) -> String {
+    /// writes catalogs. Every conflict needs its pick: a missing one is
+    /// refused rather than silently taken from ours.
+    pub fn resolve(&self, picks: &[Pick]) -> Result<String, String> {
+        check_picks(picks.len(), self.conflicts.len())?;
         let mut value = self.merged.clone();
         for (index, conflict) in self.conflicts.iter().enumerate() {
             let (ours, theirs) = &self.choices[index];
@@ -83,7 +85,18 @@ impl CatalogMerge {
             };
             set(&mut value, &conflict.path, chosen.clone());
         }
-        apple_json(&value)
+        Ok(apple_json(&value))
+    }
+}
+
+/// One pick per conflict, no more, no fewer.
+pub(crate) fn check_picks(picks: usize, conflicts: usize) -> Result<(), String> {
+    if picks == conflicts {
+        Ok(())
+    } else {
+        Err(format!(
+            "{conflicts} value(s) to choose, {picks} choice(s) given"
+        ))
     }
 }
 
@@ -296,7 +309,7 @@ mod tests {
         assert!(merge.conflicts.is_empty());
         assert_eq!(merge.automatic, 2);
         assert_eq!(
-            merge.resolve(&[]),
+            merge.resolve(&[]).unwrap(),
             catalog("Tout est synchronisé", "%lld à envoyer")
         );
     }
@@ -318,9 +331,22 @@ mod tests {
         assert_eq!(conflict.ours.as_deref(), Some("Tout est synchronisé"));
         assert_eq!(conflict.theirs.as_deref(), Some("Synchronisation terminée"));
         assert_eq!(
-            merge.resolve(&[Pick::Theirs]),
+            merge.resolve(&[Pick::Theirs]).unwrap(),
             catalog("Synchronisation terminée", "%lld en attente")
         );
+    }
+
+    /// A missing pick is refused instead of silently keeping ours, so a
+    /// caller that forgot a value cannot write a merge nobody chose.
+    #[test]
+    fn every_conflict_needs_its_pick() {
+        let base = catalog("Synchronisé", "%lld en attente");
+        let ours = catalog("Tout est synchronisé", "%lld en attente");
+        let theirs = catalog("Synchronisation terminée", "%lld en attente");
+        let merge = merge(&base, &ours, &theirs).unwrap();
+        assert!(merge.resolve(&[]).is_err());
+        assert!(merge.resolve(&[Pick::Ours, Pick::Ours]).is_err());
+        assert!(merge.resolve(&[Pick::Ours]).is_ok());
     }
 
     /// A key one side removed and the other changed is a choice too, and
@@ -333,10 +359,11 @@ mod tests {
         let merge = merge(base, ours, theirs).unwrap();
         assert_eq!(merge.conflicts.len(), 1);
         assert_eq!(merge.conflicts[0].ours, None);
-        assert!(!merge.resolve(&[Pick::Ours]).contains("\"a\""));
+        assert!(!merge.resolve(&[Pick::Ours]).unwrap().contains("\"a\""));
         assert!(
             merge
                 .resolve(&[Pick::Theirs])
+                .unwrap()
                 .contains("\"comment\" : \"y\"")
         );
     }

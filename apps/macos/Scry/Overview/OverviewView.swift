@@ -102,6 +102,12 @@ struct OverviewView: View {
         } message: {
             Text(viewModel.abortMessage)
         }
+        .alert(viewModel.skipTitle, isPresented: $viewModel.confirmingSkip) {
+            Button("Skip Commit", role: .destructive) { viewModel.skip() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(viewModel.skipMessage)
+        }
     }
 
     private var table: some View {
@@ -190,7 +196,7 @@ struct OverviewView: View {
                 .font(Metrics.callout)
                 .foregroundStyle(Theme.Surfaces.textSecondary)
             if viewModel.canSkip {
-                Button("Skip commit") { viewModel.skip() }
+                Button("Skip commit…") { viewModel.confirmingSkip = true }
             }
             if viewModel.showsStage {
                 Button(viewModel.stageTitle) { viewModel.stageResolved() }

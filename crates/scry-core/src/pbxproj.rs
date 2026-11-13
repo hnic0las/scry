@@ -99,20 +99,36 @@ pub fn keep_both(
     text: &str,
     marker_size: usize,
     remove_missing: bool,
-) -> Result<String, ParseError> {
-    let segments = conflict::parse_with_marker_size(text, marker_size)?;
+) -> Result<String, KeepBothError> {
+    let segments =
+        conflict::parse_with_marker_size(text, marker_size).map_err(KeepBothError::Parse)?;
     let plan = settle(&segments, marker_size);
-    if !remove_missing || plan.missing_ids.is_empty() {
-        return Ok(plan.text);
+    let result: String = if !remove_missing || plan.missing_ids.is_empty() {
+        plan.text
+    } else {
+        plan.text
+            .split_inclusive('\n')
+            .filter(|line| {
+                listed(line.trim_end_matches(['\n', '\r']))
+                    .is_none_or(|id| !plan.missing_ids.iter().any(|missing| missing == id))
+            })
+            .collect()
+    };
+    // The last guard: a project with every conflict settled must close
+    // each `{` and `(` it opens, or Xcode cannot open it.
+    let settled_all = plan.reasons.iter().all(Option::is_none);
+    if settled_all && !balanced(&result) {
+        return Err(KeepBothError::Unbalanced);
     }
-    Ok(plan
-        .text
-        .split_inclusive('\n')
-        .filter(|line| {
-            listed(line.trim_end_matches(['\n', '\r']))
-                .is_none_or(|id| !plan.missing_ids.iter().any(|missing| missing == id))
-        })
-        .collect())
+    Ok(result)
+}
+
+/// Why keeping both was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeepBothError {
+    Parse(ParseError),
+    /// The result would not close every bracket it opens.
+    Unbalanced,
 }
 
 /// The id of a line that only lists an object (`<id> /* name */,`).
@@ -240,7 +256,7 @@ struct Settled {
 fn settle(segments: &[Segment], marker_size: usize) -> Settled {
     let names = object_names(segments);
     let mut reasons: Vec<Option<String>> = conflict::conflicts(segments)
-        .map(|conflict| Changes::of(conflict).contradiction())
+        .map(|conflict| shape(conflict).or_else(|| Changes::of(conflict).contradiction()))
         .collect();
     loop {
         let text = write(segments, &reasons, marker_size);
@@ -355,6 +371,69 @@ fn lines(text: &str) -> Vec<&str> {
     text.split_inclusive('\n')
         .map(|line| line.trim_end_matches(['\n', '\r']))
         .collect()
+}
+
+/// Why a conflict is not made of single-line entries, which is all that
+/// keeping both handles: a side that opens or closes an object (`{ … };`)
+/// or a list (`( … );`) inside the conflict is left to the merge editor,
+/// since merging its lines one by one would split the object.
+fn shape(conflict: &Conflict) -> Option<String> {
+    let base = conflict.base.as_ref().map(|base| base.text.as_str());
+    let spans = [
+        Some(conflict.ours.text.as_str()),
+        base,
+        Some(conflict.theirs.text.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(lines)
+    .filter(|line| !line.trim().is_empty())
+    .any(|line| is_structure(line) || !balanced(line));
+    spans.then(|| {
+        String::from("opens or closes an object or a list across several lines: resolve it by hand")
+    })
+}
+
+/// Every `{` and `(` closed, never closed before it opens, outside quoted
+/// strings and `/* … */` comments (a build script's text can hold any
+/// bracket).
+fn balanced(text: &str) -> bool {
+    let (mut braces, mut parens) = (0i64, 0i64);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut previous = ' ';
+                for c in chars.by_ref() {
+                    if previous == '*' && c == '/' {
+                        break;
+                    }
+                    previous = c;
+                }
+            }
+            '{' => braces += 1,
+            '}' => braces -= 1,
+            '(' => parens += 1,
+            ')' => parens -= 1,
+            _ => {}
+        }
+        if braces < 0 || parens < 0 {
+            return false;
+        }
+    }
+    braces == 0 && parens == 0
 }
 
 /// Closing brackets and blank lines belong to no entry.
@@ -548,6 +627,81 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// Each side adding a multi-line object at the same place (a build
+    /// phase per target) used to be "kept both" line by line, which split
+    /// the objects and broke the project: it is now left by hand.
+    #[test]
+    fn a_multi_line_object_added_on_each_side_is_left_by_hand() {
+        let text = "\
+/* Begin PBXFrameworksBuildPhase section */
+<<<<<<< ours
+\t\tB1000001 /* Frameworks */ = {
+\t\t\tisa = PBXFrameworksBuildPhase;
+\t\t\tfiles = (
+\t\t\t);
+\t\t};
+||||||| base
+=======
+\t\tB2000002 /* Frameworks */ = {
+\t\t\tisa = PBXFrameworksBuildPhase;
+\t\t\tfiles = (
+\t\t\t);
+\t\t};
+>>>>>>> theirs
+/* End PBXFrameworksBuildPhase section */
+";
+        let review = review(text, 7).unwrap();
+        assert_eq!(review.resolvable, 0);
+        assert!(
+            review.conflicts[0]
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("across several lines")
+        );
+        // Nothing settles, so the file keeps its markers as git wrote it.
+        assert!(keep_both(text, 7, true).unwrap().contains("<<<<<<< ours"));
+    }
+
+    /// A side whose conflict runs past the end of a list (`);`) used to get
+    /// the other side's entries after the bracket, among the group's
+    /// attributes: it is now left by hand.
+    #[test]
+    fn a_conflict_past_the_end_of_a_list_is_left_by_hand() {
+        let text = "\
+\t\t\tchildren = (
+\t\t\t\tA2000001 /* One.swift */,
+<<<<<<< ours
+\t\t\t\tA2000003 /* Ours.swift */,
+\t\t\t);
+\t\t\tpath = Sources;
+||||||| base
+\t\t\t);
+\t\t\tpath = Source;
+=======
+\t\t\t\tA2000004 /* Theirs.swift */,
+\t\t\t);
+\t\t\tpath = Source;
+>>>>>>> theirs
+\t\t\tsourceTree = \"<group>\";
+";
+        let review = review(text, 7).unwrap();
+        assert_eq!(review.resolvable, 0);
+        assert!(!review.can_keep_both());
+    }
+
+    /// Brackets inside strings and comments do not count, and a closing
+    /// bracket before its opening one is not balanced.
+    #[test]
+    fn balance_ignores_strings_and_comments() {
+        assert!(balanced(
+            "A1 /* main) */ = {isa = X; shellScript = \"if [ x ]; then { echo; \\\"(\\\"\";};"
+        ));
+        assert!(!balanced("\t\t};"));
+        assert!(!balanced("files = ("));
+        assert!(!balanced("}{"));
     }
 
     /// With the base, an entry one side removed stays removed while the

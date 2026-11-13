@@ -899,3 +899,297 @@ fn lockfiles_and_package_pins_are_settled_from_the_overview() {
         assert_eq!(file.state, State::Resolved, "{name}");
     }
 }
+
+/// A file name with glob characters is a name, not a pattern: staging the
+/// conflicted `file[1].txt` once also staged the unrelated `file1.txt`
+/// it matched as a pattern.
+#[test]
+fn a_name_with_glob_characters_stages_only_itself() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("gitconfig"), "").unwrap();
+    fs::create_dir_all(root.path().join("repo")).unwrap();
+    let repo = Repo { root };
+    let path = repo.path();
+    repo.ok(&["init", "--quiet", "--initial-branch=main"]);
+    let write = |name: &str, text: &str| fs::write(path.join(name), text).unwrap();
+    write("file[1].txt", "base\n");
+    write("file1.txt", "untouched\n");
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "--quiet", "-m", "base"]);
+    repo.ok(&["switch", "--quiet", "-c", "feature"]);
+    write("file[1].txt", "feature\n");
+    repo.ok(&["commit", "--quiet", "-am", "feature"]);
+    repo.ok(&["switch", "--quiet", "main"]);
+    write("file[1].txt", "main\n");
+    repo.ok(&["commit", "--quiet", "-am", "main"]);
+    assert!(!repo.git(&["merge", "feature"]));
+    write("file[1].txt", "both\n");
+    write("file1.txt", "changed, not to stage\n");
+
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    overview
+        .apply(
+            &git,
+            OverviewCommand::Stage {
+                path: String::from("file[1].txt"),
+            },
+        )
+        .unwrap();
+    let staged = Command::new("git")
+        .args([
+            "-C",
+            path.to_str().unwrap(),
+            "diff",
+            "--cached",
+            "--name-only",
+        ])
+        .envs(Repo::environment(repo.root.path()))
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&staged.stdout), "file[1].txt\n");
+}
+
+/// The plan reads the todo list as git writes it (`pick <id> # <subject>`):
+/// subjects come without the `#`, and a commit replayed as it was is not
+/// shown as reworded. The other plan tests write their list by hand.
+#[test]
+fn the_plan_reads_the_todo_list_git_writes() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("gitconfig"), "").unwrap();
+    fs::create_dir_all(root.path().join("repo/Sources")).unwrap();
+    let repo = Repo { root };
+    repo.ok(&["init", "--quiet", "--initial-branch=main"]);
+    repo.commit("a\n", "let b = 0\n", "base");
+    repo.ok(&["switch", "--quiet", "-c", "feature"]);
+    fs::write(repo.path().join("notes.txt"), "notes\n").unwrap();
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "--quiet", "-m", "add notes"]);
+    repo.commit("a feature\n", "let b = 2\n", "change a");
+    fs::write(repo.path().join("more.txt"), "more\n").unwrap();
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "--quiet", "-m", "add more"]);
+    repo.ok(&["switch", "--quiet", "main"]);
+    repo.commit("a main\n", "let b = 1\n", "main change");
+    repo.ok(&["switch", "--quiet", "feature"]);
+    assert!(!repo.git(&["rebase", "main"]));
+
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    let plan = overview.refresh(&git).unwrap().plan.unwrap();
+    let subjects: Vec<&str> = plan
+        .steps
+        .iter()
+        .map(|step| step.subject.as_str())
+        .collect();
+    assert_eq!(subjects, ["add notes", "change a", "add more"]);
+    assert_eq!(plan.steps[0].state, StepState::Done);
+    assert_eq!(plan.steps[0].was, None);
+    assert_eq!(plan.steps[1].state, StepState::Current);
+}
+
+/// A repository whose `feature` has the given commits (file, content,
+/// message), all with the same author date, on a `main` that changed
+/// `a.txt`; it gives the commits' ids.
+fn same_second_commits(repo: &Repo, commits: &[(&str, &str, &str)]) -> Vec<String> {
+    repo.ok(&["init", "--quiet", "--initial-branch=main"]);
+    fs::write(repo.path().join("a.txt"), "a\n").unwrap();
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "--quiet", "-m", "base"]);
+    repo.ok(&["switch", "--quiet", "-c", "feature"]);
+    let mut ids = Vec::new();
+    for (file, content, message) in commits {
+        fs::write(repo.path().join(file), content).unwrap();
+        repo.ok(&["add", "."]);
+        let committed = Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["commit", "--quiet", "-m", message])
+            .envs(Repo::environment(repo.root.path()))
+            .env("GIT_AUTHOR_DATE", "1700000000 +0100")
+            .output()
+            .unwrap();
+        assert!(committed.status.success());
+        let id = Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        ids.push(String::from_utf8(id.stdout).unwrap().trim().to_string());
+    }
+    repo.ok(&["switch", "--quiet", "main"]);
+    fs::write(repo.path().join("a.txt"), "a main\n").unwrap();
+    repo.ok(&["commit", "--quiet", "-am", "main change"]);
+    repo.ok(&["switch", "--quiet", "feature"]);
+    ids
+}
+
+/// Starts `rebase -i main` with this todo list.
+fn rebase_with(repo: &Repo, todo: &str) {
+    let file = repo.root.path().join("todo");
+    fs::write(&file, todo).unwrap();
+    let editor = format!("sequence.editor=cp '{}'", file.display());
+    assert!(!repo.git(&[
+        "-c",
+        &editor,
+        "-c",
+        "core.editor=true",
+        "rebase",
+        "-i",
+        "main"
+    ]));
+}
+
+fn subjects(repo: &Repo) -> Vec<String> {
+    let log = Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args(["log", "--format=%s", "main..HEAD"])
+        .output()
+        .unwrap();
+    String::from_utf8(log.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// A reword stopped on conflicts whose previous commit has the same author
+/// and date (scripts, `commit -C`) was taken for "already committed", and
+/// Continue amended the previous commit, folding the two together. The
+/// staged resolution tells them apart: the reword gets its message, and
+/// both commits stay.
+#[test]
+fn a_conflicted_reword_never_amends_the_commit_before() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("gitconfig"), "").unwrap();
+    fs::create_dir_all(root.path().join("repo")).unwrap();
+    let repo = Repo { root };
+    let ids = same_second_commits(
+        &repo,
+        &[
+            ("notes.txt", "notes\n", "add notes"),
+            ("a.txt", "a feature\n", "change a"),
+        ],
+    );
+    rebase_with(
+        &repo,
+        &format!("pick {} add notes\nreword {} change a\n", ids[0], ids[1]),
+    );
+    fs::write(repo.path().join("a.txt"), "a both\n").unwrap();
+    repo.ok(&["add", "a.txt"]);
+
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    let reword = overview.refresh(&git).unwrap().reword.unwrap();
+    assert!(!reword.committed);
+    overview
+        .apply(
+            &git,
+            OverviewCommand::Continue {
+                message: Some(String::from("change a, both sides")),
+            },
+        )
+        .unwrap();
+    assert_eq!(subjects(&repo), ["change a, both sides", "add notes"]);
+}
+
+/// A reword whose resolution leaves nothing to commit is dropped by git,
+/// which goes on to the next line: the message written for it used to land
+/// on that next commit. It now waits for its own commit, and the next
+/// reword stops for its message as usual.
+#[test]
+fn a_reword_message_never_lands_on_another_commit() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("gitconfig"), "").unwrap();
+    fs::create_dir_all(root.path().join("repo")).unwrap();
+    let repo = Repo { root };
+    let ids = same_second_commits(
+        &repo,
+        &[
+            ("a.txt", "a feature\n", "change a"),
+            ("b.txt", "b\n", "add b"),
+        ],
+    );
+    rebase_with(
+        &repo,
+        &format!("reword {} change a\nreword {} add b\n", ids[0], ids[1]),
+    );
+    // Resolved as main has it: the reword has nothing left to commit.
+    fs::write(repo.path().join("a.txt"), "a main\n").unwrap();
+    repo.ok(&["add", "a.txt"]);
+
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    overview.refresh(&git).unwrap();
+    overview
+        .apply(
+            &git,
+            OverviewCommand::Continue {
+                message: Some(String::from("message for change a")),
+            },
+        )
+        .unwrap();
+    let snapshot = overview.refresh(&git).unwrap();
+    let reword = snapshot.reword.expect("stopped on the next reword");
+    assert!(reword.committed);
+    assert_eq!(reword.message, "add b");
+    assert_eq!(subjects(&repo), ["add b"]);
+}
+
+/// A message whose subject starts with `#` (`#42 …`, an issue number) was
+/// emptied by git, which strips lines starting with its comment character:
+/// it is now committed as written.
+#[test]
+fn a_reword_message_starting_with_a_hash_is_kept() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("gitconfig"), "").unwrap();
+    fs::create_dir_all(root.path().join("repo")).unwrap();
+    let repo = Repo { root };
+    let ids = same_second_commits(&repo, &[("a.txt", "a feature\n", "change a")]);
+    rebase_with(&repo, &format!("reword {} change a\n", ids[0]));
+    fs::write(repo.path().join("a.txt"), "a both\n").unwrap();
+    repo.ok(&["add", "a.txt"]);
+
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    overview.refresh(&git).unwrap();
+    overview
+        .apply(
+            &git,
+            OverviewCommand::Continue {
+                message: Some(String::from(
+                    "#42 Keep both sides of a\n\n# not a comment either",
+                )),
+            },
+        )
+        .unwrap();
+    let body = Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args(["log", "-1", "--format=%B"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(body.stdout).unwrap().trim_end(),
+        "#42 Keep both sides of a\n\n# not a comment either"
+    );
+}
+
+/// Skip used to report success whenever conflicts were left, even when git
+/// failed and stayed on the same commit (here a leftover `index.lock`): the
+/// failure is now reported.
+#[test]
+fn a_failed_skip_is_reported() {
+    let repo = Repo::stopped_rebase();
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    overview.refresh(&git).unwrap();
+    let lock = repo.path().join(".git/index.lock");
+    fs::write(&lock, "").unwrap();
+    assert!(overview.apply(&git, OverviewCommand::Skip).is_err());
+    fs::remove_file(&lock).unwrap();
+    assert!(overview.apply(&git, OverviewCommand::Skip).is_ok());
+    assert!(overview.refresh(&git).unwrap().operation.is_none());
+}
