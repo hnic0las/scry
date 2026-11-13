@@ -1570,3 +1570,43 @@ fn the_overview_and_a_file_read_as_json() {
         "unresolved"
     );
 }
+
+/// A file opened from the overview reads the sides' final line break from the index:
+/// the markers git writes have one after each side, so without it a file that had
+/// none would gain one when saved.
+#[test]
+fn a_file_opened_from_the_overview_keeps_no_final_line_break() {
+    let repo = stopped_merge(|repo, side| {
+        fs::write(repo.path().join("a.txt"), format!("a\n{side}")).unwrap();
+        repo.ok(&["add", "--all"]);
+    });
+    let path = repo.path().join("a.txt");
+    let git = repo.cli();
+    let mut session = scry_core::session::open_file(&git, &path).unwrap();
+    session
+        .apply(scry_core::command::Command::Choose {
+            conflict: 0,
+            candidate: scry_core::resolution::CandidateKind::Theirs,
+        })
+        .unwrap();
+    assert_eq!(session.merged_text().as_deref(), Some("a\nfeature"));
+}
+
+/// A Markdown file whose sides both add an underlined heading opens from the overview:
+/// its versions are read from the index and the conflict rebuilt with longer markers.
+#[test]
+fn a_file_with_a_separator_line_opens_from_the_overview() {
+    let repo = stopped_merge(|repo, side| {
+        let text = match side {
+            "base" => String::from("# Title\n"),
+            side => format!("# Title\n\n{side}\n=======\n"),
+        };
+        fs::write(repo.path().join("README.md"), text).unwrap();
+        repo.ok(&["add", "--all"]);
+    });
+    let path = repo.path().join("README.md");
+    let session = scry_core::session::open_file(&repo.cli(), &path).unwrap();
+    assert_eq!(session.conflict_count(), 1);
+    assert_eq!(session.conflict(0).ours.text, "main\n");
+    assert_eq!(session.conflict(0).theirs.text, "feature\n");
+}

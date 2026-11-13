@@ -127,7 +127,9 @@ fn merge_value(
         merge.automatic += 1;
         return ours.cloned();
     }
-    if let (Some(Value::Object(ours_map)), Some(Value::Object(theirs_map))) = (ours, theirs) {
+    if let (Some(Value::Object(ours_map)), Some(Value::Object(theirs_map))) = (ours, theirs)
+        && !(is_localization(path) && shape(ours_map) != shape(theirs_map))
+    {
         let empty = Map::new();
         let base_map = match base {
             Some(Value::Object(map)) => map,
@@ -160,6 +162,23 @@ fn merge_value(
     merge.conflicts.push(conflict(path, base, ours, theirs));
     merge.choices.push((ours.cloned(), theirs.cloned()));
     ours.cloned()
+}
+
+/// Whether `path` leads to one language's translation of a string
+/// ("strings", key, "localizations", "fr").
+fn is_localization(path: &[String]) -> bool {
+    path.len() >= 2 && path[path.len() - 2] == "localizations"
+}
+
+/// What a translation is made of: a single `stringUnit`, or `variations`
+/// (plural, device). A translation is one or the other; when the sides
+/// disagree, it is chosen whole, since merging its keys one by one could
+/// write both, which Xcode does not expect.
+fn shape(localization: &Map<String, Value>) -> (bool, bool) {
+    (
+        localization.contains_key("stringUnit"),
+        localization.contains_key("variations"),
+    )
 }
 
 fn conflict(
@@ -347,6 +366,27 @@ mod tests {
         assert!(merge.resolve(&[]).is_err());
         assert!(merge.resolve(&[Pick::Ours, Pick::Ours]).is_err());
         assert!(merge.resolve(&[Pick::Ours]).is_ok());
+    }
+
+    /// One side turns a translation into a plural while the other edits
+    /// its single value: the translation is one choice, taken whole, so
+    /// the file never gets both a `stringUnit` and `variations`.
+    #[test]
+    fn a_translation_changed_into_a_plural_is_chosen_whole() {
+        let base = r#"{"strings":{"n":{"localizations":{"fr":{"stringUnit":{"state":"translated","value":"%lld fichiers"}}}}}}"#;
+        let ours = r#"{"strings":{"n":{"localizations":{"fr":{"variations":{"plural":{"one":{"stringUnit":{"state":"translated","value":"%lld fichier"}}}}}}}}}"#;
+        let theirs = r#"{"strings":{"n":{"localizations":{"fr":{"stringUnit":{"state":"translated","value":"%lld documents"}}}}}}"#;
+        let merge = merge(base, ours, theirs).unwrap();
+        assert_eq!(merge.conflicts.len(), 1);
+        assert_eq!(merge.conflicts[0].key.as_deref(), Some("n"));
+        assert_eq!(merge.conflicts[0].detail, "fr");
+
+        let theirs_picked = merge.resolve(&[Pick::Theirs]).unwrap();
+        assert!(theirs_picked.contains("%lld documents"));
+        assert!(!theirs_picked.contains("variations"));
+        let ours_picked = merge.resolve(&[Pick::Ours]).unwrap();
+        assert!(ours_picked.contains("variations"));
+        assert!(!ours_picked.contains("%lld fichiers"));
     }
 
     /// A key one side removed and the other changed is a choice too, and

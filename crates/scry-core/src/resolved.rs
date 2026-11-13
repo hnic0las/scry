@@ -64,6 +64,19 @@ pub fn merge(base: &str, ours: &str, theirs: &str) -> Result<ResolvedMerge, Stri
     let ours = parse(ours, "ours")?;
     let theirs = parse(theirs, "theirs")?;
 
+    // Each format version places and names pins its own way; merging pins
+    // across them would write a file of neither format.
+    let format = |file: &Value| file.get("version").map(Value::to_string);
+    if let (Some(ours_format), Some(theirs_format)) = (format(&ours), format(&theirs))
+        && ours_format != theirs_format
+    {
+        return Err(format!(
+            "ours is format {ours_format} of Package.resolved and theirs format {theirs_format}, \
+             so its pins cannot be merged one by one: take one side's file, then let Xcode \
+             resolve the packages again"
+        ));
+    }
+
     let version_one = ours.get("object").is_some() || theirs.get("object").is_some();
     let (pins_path, identity_key) = if version_one {
         (
@@ -362,6 +375,19 @@ mod tests {
     }
 
     /// Version 1 files name pins by `package`, under `object`.
+    /// Sides written by different Xcode versions use different formats
+    /// (version 2 and 3): merging their pins would give a file of neither,
+    /// so the merge is refused and says why.
+    #[test]
+    fn sides_of_different_formats_are_refused() {
+        let ours = resolved("h0", &[pin("alamofire", "5.8.0", "a0")]);
+        let theirs = ours.replace("\"version\" : 3", "\"version\" : 2");
+        assert_ne!(ours, theirs);
+        let error = merge(&ours, &ours, &theirs).unwrap_err();
+        assert!(error.contains("format 3"), "{error}");
+        assert!(error.contains("format 2"), "{error}");
+    }
+
     #[test]
     fn version_one_files_are_read() {
         let file = |version: &str| {

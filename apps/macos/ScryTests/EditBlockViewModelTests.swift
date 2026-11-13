@@ -45,8 +45,8 @@ struct EditBlockViewModelTests {
 
     /// In a file with Windows line endings, the draft breaks lines with
     /// `\n` so it splits into lines (Swift sees `\r\n` as one character)
-    /// and Return matches it; applying puts `\r\n` back, so the written
-    /// file does not mix line endings.
+    /// and Return matches it; the core puts `\r\n` back on every line, so
+    /// the written file does not mix line endings.
     @Test func keepsWindowsLineEndings() throws {
         let file = try ConflictFile(text: ConflictFile.crlfText)
         let editor = try file.editor()
@@ -55,7 +55,6 @@ struct EditBlockViewModelTests {
         let block = try #require(editor.editBlock)
 
         #expect(block.draft == "let c = 1\n")
-        #expect(block.lineEnding == "\r\n")
         block.draft = "let c = 3\nlet d = 4\n"
         #expect(block.visibleLines == 4)
         block.apply()

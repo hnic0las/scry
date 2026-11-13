@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use scry_core::command::{Command, CommandError, Event};
-use scry_core::git::GitCli;
+use scry_core::git::{Git, GitCli};
 use scry_core::resolution::CandidateKind;
 use scry_core::session::{self, MergetoolFiles, Origin, SaveError};
 
@@ -162,6 +162,30 @@ fn malformed_markers_are_refused() {
     assert_eq!(fs::read_to_string(&files.merged).unwrap(), merged);
 }
 
+/// The way out names the file from the repository's root, the form git takes there,
+/// rather than a long absolute path through a temporary folder.
+#[test]
+fn malformed_markers_advice_names_the_file_from_the_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = GitCli::new(dir.path().to_path_buf());
+    git.run(&["init", "--quiet"]).unwrap();
+    let files = files(
+        dir.path(),
+        "base\n",
+        "ours\n",
+        "theirs\n",
+        "<<<<<<< HEAD\nours\n",
+    );
+
+    let error = session::load(&git, &files, "ours", "theirs").err().unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("`git checkout --merge -- file.txt` at the repository's root"),
+        "{error}"
+    );
+}
+
 /// Saving writes the result only over the file as it was read: a file
 /// changed meanwhile (resolved in another editor, an aborted rebase) is
 /// left alone unless the user says to overwrite it, and a deleted file is
@@ -234,4 +258,68 @@ fn marker_size_comes_from_the_attributes() {
     assert_eq!(session.conflict_count(), 1);
     assert_eq!(session.origin(), Origin::Rebuilt);
     assert_eq!(session.conflict(0).base.as_ref().unwrap().text, "base\n");
+}
+
+/// git adds a line break to both sides of a conflict at the end of a file, so a file
+/// without a final line break would gain one on every merge, a noisy diff on that line.
+/// The side taken decides, read from git's own versions of the file.
+#[test]
+fn a_file_without_a_final_line_break_keeps_it() {
+    let dir = tempfile::tempdir().unwrap();
+    // As git writes it: a line break after each side.
+    let merged = "a\n<<<<<<< ours\nours\n||||||| base\nb\n=======\ntheirs\n>>>>>>> theirs\n";
+    let files = files(dir.path(), "a\nb", "a\nours", "a\ntheirs\n", merged);
+    let git = GitCli::new(dir.path().to_path_buf());
+
+    let mut session = session::load(&git, &files, "ours", "theirs").unwrap();
+    choose(&mut session, CandidateKind::Ours);
+    assert_eq!(session.merged_text().as_deref(), Some("a\nours"));
+    choose(&mut session, CandidateKind::Theirs);
+    assert_eq!(session.merged_text().as_deref(), Some("a\ntheirs\n"));
+    choose(&mut session, CandidateKind::TheirsThenOurs);
+    assert_eq!(session.merged_text().as_deref(), Some("a\ntheirs\nours"));
+}
+
+/// git does not escape a side's `=======` line (a Markdown heading underline), so the
+/// markers it writes cannot be read back. While the file is as git wrote it, the
+/// conflict is rebuilt with longer markers instead of refusing to open the file.
+#[test]
+fn a_conflict_with_a_separator_line_is_rebuilt_with_longer_markers() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = "# Title\n";
+    let local = "# Title\n\nSummary\n=======\nours\n";
+    let remote = "# Title\n\nLicense\n=======\ntheirs\n";
+    let files = files(dir.path(), base, local, remote, "");
+    let git = GitCli::new(dir.path().to_path_buf());
+    let written = git_merge_file(dir.path());
+    fs::write(&files.merged, &written).unwrap();
+
+    let mut session = session::load(&git, &files, "ours", "theirs").unwrap();
+    assert!(session.rebuilt());
+    assert_eq!(session.conflict_count(), 1);
+    choose(&mut session, CandidateKind::OursThenTheirs);
+    assert_eq!(
+        session.merged_text().as_deref(),
+        Some("# Title\n\nSummary\n=======\nours\nLicense\n=======\ntheirs\n")
+    );
+
+    // Edited since git wrote it: refused as before, never rebuilt over.
+    fs::write(&files.merged, format!("{written}edited\n")).unwrap();
+    assert!(session::load(&git, &files, "ours", "theirs").is_err());
+}
+
+/// The merged file as `git merge-file` writes it from the `files` helper's versions.
+fn git_merge_file(dir: &Path) -> String {
+    let output = std::process::Command::new("git")
+        .current_dir(dir)
+        .args([
+            "merge-file",
+            "-p",
+            "file_LOCAL.txt",
+            "file_BASE.txt",
+            "file_REMOTE.txt",
+        ])
+        .output()
+        .unwrap();
+    String::from_utf8(output.stdout).unwrap()
 }

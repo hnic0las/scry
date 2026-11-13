@@ -123,6 +123,13 @@ pub struct MergeSession {
     theirs_spans: Vec<Vec<Span>>,
     /// The file's indent unit, for text typed by hand.
     indent_unit: String,
+    /// The file's line break, `"\r\n"` or `"\n"`: text typed by hand is
+    /// written with it, so the file never mixes the two.
+    line_break: &'static str,
+    /// Whether ours and theirs end with a line break, when the file ends
+    /// with a conflict. git adds one to both sides inside the markers, so
+    /// only its versions of the file tell; `None` when unknown.
+    final_breaks: Option<(bool, bool)>,
 }
 
 impl MergeSession {
@@ -148,6 +155,20 @@ impl MergeSession {
         ))
     }
 
+    /// Whether ours and theirs end with a line break, read from git's
+    /// versions of the file, so a file whose sides had no final line break
+    /// does not gain one.
+    pub fn with_final_breaks(mut self, ours: bool, theirs: bool) -> MergeSession {
+        self.final_breaks = Some((ours, theirs));
+        self
+    }
+
+    /// Whether the file ends with a conflict, where git adds a line break
+    /// the sides may not have had.
+    pub fn ends_with_conflict(&self) -> bool {
+        matches!(self.segments.last(), Some(Segment::Conflict(_)))
+    }
+
     /// The file the session was read from, where `Command::Save` writes.
     pub fn with_file(mut self, path: PathBuf) -> MergeSession {
         self.file = Some(path);
@@ -170,6 +191,7 @@ impl MergeSession {
         };
         let choices = vec![None; conflicts.len()];
         let highlighter = language.and_then(Highlighter::new);
+        let line_break = line_break(&on_disk);
         let mut session = MergeSession {
             segments,
             conflicts,
@@ -188,6 +210,8 @@ impl MergeSession {
             ours_spans: Vec::new(),
             theirs_spans: Vec::new(),
             indent_unit: String::new(),
+            line_break,
+            final_breaks: None,
         };
         session.indent_unit = indent::indent_unit(&session.side_text(Pane::Ours));
         let ours: Vec<&str> = session
@@ -439,17 +463,19 @@ impl MergeSession {
     }
 
     /// Resolves a conflict with text written by hand, checked by parsing
-    /// like a candidate. A text without a final line break gets one, so the
-    /// line after the conflict stays on its own line.
+    /// like a candidate. Every line break becomes the file's, whatever the
+    /// front end or a paste used, and a text without a final line break
+    /// gets one, so the line after the conflict stays on its own line.
     pub(crate) fn edit(&mut self, index: usize, text: &str) -> Result<Vec<Event>, ChooseError> {
-        let Some(conflict) = self.conflicts.get(index) else {
+        if index >= self.conflicts.len() {
             return Err(ChooseError::NoSuchConflict(index + 1));
-        };
-        let mut text = text.to_string();
+        }
+        let mut text = text.replace("\r\n", "\n");
         if !text.is_empty() && !text.ends_with('\n') {
-            // Follow the file's line endings.
-            let crlf = conflict.ours.text.contains("\r\n") || conflict.theirs.text.contains("\r\n");
-            text.push_str(if crlf { "\r\n" } else { "\n" });
+            text.push('\n');
+        }
+        if self.line_break == "\r\n" {
+            text = text.replace('\n', "\r\n");
         }
         let parse = self.check_in_place(index, &text);
         let command = Command::Edit {
@@ -687,8 +713,40 @@ impl MergeSession {
                 }
             }
         }
+        if !self.ends_with_break() {
+            let end = text.strip_suffix('\n').unwrap_or(&text);
+            let end = end.strip_suffix('\r').unwrap_or(end).len();
+            text.truncate(end);
+        }
         Some(text)
     }
+
+    /// Whether the merged file ends with a line break: as the side that
+    /// ends the last conflict's choice did, when the file ends with a
+    /// conflict; ours for a choice of neither side (base, by hand).
+    fn ends_with_break(&self) -> bool {
+        let Some((ours, theirs)) = self.final_breaks else {
+            return true;
+        };
+        if !self.ends_with_conflict() {
+            return true;
+        }
+        match self.choices.last() {
+            Some(Some(Choice::Candidate(
+                CandidateKind::Theirs
+                | CandidateKind::OursThenTheirs
+                | CandidateKind::OursThenTheirsClosed,
+            ))) => theirs,
+            _ => ours,
+        }
+    }
+}
+
+/// The line break most of `text` uses; `"\n"` for a file without any.
+fn line_break(text: &str) -> &'static str {
+    let crlf = text.matches("\r\n").count();
+    let lf = text.matches('\n').count() - crlf;
+    if crlf > lf { "\r\n" } else { "\n" }
 }
 
 /// Checks every candidate by parsing the whole file with it in place, and
@@ -838,6 +896,10 @@ fn text_after_conflict(segments: &[Segment], index: usize) -> Option<&str> {
 /// `git merge-file --zdiff3`, labelled `ours` and `theirs`, but only while
 /// the file is still what git wrote. Once edited, it is used as it is,
 /// without the base, rather than losing the edits.
+///
+/// A file whose markers do not parse because a side has a line such as
+/// `=======` (a Markdown underline) is rebuilt with longer markers, again
+/// only while it is what git wrote.
 pub fn load(
     git: &dyn Git,
     files: &MergetoolFiles,
@@ -849,16 +911,38 @@ pub fn load(
     let marker_size = conflict::marker_size(git, &files.merged);
     // Markers git did not write are refused, rather than rebuilt over
     // whatever the user did to the file.
-    let segments = conflict::parse_with_marker_size(&merged, marker_size)
-        .map_err(|error| LoadError::Malformed(files.merged.clone(), error))?;
+    let segments = match conflict::parse_with_marker_size(&merged, marker_size) {
+        Ok(segments) => segments,
+        Err(error) => {
+            return match rebuild_with_longer_markers(
+                git,
+                files,
+                &merged,
+                marker_size,
+                ours,
+                theirs,
+            )? {
+                Some(session) => Ok(session),
+                None => Err(LoadError::Malformed(
+                    in_repository(git, &files.merged),
+                    error,
+                )),
+            };
+        }
+    };
     let has_base = {
         let mut conflicts = conflict::conflicts(&segments).peekable();
         conflicts.peek().is_none() || conflicts.all(|conflict| conflict.base.is_some())
     };
+    let (ours_break, theirs_break) = (
+        ends_with_break(&files.local),
+        ends_with_break(&files.remote),
+    );
     if has_base {
         return Ok(
             MergeSession::from_segments(segments, Origin::File, merged, language)
-                .with_file(files.merged.clone()),
+                .with_file(files.merged.clone())
+                .with_final_breaks(ours_break, theirs_break),
         );
     }
 
@@ -868,14 +952,16 @@ pub fn load(
     if !unchanged {
         return Ok(
             MergeSession::from_segments(segments, Origin::EditedFile, merged, language)
-                .with_file(files.merged.clone()),
+                .with_file(files.merged.clone())
+                .with_final_breaks(ours_break, theirs_break),
         );
     }
     let text = merge_file(git, files, ours, theirs, marker_size, Some("--zdiff3"))?;
     let rebuilt = conflict::parse_with_marker_size(&text, marker_size).map_err(LoadError::Parse)?;
     Ok(
         MergeSession::from_segments(rebuilt, Origin::Rebuilt, merged, language)
-            .with_file(files.merged.clone()),
+            .with_file(files.merged.clone())
+            .with_final_breaks(ours_break, theirs_break),
     )
 }
 
@@ -924,20 +1010,176 @@ pub(crate) fn merge_file(
     String::from_utf8(output.stdout).map_err(|_| LoadError::NotText(files.merged.clone()))
 }
 
+/// The session rebuilt from the three versions with markers longer than any
+/// line of them starts with, for a file whose markers are ambiguous: a side
+/// with a `=======` line, which git does not escape. `None` unless the file
+/// is still what git wrote, in any conflict style, labels aside: an edited
+/// file is never rebuilt over.
+fn rebuild_with_longer_markers(
+    git: &dyn Git,
+    files: &MergetoolFiles,
+    merged: &str,
+    marker_size: usize,
+    ours: &str,
+    theirs: &str,
+) -> Result<Option<MergeSession>, LoadError> {
+    let mut as_git_wrote = false;
+    for style in [None, Some("--diff3"), Some("--zdiff3")] {
+        let written = merge_file(git, files, ours, theirs, marker_size, style)?;
+        if without_labels(&written, marker_size) == without_labels(merged, marker_size) {
+            as_git_wrote = true;
+            break;
+        }
+    }
+    if !as_git_wrote {
+        return Ok(None);
+    }
+    let mut longest = marker_size;
+    for path in [&files.base, &files.local, &files.remote] {
+        let text = read_text(path)?;
+        for line in text.lines() {
+            let Some(first) = line.chars().next().filter(|c| "<|=>".contains(*c)) else {
+                continue;
+            };
+            longest = longest.max(line.chars().take_while(|c| *c == first).count());
+        }
+    }
+    let size = longest + 1;
+    let text = merge_file(git, files, ours, theirs, size, Some("--zdiff3"))?;
+    let Ok(segments) = conflict::parse_with_marker_size(&text, size) else {
+        return Ok(None);
+    };
+    let session = MergeSession::from_segments(
+        segments,
+        Origin::Rebuilt,
+        merged.to_string(),
+        Language::from_path(&files.merged),
+    )
+    .with_file(files.merged.clone())
+    .with_final_breaks(
+        ends_with_break(&files.local),
+        ends_with_break(&files.remote),
+    );
+    Ok(Some(session))
+}
+
+/// `text` with the labels cut off its marker lines, to compare a file with
+/// what git writes under other labels.
+fn without_labels(text: &str, marker_size: usize) -> Vec<&str> {
+    text.split_inclusive('\n')
+        .map(|line| {
+            let marker = ["<", "|", ">"]
+                .iter()
+                .any(|c| line.starts_with(&c.repeat(marker_size)));
+            match line.get(..marker_size) {
+                Some(start) if marker => start,
+                _ => line,
+            }
+        })
+        .collect()
+}
+
 /// Opens a file with conflict markers, saved back where it was read.
 /// `git` runs in the file's folder (`GitCli::beside`): it reads the
-/// marker size `.gitattributes` gives the file.
+/// marker size `.gitattributes` gives the file, and the sides' final line
+/// break from the index when the file ends with a conflict.
 pub fn open_file(git: &dyn Git, path: &Path) -> Result<MergeSession, LoadError> {
     let text = read_text(path)?;
     let marker_size = match path.file_name() {
         Some(name) => conflict::marker_size(git, Path::new(name)),
         None => conflict::DEFAULT_MARKER_SIZE,
     };
-    Ok(
-        MergeSession::from_text_with_marker_size(&text, Language::from_path(path), marker_size)
-            .map_err(LoadError::Parse)?
-            .with_file(path.to_path_buf()),
-    )
+    let session = match MergeSession::from_text_with_marker_size(
+        &text,
+        Language::from_path(path),
+        marker_size,
+    ) {
+        Ok(session) => session.with_file(path.to_path_buf()),
+        Err(error) => {
+            return match rebuild_from_index(git, path, &text, marker_size)? {
+                Some(session) => Ok(session),
+                None => Err(LoadError::Parse(error)),
+            };
+        }
+    };
+    if !session.ends_with_conflict() {
+        return Ok(session);
+    }
+    // The file's index stages hold the sides as they were.
+    let stage_ends_with_break = |stage: u8| -> Option<bool> {
+        let name = path.file_name()?.to_str()?;
+        let output = git.output(&["show", &format!(":{stage}:./{name}")]).ok()?;
+        (output.status == Some(0)).then(|| output.stdout.last().is_none_or(|byte| *byte == b'\n'))
+    };
+    Ok(match (stage_ends_with_break(2), stage_ends_with_break(3)) {
+        (Some(ours), Some(theirs)) => session.with_final_breaks(ours, theirs),
+        _ => session,
+    })
+}
+
+/// `rebuild_with_longer_markers` for a file opened from the repository: its
+/// three versions are read from the index into a temporary folder. `None`
+/// when the index lacks one of them (added or deleted on one side).
+fn rebuild_from_index(
+    git: &dyn Git,
+    path: &Path,
+    text: &str,
+    marker_size: usize,
+) -> Result<Option<MergeSession>, LoadError> {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_nanos());
+    let folder = std::env::temp_dir().join(format!("scry-{}-{nanos}", std::process::id()));
+    fs::create_dir(&folder).map_err(|error| LoadError::Io(folder.clone(), error))?;
+    let files = MergetoolFiles {
+        base: folder.join("base"),
+        local: folder.join("ours"),
+        remote: folder.join("theirs"),
+        merged: path.to_path_buf(),
+    };
+    let label = |marker: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(&format!("{} ", marker.repeat(marker_size))))
+            .unwrap_or_default()
+            .to_string()
+    };
+    let rebuilt = (|| {
+        for (stage, file) in [(1, &files.base), (2, &files.local), (3, &files.remote)] {
+            let output = git.output(&["show", &format!(":{stage}:./{name}")])?;
+            if output.status != Some(0) {
+                return Ok(None);
+            }
+            fs::write(file, output.stdout).map_err(|error| LoadError::Io(file.clone(), error))?;
+        }
+        rebuild_with_longer_markers(git, &files, text, marker_size, &label("<"), &label(">"))
+    })();
+    let _ = fs::remove_dir_all(&folder);
+    rebuilt
+}
+
+/// `path` from the repository's root, as git commands take it there; as it
+/// is when that cannot be told.
+fn in_repository(git: &dyn Git, path: &Path) -> PathBuf {
+    let relative = || -> Option<PathBuf> {
+        let root = git.run(&["rev-parse", "--show-toplevel"]).ok()?;
+        // Both resolved, since a temporary folder on macOS is a link.
+        let root = fs::canonicalize(root.trim_end()).ok()?;
+        let path = fs::canonicalize(path).ok()?;
+        path.strip_prefix(root).ok().map(Path::to_path_buf)
+    };
+    relative().unwrap_or_else(|| path.to_path_buf())
+}
+
+/// Whether a file ends with a line break; an empty or unreadable one counts
+/// as ending with one, so nothing is taken off.
+fn ends_with_break(path: &Path) -> bool {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| bytes.last().copied())
+        .is_none_or(|byte| byte == b'\n')
 }
 
 /// Opens the files `git mergetool` passes (`load`), with the sides named
@@ -1096,12 +1338,21 @@ impl fmt::Display for LoadError {
                 )
             }
             LoadError::Parse(error) => write!(f, "{error}"),
-            LoadError::Malformed(path, error) => write!(
-                f,
-                "{}: {error}; fix the markers, or run `git checkout --merge {}` to recreate the conflicts (this drops edits made to the file)",
-                path.display(),
-                path.display()
-            ),
+            LoadError::Malformed(path, error) => {
+                let shown = path.display().to_string();
+                let argument = if shown
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || "/._-+@".contains(c))
+                {
+                    shown.clone()
+                } else {
+                    format!("'{}'", shown.replace('\'', "'\\''"))
+                };
+                write!(
+                    f,
+                    "{shown}: {error}; fix the markers, or run `git checkout --merge -- {argument}` at the repository's root to recreate the conflicts (this drops edits made to the file)"
+                )
+            }
             LoadError::Git(error) => write!(f, "{error}"),
         }
     }
@@ -1192,6 +1443,26 @@ mod tests {
         let mut session = MergeSession::from_text(text, None).unwrap();
         session.edit(0, "x").unwrap();
         assert_eq!(session.chosen_text(0), Some("x\r\n"));
+    }
+
+    /// Every line typed into a CRLF file gets `\r\n`, not only the last
+    /// one, even when the conflict's sides give no hint (ours empty) or a
+    /// paste mixes the two: a mixed file shows as changed on every line
+    /// in Windows tools and diffs.
+    #[test]
+    fn edit_writes_the_files_line_break_on_every_line() {
+        let text = "a\r\n<<<<<<< ours\r\n=======\r\nt\r\n>>>>>>> theirs\r\nz\r\n";
+        let mut session = MergeSession::from_text(text, None).unwrap();
+        session.edit(0, "x\ny\r\nw").unwrap();
+        assert_eq!(
+            session.merged_text().as_deref(),
+            Some("a\r\nx\r\ny\r\nw\r\nz\r\n")
+        );
+
+        let unix = "a\n<<<<<<< ours\n=======\nt\n>>>>>>> theirs\n";
+        let mut session = MergeSession::from_text(unix, None).unwrap();
+        session.edit(0, "x\r\ny").unwrap();
+        assert_eq!(session.chosen_text(0), Some("x\ny\n"));
     }
 
     /// Text written by hand is checked by parsing like any candidate, so a

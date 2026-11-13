@@ -53,7 +53,9 @@ impl ProjectReview {
 pub fn review(text: &str, marker_size: usize) -> Result<ProjectReview, ParseError> {
     let segments = conflict::parse_with_marker_size(text, marker_size)?;
     let plan = settle(&segments, marker_size);
-    let conflicts: Vec<ProjectConflict> = conflict::conflicts(&segments)
+    let compared = compared(&segments);
+    let conflicts: Vec<ProjectConflict> = compared
+        .iter()
         .zip(&plan.reasons)
         .map(|(conflict, reason)| {
             let changes = Changes::of(conflict);
@@ -255,16 +257,18 @@ struct Settled {
 
 fn settle(segments: &[Segment], marker_size: usize) -> Settled {
     let names = object_names(segments);
-    let mut reasons: Vec<Option<String>> = conflict::conflicts(segments)
+    let compared = compared(segments);
+    let mut reasons: Vec<Option<String>> = compared
+        .iter()
         .map(|conflict| shape(conflict).or_else(|| Changes::of(conflict).contradiction()))
         .collect();
     loop {
-        let text = write(segments, &reasons, marker_size);
+        let text = write(segments, &compared, &reasons, marker_size);
         let defined = defined(&text);
         let mut changed = false;
         // A settled conflict whose lines refer to an object the result no
         // longer defines is left to the user.
-        for (index, conflict) in conflict::conflicts(segments).enumerate() {
+        for (index, conflict) in compared.iter().enumerate() {
             if reasons[index].is_some() {
                 continue;
             }
@@ -317,7 +321,12 @@ fn settle(segments: &[Segment], marker_size: usize) -> Settled {
 
 /// The file with the conflicts without a reason settled, the others as
 /// git wrote them.
-fn write(segments: &[Segment], reasons: &[Option<String>], marker_size: usize) -> String {
+fn write(
+    segments: &[Segment],
+    compared: &[Conflict],
+    reasons: &[Option<String>],
+    marker_size: usize,
+) -> String {
     let mut text = String::new();
     let mut index = 0;
     for segment in segments {
@@ -330,7 +339,7 @@ fn write(segments: &[Segment], reasons: &[Option<String>], marker_size: usize) -
                     } else {
                         "\n"
                     };
-                    for line in Changes::of(conflict).merged() {
+                    for line in Changes::of(&compared[index]).merged() {
                         text.push_str(line);
                         text.push_str(ending);
                     }
@@ -365,6 +374,50 @@ fn markers(conflict: &Conflict, size: usize) -> String {
     text.push_str(&conflict.theirs.text);
     text.push_str(&marker('>', &conflict.theirs.label));
     text
+}
+
+/// The conflicts as their changes are read: the base without the lines
+/// `zdiff3` moved out of the conflict. It moves the lines both sides start
+/// or end with next to the markers, but leaves them in the base, where they
+/// would read as removed by both sides. Those are the base's lines found in
+/// an unbroken run right before or right after the markers. The markers
+/// written back keep the base as git wrote it.
+fn compared(segments: &[Segment]) -> Vec<Conflict> {
+    let common = |index: Option<usize>| match index.and_then(|index| segments.get(index)) {
+        Some(Segment::Common(text)) => lines(text),
+        _ => Vec::new(),
+    };
+    let mut conflicts = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        let Segment::Conflict(conflict) = segment else {
+            continue;
+        };
+        let mut conflict = conflict.clone();
+        if let Some(base) = conflict.base.as_mut() {
+            let mut left: Vec<&str> = base.text.split_inclusive('\n').collect();
+            let before = common(index.checked_sub(1));
+            let after = common(Some(index + 1));
+            for run in [
+                Box::new(before.iter().rev()) as Box<dyn Iterator<Item = &&str>>,
+                Box::new(after.iter()),
+            ] {
+                for line in run {
+                    let found = left
+                        .iter()
+                        .position(|base| base.trim_end_matches(['\n', '\r']) == *line);
+                    match found {
+                        Some(position) => {
+                            left.remove(position);
+                        }
+                        None => break,
+                    }
+                }
+            }
+            base.text = left.concat();
+        }
+        conflicts.push(conflict);
+    }
+    conflicts
 }
 
 fn lines(text: &str) -> Vec<&str> {
@@ -707,6 +760,37 @@ mod tests {
     /// With the base, an entry one side removed stays removed while the
     /// other side's addition is kept: keeping both never brings a deleted
     /// file back.
+    /// `zdiff3` moves the lines both sides end with below the markers but
+    /// leaves them in the base, where they read as removed by both sides.
+    /// Here `d.swift` is kept by both: only theirs' removal of `c.swift` is
+    /// real, and keeping both keeps `d.swift`.
+    #[test]
+    fn lines_zdiff3_moved_out_are_not_removals() {
+        let text = "\
+\t\t\tfiles = (
+\t\t\t\tE1 /* e.swift in Sources */,
+<<<<<<< ours
+\t\t\t\tX1 /* x.swift in Sources */,
+\t\t\t\tC1 /* c.swift in Sources */,
+||||||| base
+\t\t\t\tD1 /* d.swift in Sources */,
+\t\t\t\tC1 /* c.swift in Sources */,
+=======
+>>>>>>> theirs
+\t\t\t\tD1 /* d.swift in Sources */,
+\t\t\t);
+";
+        let review = review(text, 7).unwrap();
+        assert!(review.conflicts[0].ours_removes.is_empty());
+        assert_eq!(review.conflicts[0].theirs_removes, ["c.swift in Sources"]);
+        assert_eq!(review.conflicts[0].ours_adds, ["x.swift in Sources"]);
+
+        let result = keep_both(text, 7, false).unwrap();
+        assert!(result.contains("X1 /* x.swift in Sources */"));
+        assert!(!result.contains("C1"));
+        assert_eq!(result.matches("D1 /* d.swift in Sources */").count(), 1);
+    }
+
     #[test]
     fn a_removal_beside_an_addition_stays_removed() {
         let text = "\
