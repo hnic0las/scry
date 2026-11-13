@@ -358,7 +358,6 @@ final class MergeEditorViewModel {
         var shortcuts: [Shortcut] = []
         if canGoToPrevious { shortcuts.append(.previousConflict) }
         if canGoToNext { shortcuts.append(.nextConflict) }
-        if !isEditing { shortcuts.append(contentsOf: [Shortcut.takeOurs, .takeBoth, .takeTheirs]) }
         if canShowBase { shortcuts.append(.toggleBase) }
         if canSwitchLayout { shortcuts.append(.switchLayout) }
         shortcuts.append(.toggleInspector)
@@ -371,7 +370,7 @@ final class MergeEditorViewModel {
     /// buttons instead.
     var hintStrip: [Shortcut] {
         guard !isEditing else { return [] }
-        var shortcuts: [Shortcut] = [.editByHand, .takeBase, .takeNone]
+        var shortcuts: [Shortcut] = [.takeOurs, .takeTheirs, .takeBoth, .editByHand, .takeBase, .takeNone]
         if canUndo { shortcuts.append(.undo) }
         if canRedo { shortcuts.append(.redo) }
         shortcuts.append(.keyboardShortcuts)

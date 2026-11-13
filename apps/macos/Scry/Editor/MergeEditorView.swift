@@ -196,38 +196,6 @@ struct MergeEditorView: View {
         }
 
         ToolbarItem {
-            ControlGroup {
-                // Icon and title in one HStack: a Label would show only one of
-                // them, at the toolbar's choice. Each side keeps its shape and
-                // colour (● ours, ■ theirs), so it reads without colour too.
-                Button { viewModel.take("ours") } label: {
-                    HStack(spacing: 5) {
-                        SideShape.ours
-                        Text("Ours")
-                    }
-                }
-                .help(Shortcut.takeOurs.help())
-                Button(action: { viewModel.takeBoth() }) {
-                    HStack(spacing: 5) {
-                        HStack(spacing: 2) {
-                            SideShape.ours
-                            SideShape.theirs
-                        }
-                        Text("Both")
-                    }
-                }
-                .help(Shortcut.takeBoth.help("Take both, ours first; again for theirs first"))
-                Button { viewModel.take("theirs") } label: {
-                    HStack(spacing: 5) {
-                        Text("Theirs")
-                        SideShape.theirs
-                    }
-                }
-                .help(Shortcut.takeTheirs.help())
-            }
-        }
-
-        ToolbarItem {
             Toggle(isOn: Binding(get: { viewModel.showsBase }, set: { _ in viewModel.toggleBase() })) {
                 HStack(spacing: 5) {
                     Image(systemName: "square.2.layers.3d")
@@ -286,7 +254,9 @@ struct MergeEditorView: View {
             .padding(.horizontal, 8)
     }
 
-    /// Shortcuts without a visible button (SPEC: keyboard map).
+    /// Shortcuts without a visible button (SPEC: keyboard map). Taking a
+    /// side has no toolbar button: the lens rows, the › ‹ connectors and
+    /// the inspector do it with the pointer.
     private var hiddenShortcuts: some View {
         Group {
             Button("Take ours") { viewModel.take("ours") }
@@ -456,23 +426,6 @@ struct StatusBar: View {
         case .notChecked:
             EmptyView()
         }
-    }
-}
-
-/// The shape of a side in its colour: ours ● circle, theirs ■ square.
-enum SideShape {
-    static var ours: some View {
-        Image(systemName: "circle.fill")
-            .font(.system(size: 9))
-            .foregroundStyle(Theme.Sides.ours)
-            .accessibilityHidden(true)
-    }
-
-    static var theirs: some View {
-        Image(systemName: "square.fill")
-            .font(.system(size: 9))
-            .foregroundStyle(Theme.Sides.theirs)
-            .accessibilityHidden(true)
     }
 }
 

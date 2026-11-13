@@ -81,7 +81,7 @@ struct MergeEditorViewModelTests {
     /// hand, whose own buttons carry their keys.
     @Test func hintStripShowsWhatWorksNow() throws {
         let editor = try ConflictFile().editor()
-        #expect(editor.hintStrip.map(\.id) == ["editByHand", "takeBase", "takeNone", "keyboardShortcuts"])
+        #expect(editor.hintStrip.map(\.id) == ["takeOurs", "takeTheirs", "takeBoth", "editByHand", "takeBase", "takeNone", "keyboardShortcuts"])
         editor.take("theirs")
         #expect(editor.hintStrip.map(\.id).contains("undo"))
         #expect(!editor.hintStrip.map(\.id).contains("redo"))
@@ -91,13 +91,11 @@ struct MergeEditorViewModelTests {
 
     /// The row under the toolbar names only the toolbar's shortcuts that
     /// work now, in the toolbar's order: no "previous" on the first
-    /// conflict, no sides while editing by hand.
+    /// conflict, and no sides, which have no toolbar button.
     @Test func toolbarHintsFollowTheButtons() throws {
         let editor = try ConflictFile().editor()
         #expect(editor.toolbarHints.map(\.id).first == "nextConflict")
         #expect(!editor.toolbarHints.map(\.id).contains("previousConflict"))
-        #expect(editor.toolbarHints.map(\.id).contains("takeOurs"))
-        editor.startEditing()
         #expect(!editor.toolbarHints.map(\.id).contains("takeOurs"))
         #expect(editor.toolbarHints.map(\.id).contains("toggleInspector"))
     }
