@@ -43,6 +43,26 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+Before committing a change to the core, also check that its tests would catch a bug in the changed lines: mutation testing changes the code (a `+` becomes a `-`, a function returns a default value) and expects a test to fail. Each mutant that survives is a missing test, or is recorded as accepted in the vault task note on test quality:
+
+```sh
+brew install cargo-mutants cargo-llvm-cov
+rustup component add llvm-tools          # for cargo-llvm-cov
+
+git diff HEAD > /tmp/scry.diff && cargo mutants --in-diff /tmp/scry.diff
+```
+
+The whole workspace takes about an hour (`cargo mutants -j 6`; one file: `-f crates/scry-core/src/conflict.rs`; only the mutants that survived last time: `--iterate`). The FFI layer is left out (`.cargo/mutants.toml`): the Swift tests cover it. The report is in `mutants.out/` (`missed.txt` lists the survivors).
+
+Coverage shows the code no test runs:
+
+```sh
+cargo llvm-cov --workspace --html        # target/llvm-cov/html/index.html
+cargo llvm-cov --workspace --summary-only
+```
+
+For the app, the Scry scheme collects coverage of the app target: in Xcode, Report navigator › the test run › Coverage; from the command line, `xcrun xccov view --report` on the `.xcresult` that `xcodebuild test` writes.
+
 Try the CLI:
 
 ```sh

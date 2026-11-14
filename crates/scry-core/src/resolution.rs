@@ -428,12 +428,14 @@ mod tests {
         assert_eq!(analysis.id, "c660efd40");
     }
 
-    /// Two identical conflicts in a file still get distinct IDs.
+    /// Identical conflicts in a file still get distinct IDs, numbered in
+    /// order: a third copy must not reuse the second's number.
     #[test]
     fn identical_conflicts_get_numbered_ids() {
         let one = conflict("a\n", Some("x\n"), "b\n");
-        let analyses = analyze(&parse(&format!("{one}text\n{one}")).unwrap());
+        let analyses = analyze(&parse(&format!("{one}text\n{one}text\n{one}")).unwrap());
         assert_eq!(analyses[1].id, format!("{}-2", analyses[0].id));
+        assert_eq!(analyses[2].id, format!("{}-3", analyses[0].id));
     }
 
     /// Classification sentences use the human side labels, not git's ours and theirs.

@@ -351,27 +351,56 @@ mod tests {
 
     /// A gap of 150 long lines edited on each side is paired by shared words, in linear
     /// time per pair: the exact pairing took seconds per call. Each line is still paired
-    /// with its base line and its changed word marked.
+    /// with its base line and its changed word marked. Shared words ignore their order, so
+    /// a line with its words reversed is still edited; a line sharing none of its words,
+    /// or only a few, is added.
     #[test]
     fn a_large_gap_is_paired_by_shared_words() {
-        let side = |changed: &str| -> String {
-            (0..150)
-                .map(|line| {
-                    let words: Vec<String> =
-                        (0..100).map(|word| format!("w{line}x{word}")).collect();
-                    format!("let v{line} = [{}, {changed}]\n", words.join(", "))
-                })
-                .collect()
+        let words = |line: usize| -> Vec<String> {
+            (0..100).map(|word| format!("w{line}x{word}")).collect()
         };
-        let base = side("old");
-        let ours = side("new");
+        let base: String = (0..150)
+            .map(|line| format!("let v{line} = [{}, old]\n", words(line).join(", ")))
+            .collect();
+        let ours: String = (0..150)
+            .map(|line| match line {
+                1 => {
+                    let mut reversed = words(line);
+                    reversed.reverse();
+                    format!("let v{line} = [{}, old]\n", reversed.join(", "))
+                }
+                2 => format!("let other = [{}]\n", words(1000).join(", ")),
+                3 => {
+                    let mixed: Vec<String> = (0..100)
+                        .map(|word| match word % 4 {
+                            0 => format!("w{line}x{word}"),
+                            _ => format!("n{word}"),
+                        })
+                        .collect();
+                    format!("{}\n", mixed.join(" "))
+                }
+                _ => format!("let v{line} = [{}, new]\n", words(line).join(", ")),
+            })
+            .collect();
         let changes = line_changes(Some(&base), &ours);
         assert_eq!(changes.len(), 150);
-        let first = ours.lines().next().unwrap();
-        let LineChange::Edited { words } = &changes[0] else {
-            panic!("not paired: {:?}", changes[0]);
-        };
-        assert_eq!(marked(first, words), ["new"]);
+        assert!(
+            matches!(changes[1], LineChange::Edited { .. }),
+            "{:?}",
+            changes[1]
+        );
+        assert_eq!(changes[2], LineChange::Added);
+        assert_eq!(changes[3], LineChange::Added);
+        for (index, line) in ours
+            .lines()
+            .enumerate()
+            .filter(|(index, _)| ![1, 2, 3].contains(index))
+        {
+            let LineChange::Edited { words } = &changes[index] else {
+                panic!("line {index} not paired: {:?}", changes[index]);
+            };
+            assert_eq!(marked(line, words), ["new"], "line {index}");
+        }
     }
 
     /// A call wrapped in a retry: the call is paired with its base line (edited, indentation
@@ -446,5 +475,295 @@ mod tests {
         let base = "return cache[key]\n";
         let side = "logger.debug(\"miss\")\n";
         assert_eq!(line_changes(Some(base), side), [LineChange::Added]);
+    }
+
+    /// After an unchanged line, an edited line is still compared with its own base line,
+    /// not the first one: the gap's positions are offset by the lines before it.
+    #[test]
+    fn edited_line_after_unchanged_ones_is_compared_with_its_base_line() {
+        let base = "let a = 1\nlet b = 2\nlet c = old(3)\n";
+        let side = "let a = 1\nlet b = 2\nlet c = new(3)\nlet d = 4\n";
+        let changes = line_changes(Some(base), side);
+        assert_eq!(changes[0], LineChange::Unchanged);
+        assert_eq!(changes[1], LineChange::Unchanged);
+        let LineChange::Edited { words } = &changes[2] else {
+            panic!("not paired: {:?}", changes[2]);
+        };
+        assert_eq!(marked("let c = new(3)", words), ["new"]);
+        assert_eq!(changes[3], LineChange::Added);
+    }
+
+    /// A matched line belongs to neither gap around it: a new side line that resembles the
+    /// unchanged line just above is added, and the unchanged line is not paired with an
+    /// edited base line below it.
+    #[test]
+    fn unchanged_lines_stay_out_of_the_next_gap() {
+        assert_eq!(
+            line_changes(Some("x = 1\nfoo bar\n"), "x = 1\nx = 2\n"),
+            [LineChange::Unchanged, LineChange::Added]
+        );
+        assert_eq!(
+            line_changes(Some("x = 1\nx = 9\n"), "x = 1\nqqq\n"),
+            [LineChange::Unchanged, LineChange::Added]
+        );
+    }
+
+    /// A blank line has no whole-line range to mark.
+    #[test]
+    fn a_blank_line_has_no_whole_range() {
+        assert_eq!(whole(" \t "), Vec::<Range<usize>>::new());
+        assert_eq!(whole(""), Vec::<Range<usize>>::new());
+        assert_eq!(marked(" ab ", &whole(" ab ")), ["ab"]);
+    }
+
+    /// Changed words are joined only across whitespace: an unchanged word between them
+    /// keeps them apart, so the UI does not mark it.
+    #[test]
+    fn an_unchanged_word_splits_changed_ranges() {
+        let side = "x = keep + y";
+        assert_eq!(
+            marked(side, &changed_words("a = keep + b", side)),
+            ["x", "y"]
+        );
+    }
+
+    /// Two lines too long to compare word by word (more than 250,000 word pairs) mark the
+    /// whole line, without its surrounding whitespace; at the limit they are still
+    /// compared word by word.
+    #[test]
+    fn lines_over_the_word_table_mark_the_whole_line() {
+        let line = |count: usize, last: &str| -> String {
+            let words: Vec<String> = (1..count).map(|word| format!("w{word}")).collect();
+            format!("  {} {last}  ", words.join(" "))
+        };
+        let side = line(501, "new");
+        assert_eq!(
+            marked(&side, &changed_words(&line(500, "old"), &side)),
+            [side.trim()]
+        );
+        let side = line(500, "new");
+        assert_eq!(
+            marked(&side, &changed_words(&line(500, "old"), &side)),
+            ["new"]
+        );
+        assert_eq!(changed_words("   ", " \t "), Vec::<Range<usize>>::new());
+    }
+
+    /// Similarity counts the common words in order, weighted by their length; the bag of
+    /// shared words ignores order, so it is an upper bound used on large gaps.
+    #[test]
+    fn similarity_weighs_words_in_order() {
+        assert_eq!(similarity(&["abc", "d"], &["abc", "e"]), 6.0 / 8.0);
+        assert_eq!(similarity(&["a", "b"], &["b", "a"]), 0.5);
+        assert_eq!(similarity(&[], &[]), 1.0);
+        let bag = |tokens: &[&'static str]| Bag::of(tokens);
+        assert_eq!(bag(&["a", "b"]).shared(&bag(&["b", "a"])), 1.0);
+        assert_eq!(bag(&["abc", "d"]).shared(&bag(&["e", "abc"])), 6.0 / 8.0);
+        assert_eq!(
+            bag(&["a", "a", "b"]).shared(&bag(&["a", "c", "d"])),
+            2.0 / 6.0
+        );
+        assert_eq!(bag(&[]).shared(&bag(&[])), 1.0);
+        // Lines over the word table are not compared at all.
+        let long: Vec<&str> = vec!["w"; 501];
+        assert_eq!(similarity(&long, &long[..500]), 0.0);
+        assert_eq!(similarity(&long[..500], &long[..500]), 1.0);
+    }
+
+    /// Sequences of up to 5 tokens over a 3-letter alphabet, in a fixed order.
+    fn short_sequences() -> Vec<Vec<&'static str>> {
+        let mut all: Vec<Vec<&'static str>> = vec![Vec::new()];
+        let mut last: Vec<Vec<&'static str>> = vec![Vec::new()];
+        for _ in 0..5 {
+            last = last
+                .iter()
+                .flat_map(|sequence| {
+                    ["a", "b", "c"].into_iter().map(move |token| {
+                        let mut longer = sequence.clone();
+                        longer.push(token);
+                        longer
+                    })
+                })
+                .collect();
+            all.extend(last.iter().cloned());
+        }
+        all
+    }
+
+    /// The length of a longest common subsequence, computed over prefixes (the code
+    /// computes it over suffixes), as an independent reference.
+    fn reference_lcs_length(a: &[&str], b: &[&str]) -> usize {
+        let mut length = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+        for i in 1..=a.len() {
+            for j in 1..=b.len() {
+                length[i][j] = if a[i - 1] == b[j - 1] {
+                    length[i - 1][j - 1] + 1
+                } else {
+                    length[i - 1][j].max(length[i][j - 1])
+                };
+            }
+        }
+        length[a.len()][b.len()]
+    }
+
+    /// Whether `pairs` match equal tokens of `a` and `b`, strictly increasing on both sides.
+    fn is_common_subsequence(a: &[&str], b: &[&str], pairs: &[(usize, usize)]) -> bool {
+        pairs
+            .iter()
+            .all(|&(i, j)| i < a.len() && j < b.len() && a[i] == b[j])
+            && pairs
+                .windows(2)
+                .all(|two| two[0].0 < two[1].0 && two[0].1 < two[1].1)
+    }
+
+    /// On every pair of short token sequences, the common subsequence is valid and as long
+    /// as possible: a shorter one would mark words as changed that did not change. The
+    /// common prefix and suffix are taken first, so only an exhaustive set reaches the
+    /// table in the middle with every shape.
+    #[test]
+    fn common_subsequence_is_a_longest_one() {
+        let sequences = short_sequences();
+        for a in &sequences {
+            for b in &sequences {
+                let pairs = common_subsequence(a, b, usize::MAX);
+                assert!(
+                    is_common_subsequence(a, b, &pairs),
+                    "{a:?} {b:?}: {pairs:?}"
+                );
+                assert_eq!(pairs.len(), reference_lcs_length(a, b), "{a:?} {b:?}");
+                let middle = middle_subsequence(a, b, usize::MAX);
+                assert!(
+                    is_common_subsequence(a, b, &middle),
+                    "{a:?} {b:?}: {middle:?}"
+                );
+                assert_eq!(middle.len(), pairs.len(), "{a:?} {b:?}");
+            }
+        }
+    }
+
+    /// Over the table limit the middle gets no pair, but the common prefix and suffix are
+    /// still matched; at the limit the middle is still computed.
+    #[test]
+    fn common_subsequence_over_the_table_keeps_prefix_and_suffix() {
+        let a = ["x", "a", "b", "y"];
+        let b = ["x", "b", "a", "y"];
+        // The middle, a b against b a, needs a 3 by 3 table.
+        assert_eq!(common_subsequence(&a, &b, 8), [(0, 0), (3, 3)]);
+        assert_eq!(common_subsequence(&a, &b, 9).len(), 3);
+        assert_eq!(middle_subsequence(&["a"], &["a"], 3), []);
+        assert_eq!(middle_subsequence(&["a"], &["a"], 4), [(0, 0)]);
+    }
+
+    /// (base, side) line pairs.
+    type Pairing = Vec<(usize, usize)>;
+
+    /// Every set of (base, side) pairs that keeps both orders, as a brute-force reference.
+    fn monotone_pairings(rows: usize, columns: usize) -> Vec<Pairing> {
+        let cells: Vec<(usize, usize)> = (0..rows)
+            .flat_map(|i| (0..columns).map(move |j| (i, j)))
+            .collect();
+        (0u32..1 << cells.len())
+            .map(|mask| {
+                cells
+                    .iter()
+                    .enumerate()
+                    .filter(|(bit, _)| mask & (1 << bit) != 0)
+                    .map(|(_, cell)| *cell)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|pairs| {
+                pairs
+                    .windows(2)
+                    .all(|two| two[0].0 < two[1].0 && two[0].1 < two[1].1)
+            })
+            .collect()
+    }
+
+    /// On every gap of up to 3 lines on each side, drawn from lines of varied likeness, the
+    /// pairing keeps the order of both sides, pairs only similar enough lines, and reaches
+    /// the best total similarity that any such pairing can.
+    #[test]
+    fn gap_pairing_is_the_best_ordered_one() {
+        let lines = ["a b c d", "a b c x", "c d", "x y z", "z y x", ""];
+        let mut gaps: Vec<Vec<&str>> = vec![Vec::new()];
+        for size in 1..=3 {
+            let mut longer: Vec<Vec<&str>> = vec![Vec::new()];
+            for _ in 0..size {
+                longer = longer
+                    .iter()
+                    .flat_map(|gap| {
+                        lines.iter().map(move |line| {
+                            let mut gap = gap.clone();
+                            gap.push(*line);
+                            gap
+                        })
+                    })
+                    .collect();
+            }
+            gaps.extend(longer);
+        }
+        // Every score and every ordered pairing, computed once: the pairs of gaps are many.
+        let index = |line: &str| lines.iter().position(|known| *known == line).unwrap();
+        let likeness: Vec<Vec<f64>> = lines
+            .iter()
+            .map(|a| {
+                lines
+                    .iter()
+                    .map(|b| similarity(&tokens(a), &tokens(b)))
+                    .collect()
+            })
+            .collect();
+        let pairings: Vec<Vec<Vec<Pairing>>> = (0..=3)
+            .map(|rows| {
+                (0..=3)
+                    .map(|columns| monotone_pairings(rows, columns))
+                    .collect()
+            })
+            .collect();
+        for base in &gaps {
+            for side in &gaps {
+                let score = |(i, j): (usize, usize)| likeness[index(base[i])][index(side[j])];
+                let pairs = pair_gap(base, side);
+                assert!(
+                    pairs
+                        .windows(2)
+                        .all(|two| two[0].0 < two[1].0 && two[0].1 < two[1].1),
+                    "{base:?} {side:?}: {pairs:?}"
+                );
+                assert!(
+                    pairs.iter().all(|&pair| score(pair) >= MIN_SIMILARITY),
+                    "{base:?} {side:?}: {pairs:?}"
+                );
+                let total: f64 = pairs.iter().map(|&pair| score(pair)).sum();
+                let best = pairings[base.len()][side.len()]
+                    .iter()
+                    .filter(|pairing| pairing.iter().all(|&pair| score(pair) >= MIN_SIMILARITY))
+                    .map(|pairing| pairing.iter().map(|&pair| score(pair)).sum::<f64>())
+                    .fold(0.0, f64::max);
+                assert!(
+                    (total - best).abs() < 1e-9,
+                    "{base:?} {side:?}: {pairs:?} {total} < {best}"
+                );
+            }
+        }
+    }
+
+    /// A gap of up to 40,000 line pairs is paired; a larger one is left unpaired (its
+    /// lines are added) rather than cost too much.
+    #[test]
+    fn gaps_over_the_pair_limit_are_not_paired() {
+        let lines = |count: usize, word: &str| -> Vec<String> {
+            (0..count)
+                .map(|line| format!("let value{line} = {word}"))
+                .collect()
+        };
+        let base = lines(200, "old");
+        let base: Vec<&str> = base.iter().map(String::as_str).collect();
+        let side = lines(200, "new");
+        let side: Vec<&str> = side.iter().map(String::as_str).collect();
+        assert_eq!(pair_gap(&base, &side).len(), 200);
+        let longer = lines(201, "new");
+        let longer: Vec<&str> = longer.iter().map(String::as_str).collect();
+        assert_eq!(pair_gap(&base, &longer), []);
     }
 }

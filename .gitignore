@@ -27,3 +27,7 @@
 # Xcode
 xcuserdata/
 DerivedData/
+
+# cargo-mutants reports
+/mutants.out/
+/mutants.out.old/
