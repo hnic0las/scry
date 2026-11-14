@@ -88,12 +88,35 @@ fn side_commits(
         _ => side.commit.id.clone(),
     };
     let text = session.side_text(pane);
-    let blamed = blame(git, &revision, file, &text).unwrap_or_default();
+    // git before 2.41 (the one Xcode 15 and 16 ship) refuses `--contents`
+    // with a revision: the revision's own file is blamed instead, and each
+    // conflict's lines found in it by their text.
+    let (blamed, in_revision) = match blame(git, &revision, file, &text) {
+        Ok(blamed) => (blamed, false),
+        Err(_) => (
+            blame_revision(git, &revision, file).unwrap_or_default(),
+            true,
+        ),
+    };
     let mut file_commit: Option<Option<String>> = None;
     (0..session.conflict_count())
         .map(|index| {
-            let id = match session.side_lines(index, pane) {
+            let lines = session.side_lines(index, pane).and_then(|(first, last)| {
+                if !in_revision {
+                    return Some((first, last));
+                }
+                let conflict = session.conflict(index);
+                let side = match pane {
+                    Pane::Ours => &conflict.ours.text,
+                    Pane::Theirs => &conflict.theirs.text,
+                };
+                let wanted: Vec<&str> = side.lines().collect();
+                find_block(&blamed.texts, &wanted, first)
+                    .map(|start| (start, start + wanted.len() - 1))
+            });
+            let id = match lines {
                 Some((first, last)) => newest(&blamed, first, last),
+                None if session.side_lines(index, pane).is_some() => None,
                 None => file_commit
                     .get_or_insert_with(|| last_commit_of_file(git, &revision, file).ok().flatten())
                     .clone(),
@@ -103,9 +126,14 @@ fn side_commits(
         .collect()
 }
 
-/// The commit of each line of `text`, by line from 1 (index 0 unused),
-/// with its committer time; `None` for a line not in the revision.
-type Blame = Vec<Option<(String, i64)>>;
+/// A blamed file, by line from 1 (index 0 unused): each line's commit with
+/// its committer time (`None` for a line not in the revision), and its
+/// text.
+#[derive(Default)]
+struct Blame {
+    commits: Vec<Option<(String, i64)>>,
+    texts: Vec<String>,
+}
 
 /// `text` blamed from `revision` in one `git blame` run.
 fn blame(git: &dyn Git, revision: &str, file: &str, text: &str) -> Result<Blame, GitError> {
@@ -122,11 +150,33 @@ fn blame(git: &dyn Git, revision: &str, file: &str, text: &str) -> Result<Blame,
     Ok(lines_in_porcelain(&output))
 }
 
+/// The file as `revision` holds it, blamed.
+fn blame_revision(git: &dyn Git, revision: &str, file: &str) -> Result<Blame, GitError> {
+    let output = git.run(&["blame", "--porcelain", revision, "--", file])?;
+    Ok(lines_in_porcelain(&output))
+}
+
+/// Where `wanted` starts among `texts` (from 1), the place nearest `near`
+/// when it occurs more than once.
+fn find_block(texts: &[String], wanted: &[&str], near: usize) -> Option<usize> {
+    if wanted.is_empty() || texts.len() <= wanted.len() {
+        return None;
+    }
+    (1..=texts.len() - wanted.len())
+        .filter(|&start| {
+            texts[start..start + wanted.len()]
+                .iter()
+                .zip(wanted)
+                .all(|(text, wanted)| text == wanted)
+        })
+        .min_by_key(|start| start.abs_diff(near))
+}
+
 /// The newest commit, by committer time, among lines `first` to `last`;
 /// the first one found on a tie.
 fn newest(blamed: &Blame, first: usize, last: usize) -> Option<String> {
     let mut newest: Option<&(String, i64)> = None;
-    for line in blamed.iter().take(last + 1).skip(first).flatten() {
+    for line in blamed.commits.iter().take(last + 1).skip(first).flatten() {
         if newest.is_none_or(|found| line.1 > found.1) {
             newest = Some(line);
         }
@@ -140,9 +190,14 @@ fn newest(blamed: &Blame, first: usize, last: usize) -> Option<String> {
 fn lines_in_porcelain(output: &str) -> Blame {
     let mut times: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut lines: Vec<(usize, String)> = Vec::new();
+    let mut texts: Vec<(usize, String)> = Vec::new();
     let mut current: Option<String> = None;
     for line in output.lines() {
-        if line.starts_with('\t') {
+        // Each header is followed by its line's text, after a tab.
+        if let Some(text) = line.strip_prefix('\t') {
+            if let Some((number, _)) = lines.last() {
+                texts.push((*number, text.to_string()));
+            }
             continue;
         }
         if let Some(time) = line.strip_prefix("committer-time ") {
@@ -166,13 +221,19 @@ fn lines_in_porcelain(output: &str) -> Blame {
         lines.push((final_line, id.to_string()));
     }
     let count = lines.iter().map(|(line, _)| *line).max().unwrap_or(0);
-    let mut blamed: Blame = vec![None; count + 1];
+    let mut blamed = Blame {
+        commits: vec![None; count + 1],
+        texts: vec![String::new(); count + 1],
+    };
     for (line, id) in lines {
         // Lines not in the revision ("Not Committed Yet") have an all-zero
         // ID: no commit to show.
         if id.chars().any(|c| c != '0') {
-            blamed[line] = times.get(&id).map(|time| (id, *time));
+            blamed.commits[line] = times.get(&id).map(|time| (id, *time));
         }
+    }
+    for (line, text) in texts {
+        blamed.texts[line] = text;
     }
     blamed
 }

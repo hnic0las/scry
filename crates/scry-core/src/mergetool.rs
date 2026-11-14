@@ -60,17 +60,55 @@ pub fn setup(git: &dyn Git, command: &str) -> Result<Setup, GitError> {
     })
 }
 
+/// Where Scry keeps the merge tool it replaced, so `uninstall` puts it back.
+const PREVIOUS: &str = "mergetool.scry.previousTool";
+
 /// Makes Scry git's merge tool for every repository, running `command`.
 /// Git trusts its exit code: 0 when the file is written, so git stages it.
+///
+/// The tool it replaces is kept for `uninstall`. `merge.tool` is written
+/// last: a failure before leaves git with the tool it had, never naming a
+/// Scry without a command.
 pub fn install(git: &dyn Git, command: &str) -> Result<(), GitError> {
+    if let Some(previous) = global(git, "merge.tool")?.filter(|tool| tool != TOOL) {
+        git.run(&["config", "--global", PREVIOUS, &previous])?;
+    }
     for (key, value) in [
-        ("merge.tool", TOOL),
         ("mergetool.scry.cmd", command),
         ("mergetool.scry.trustExitCode", "true"),
+        ("merge.tool", TOOL),
     ] {
         git.run(&["config", "--global", key, value])?;
     }
     Ok(())
+}
+
+/// The merge tool Scry replaced, which `uninstall` puts back; `None` when
+/// there was none.
+pub fn previous_tool(git: &dyn Git) -> Result<Option<String>, GitError> {
+    global(git, PREVIOUS)
+}
+
+/// Stops using Scry as git's merge tool: the tool it replaced is git's
+/// again, or none, and Scry's settings are removed. A merge tool chosen
+/// since, other than Scry, is left alone.
+pub fn uninstall(git: &dyn Git) -> Result<(), GitError> {
+    if global(git, "merge.tool")?.as_deref() == Some(TOOL) {
+        match previous_tool(git)? {
+            Some(previous) => git.run(&["config", "--global", "merge.tool", &previous])?,
+            None => git.run(&["config", "--global", "--unset", "merge.tool"])?,
+        };
+    }
+    // Exits with an error when the section is already gone: nothing to do.
+    git.output(&["config", "--global", "--remove-section", "mergetool.scry"])?;
+    Ok(())
+}
+
+/// Whether macOS runs the app from a randomised read-only copy, as it does
+/// for an app opened from Downloads with its quarantine: a command naming
+/// that copy breaks once the app quits.
+pub fn translocated(app: &Path) -> bool {
+    app.to_string_lossy().contains("/AppTranslocation/")
 }
 
 /// A global setting; `None` when unset (git exits with 1).
@@ -111,6 +149,17 @@ mod tests {
                     Some(value) => (0, format!("{value}\n")),
                     None => (1, String::new()),
                 },
+                ["config", "--global", "--unset", key] => {
+                    let removed = self.values.borrow_mut().remove(*key);
+                    (if removed.is_some() { 0 } else { 5 }, String::new())
+                }
+                ["config", "--global", "--remove-section", section] => {
+                    let prefix = format!("{section}.");
+                    let mut values = self.values.borrow_mut();
+                    let before = values.len();
+                    values.retain(|key, _| !key.starts_with(&prefix));
+                    (if values.len() < before { 0 } else { 128 }, String::new())
+                }
                 ["config", "--global", key, value] => {
                     self.values
                         .borrow_mut()
@@ -185,6 +234,46 @@ mod tests {
         install(&git, &old).unwrap();
         let new = command(Path::new("/new/git-scry"), Path::new("/new/Scry.app"));
         assert_eq!(setup(&git, &new).unwrap(), Setup::Scry { current: false });
+    }
+
+    /// Stopping puts back the tool Scry replaced and removes Scry's settings, so trying
+    /// Scry can be undone; with no tool before, git has none again.
+    #[test]
+    fn uninstall_puts_back_the_tool_scry_replaced() {
+        let git = FakeConfig::default();
+        git.values
+            .borrow_mut()
+            .insert(String::from("merge.tool"), String::from("opendiff"));
+        install(&git, "cmd").unwrap();
+        assert_eq!(previous_tool(&git).unwrap().as_deref(), Some("opendiff"));
+        // Installing again (an update) keeps the tool from before Scry.
+        install(&git, "new cmd").unwrap();
+        assert_eq!(previous_tool(&git).unwrap().as_deref(), Some("opendiff"));
+
+        uninstall(&git).unwrap();
+        let values = git.values.borrow().clone();
+        assert_eq!(
+            values.get("merge.tool").map(String::as_str),
+            Some("opendiff")
+        );
+        assert!(!values.keys().any(|key| key.starts_with("mergetool.scry.")));
+
+        let git = FakeConfig::default();
+        install(&git, "cmd").unwrap();
+        uninstall(&git).unwrap();
+        assert!(git.values.borrow().is_empty());
+        // Nothing left to remove is not an error.
+        uninstall(&git).unwrap();
+    }
+
+    /// An app macOS runs from a translocated copy would install a path that vanishes
+    /// once it quits.
+    #[test]
+    fn a_translocated_app_is_recognised() {
+        assert!(translocated(Path::new(
+            "/private/var/folders/x/T/AppTranslocation/1234/d/Scry.app"
+        )));
+        assert!(!translocated(Path::new("/Applications/Scry.app")));
     }
 
     /// A path with spaces or shell characters stays one word, taken as it

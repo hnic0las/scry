@@ -47,6 +47,11 @@ pub struct Status {
     /// The merged file's parse check, once every conflict has a choice.
     pub merged: ParseCheck,
     pub language: Option<Language>,
+    /// The file has a language, but its grammar cannot read the file as
+    /// both sides wrote it (newer syntax, macros such as
+    /// `NS_ASSUME_NONNULL_BEGIN`): nothing is checked, and the user should
+    /// know it rather than take silence for a pass.
+    pub checks_off: bool,
     pub can_undo: bool,
     pub can_redo: bool,
 }
@@ -202,11 +207,27 @@ impl MergeSession {
     }
 
     fn from_segments(
-        segments: Vec<Segment>,
+        mut segments: Vec<Segment>,
         origin: Origin,
         on_disk: String,
         language: Option<Language>,
     ) -> MergeSession {
+        // Rebuilt conflicts were parsed from a text that is not the file:
+        // each starts where the file's own conflict does, so a line number
+        // shown leads to it in another editor.
+        if origin == Origin::Rebuilt {
+            let lines = opening_lines(&on_disk);
+            let rebuilt = conflict::conflicts(&segments).count();
+            if lines.len() == rebuilt {
+                let starts = segments.iter_mut().filter_map(|segment| match segment {
+                    Segment::Conflict(conflict) => Some(conflict),
+                    Segment::Common(_) => None,
+                });
+                for (conflict, line) in starts.zip(lines) {
+                    conflict.start_line = line;
+                }
+            }
+        }
         let conflicts: Vec<Conflict> = conflict::conflicts(&segments).cloned().collect();
         let analyses = resolution::analyze(&segments);
         let (ours_text, ranges) = ours_file(&segments);
@@ -678,22 +699,24 @@ impl MergeSession {
         }
         // The rules' candidates are offered checked or not; a closed "both"
         // only once checked.
-        let offered = |analysis: &Analysis| analysis.candidates.iter().any(|c| c.kind == kind);
+        let offered = |analysis: &Analysis| analysis.candidates.iter().any(|c| c.answers(kind));
         let analysis = if offered(self.analysis_so_far(index)) {
             self.analysis_so_far(index)
         } else {
             self.analysis(index)
         };
-        if !analysis
+        // A kind that gives the text of another candidate chooses that one.
+        let Some(kind) = analysis
             .candidates
             .iter()
-            .any(|candidate| candidate.kind == kind)
-        {
+            .find(|candidate| candidate.answers(kind))
+            .map(|candidate| candidate.kind)
+        else {
             return Err(ChooseError::NotOffered {
                 conflict: analysis.id.clone(),
                 candidate: kind.id(),
             });
-        }
+        };
         let command = Command::Choose {
             conflict: index,
             candidate: kind,
@@ -913,6 +936,7 @@ impl MergeSession {
             total: self.conflict_count(),
             merged: self.merged_check(),
             language: self.language,
+            checks_off: self.language.is_some() && !self.checkable,
             can_undo: self.can_undo(),
             can_redo: self.can_redo(),
         }
@@ -974,6 +998,16 @@ impl MergeSession {
             _ => ours,
         }
     }
+}
+
+/// The lines, from 1, where a conflict opens in `text`: those starting
+/// with `<<<<<<<`, whatever the marker size beyond it.
+fn opening_lines(text: &str) -> Vec<usize> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with("<<<<<<<"))
+        .map(|(index, _)| index + 1)
+        .collect()
 }
 
 /// The line break most of `text` uses; `"\n"` for a file without any.
@@ -1082,12 +1116,14 @@ fn add_closed_candidates(
         for count in 1..=lines.len() {
             let text = format!("{first}{}{second}", lines[..count].concat());
             if parses_with(&text) {
-                if !analysis.candidates.iter().any(|c| c.text == text) {
-                    analysis.candidates.push(Candidate {
+                match analysis.candidates.iter_mut().find(|c| c.text == text) {
+                    Some(same) => same.aliases.push(kind),
+                    None => analysis.candidates.push(Candidate {
                         kind,
                         text,
                         parse: ParseCheck::NotChecked,
-                    });
+                        aliases: Vec::new(),
+                    }),
                 }
                 break;
             }
@@ -1808,17 +1844,28 @@ mod tests {
         assert_eq!(session.side_lines(1, Pane::Theirs), Some((5, 5)));
     }
 
-    /// Choosing a candidate the conflict does not offer, or a conflict that does not exist,
-    /// is an error rather than a silent no-op.
+    /// A kind whose text another candidate already gives chooses that candidate: with the
+    /// same change on both sides, "theirs" takes the one card shown, as ours, so "take
+    /// theirs" works on every conflict. A kind the conflict cannot give at all, or a
+    /// conflict that does not exist, is an error rather than a silent no-op.
     #[test]
-    fn only_offered_candidates_can_be_chosen() {
+    fn a_kind_with_the_same_text_chooses_that_candidate() {
         let mut session = MergeSession::from_text(TEXT, None).unwrap();
-        // Conflict 2 has the same text on both sides: "theirs" is not offered.
+        // Conflict 2 has the same text on both sides: one card, "ours".
         assert_eq!(
-            session.choose(1, CandidateKind::Theirs),
+            session.analysis(1).candidates[0].aliases,
+            [CandidateKind::Theirs]
+        );
+        session.choose(1, CandidateKind::Theirs).unwrap();
+        assert_eq!(
+            session.choice(1),
+            Some(&Choice::Candidate(CandidateKind::Ours))
+        );
+        assert_eq!(
+            session.choose(1, CandidateKind::OursThenTheirsClosed),
             Err(ChooseError::NotOffered {
                 conflict: session.analysis(1).id.clone(),
-                candidate: "theirs",
+                candidate: "ours-then-theirs-closed",
             })
         );
         assert_eq!(
@@ -2009,6 +2056,30 @@ mod tests {
             session.apply(step.clone()).unwrap();
             assert_eq!(session.result_spans(), full(&session), "after {step:?}");
         }
+    }
+
+    /// An Objective-C header the grammar cannot read (Apple's nullability macros) is not
+    /// checked, and the status says so: silence would read as a pass. A file the grammar
+    /// reads, or one without a language, has the checks on or none to speak of.
+    #[test]
+    fn a_file_the_grammar_cannot_read_says_checks_are_off() {
+        let header = "#import <Foundation/Foundation.h>\n\nNS_ASSUME_NONNULL_BEGIN\n\n\
+            @interface Uploader : NSObject\n<<<<<<< ours\n- (void)cancel;\n||||||| base\n=======\n\
+            - (void)pause;\n>>>>>>> theirs\n@end\n\nNS_ASSUME_NONNULL_END\n";
+        let session = MergeSession::from_text(header, Some(Language::ObjectiveC)).unwrap();
+        assert!(session.status().checks_off);
+        assert!(
+            !MergeSession::from_text(SWIFT, Some(Language::Swift))
+                .unwrap()
+                .status()
+                .checks_off
+        );
+        assert!(
+            !MergeSession::from_text(TEXT, None)
+                .unwrap()
+                .status()
+                .checks_off
+        );
     }
 
     /// Candidates are checked the first time a conflict is asked for, not on opening:

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use scry_core::blame::{self, LineCommit};
-use scry_core::git::GitCli;
+use scry_core::git::{Git, GitCli, GitError, GitOutput};
 use scry_core::operation;
 use scry_core::session::MergeSession;
 use tempfile::TempDir;
@@ -57,11 +57,14 @@ impl Repo {
 
     /// The commits of every conflict of `file.txt`, as the app computes them.
     fn conflict_commits(&self) -> Vec<blame::ConflictCommits> {
-        let git = GitCli::new(self.path());
-        let operation = operation::current(&git).unwrap().unwrap();
+        self.conflict_commits_with(&GitCli::new(self.path()))
+    }
+
+    fn conflict_commits_with(&self, git: &dyn Git) -> Vec<blame::ConflictCommits> {
+        let operation = operation::current(git).unwrap().unwrap();
         let text = fs::read_to_string(self.path().join("file.txt")).unwrap();
         let session = MergeSession::from_text(&text, None).unwrap();
-        blame::conflict_commits(&git, &operation, "file.txt", &session)
+        blame::conflict_commits(git, &operation, "file.txt", &session)
     }
 }
 
@@ -176,5 +179,72 @@ fn deleting_side_shows_its_last_commit_of_the_file() {
     assert_eq!(
         subject_and_author(&commits[0].theirs),
         Some(("Remove the line", "You"))
+    );
+}
+
+/// git before 2.41, as Xcode 15 and 16 ship it: `blame --contents` with a revision
+/// fails with "cannot use --contents with final commit object name".
+struct OldGit(GitCli);
+
+impl Git for OldGit {
+    fn output(&self, args: &[&str]) -> Result<GitOutput, GitError> {
+        self.0.output(args)
+    }
+
+    fn output_with_input(&self, args: &[&str], input: &[u8]) -> Result<GitOutput, GitError> {
+        if args.contains(&"--contents") {
+            return Ok(GitOutput {
+                status: Some(128),
+                stdout: Vec::new(),
+                stderr: String::from("fatal: cannot use --contents with final commit object name"),
+            });
+        }
+        self.0.output_with_input(args, input)
+    }
+
+    fn output_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> Result<GitOutput, GitError> {
+        self.0.output_with_env(args, env)
+    }
+}
+
+/// With a git that refuses `--contents` with a revision (checked with Debian's 2.39.5),
+/// each side's revision is blamed as it is and the conflict's lines found by their text:
+/// the lens still shows each side's commit, even with lines added above by the other side.
+#[test]
+fn an_older_git_still_finds_each_sides_commit() {
+    let repo = Repo::new();
+    repo.commit(
+        "h1\nh2\nh3\nh4\nline\nk1\nk2\nk3\nk4\n",
+        "base",
+        "Scry Test",
+    );
+    assert!(repo.git(&["switch", "--quiet", "-c", "feature"], "Scry Test"));
+    repo.commit(
+        "new1\nnew2\nnew3\nh1\nh2\nh3\nh4\nfeature line\nk1\nk2\nk3\nk4\n",
+        "Retry failed uploads",
+        "You",
+    );
+    assert!(repo.git(&["switch", "--quiet", "main"], "Scry Test"));
+    repo.commit(
+        "h1\nh2\nh3\nh4\nmain line\nk1\nk2\nk3\nk4\n",
+        "Add a timeout",
+        "Alex Martin",
+    );
+    repo.commit(
+        "h1\nh2\nh3\nh4\nmain line\nk1\nk2\nk3 renamed\nk4\n",
+        "Rename k3",
+        "Priya Shah",
+    );
+    assert!(repo.git(&["switch", "--quiet", "feature"], "Scry Test"));
+    assert!(!repo.git(&["rebase", "main"], "Scry Test"));
+
+    let commits = repo.conflict_commits_with(&OldGit(GitCli::new(repo.path())));
+    assert_eq!(
+        subject_and_author(&commits[0].ours),
+        Some(("Add a timeout", "Alex Martin"))
+    );
+    assert_eq!(
+        subject_and_author(&commits[0].theirs),
+        Some(("Retry failed uploads", "You"))
     );
 }

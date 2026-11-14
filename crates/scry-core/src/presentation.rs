@@ -77,6 +77,9 @@ pub struct CandidateView {
     pub provenance: Provenance,
     /// Picked by a rule because no judgement is needed.
     pub suggested: bool,
+    /// IDs of the kinds that give this same text and choose this candidate
+    /// ("theirs" when both sides made the same change).
+    pub aliases: Vec<String>,
 }
 
 /// A conflict as the inspector or the CLI shows it.
@@ -144,6 +147,11 @@ impl MergeSession {
                     parse: candidate.parse,
                     provenance: candidate.kind.provenance(),
                     suggested: analysis.suggestion == Some(candidate.kind),
+                    aliases: candidate
+                        .aliases
+                        .iter()
+                        .map(|kind| kind.id().to_string())
+                        .collect(),
                 }
             })
             .collect();
@@ -164,6 +172,7 @@ impl MergeSession {
                     parse: edit.parse,
                     provenance: Provenance::Human,
                     suggested: false,
+                    aliases: Vec::new(),
                 })
             }
         };

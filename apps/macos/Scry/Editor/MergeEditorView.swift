@@ -423,6 +423,10 @@ struct StatusBar: View {
         case .doesNotParse(let line):
             Label("Does not parse · line \(line)", systemImage: "xmark")
                 .foregroundStyle(Theme.Severity.error)
+        case .checksOff(let language):
+            Label("Not checked · the \(language) grammar cannot read this file", systemImage: "questionmark.circle")
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+                .help("Scry checks each candidate by parsing the file, but the \(language) grammar rejects this file even as each side wrote it (newer syntax, or macros such as NS_ASSUME_NONNULL_BEGIN). Review the result yourself.")
         case .notChecked:
             EmptyView()
         }

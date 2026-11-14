@@ -133,6 +133,18 @@ pub struct Candidate {
     /// Whether the file parses with this candidate in place; filled by the
     /// merge session when it knows the language.
     pub parse: ParseCheck,
+    /// Kinds that give this same text, offered as this candidate rather
+    /// than as a card of their own: "theirs" when both sides made the same
+    /// change. Choosing one chooses this candidate, so a kind stays a
+    /// stable way to ask, whatever the texts.
+    pub aliases: Vec<CandidateKind>,
+}
+
+impl Candidate {
+    /// Whether choosing `kind` chooses this candidate.
+    pub fn answers(&self, kind: CandidateKind) -> bool {
+        self.kind == kind || self.aliases.contains(&kind)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,12 +239,17 @@ fn candidates(conflict: &Conflict) -> Vec<Candidate> {
 
     let mut candidates: Vec<Candidate> = Vec::new();
     for (kind, text) in texts {
-        if !candidates.iter().any(|candidate| candidate.text == text) {
-            candidates.push(Candidate {
+        match candidates
+            .iter_mut()
+            .find(|candidate| candidate.text == text)
+        {
+            Some(same) => same.aliases.push(kind),
+            None => candidates.push(Candidate {
                 kind,
                 text,
                 parse: ParseCheck::NotChecked,
-            });
+                aliases: Vec::new(),
+            }),
         }
     }
     candidates

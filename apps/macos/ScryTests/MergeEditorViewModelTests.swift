@@ -42,6 +42,19 @@ struct MergeEditorViewModelTests {
         #expect(editor.rows.count == rows)
     }
 
+    /// With the same change on both sides there is one card, ours; the
+    /// theirs button still resolves the conflict with it, rather than do
+    /// nothing.
+    @Test func theirsTakesTheSameChange() throws {
+        let file = try ConflictFile(text: "<<<<<<< HEAD\nlet a = 1\n||||||| base\nlet a = 0\n=======\nlet a = 1\n>>>>>>> other\n")
+        let editor = try file.editor()
+
+        editor.take("theirs")
+
+        #expect(editor.canMarkResolved)
+        #expect(editor.lensRows.first?.badges.first?.text == "Ours")
+    }
+
     /// Next and previous move the focus between conflicts and stop at
     /// both ends, so the toolbar arrows never focus a missing conflict.
     @Test func movesBetweenConflicts() throws {

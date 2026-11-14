@@ -89,6 +89,55 @@ impl CatalogMerge {
     }
 }
 
+/// How Apple's tools sort keys: `JSONEncoder` by bytes (`Package.resolved`),
+/// `JSONSerialization` ignoring case with numbers in order ("a2" before
+/// "a10").
+type KeyOrder = fn(&str, &str) -> std::cmp::Ordering;
+
+/// The order `keys` are in, of the two Apple's tools write, bytes first
+/// when both fit; `None` when they follow neither, and new keys go last.
+fn key_order(keys: &[&String]) -> Option<KeyOrder> {
+    let orders: [KeyOrder; 2] = [|a, b| a.cmp(b), natural];
+    orders
+        .into_iter()
+        .find(|order| keys.windows(2).all(|pair| order(pair[0], pair[1]).is_le()))
+}
+
+/// Ignoring case, with runs of digits compared as numbers.
+fn natural(a: &str, b: &str) -> std::cmp::Ordering {
+    let (mut a, mut b) = (a.chars().peekable(), b.chars().peekable());
+    loop {
+        match (a.peek().copied(), b.peek().copied()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
+                let number = |chars: &mut std::iter::Peekable<std::str::Chars>| {
+                    let mut digits = String::new();
+                    while let Some(digit) = chars.next_if(char::is_ascii_digit) {
+                        digits.push(digit);
+                    }
+                    digits
+                };
+                let (x, y) = (number(&mut a), number(&mut b));
+                let (x, y) = (x.trim_start_matches('0'), y.trim_start_matches('0'));
+                let order = x.len().cmp(&y.len()).then_with(|| x.cmp(y));
+                if order.is_ne() {
+                    return order;
+                }
+            }
+            (Some(x), Some(y)) => {
+                let order = x.to_lowercase().cmp(y.to_lowercase());
+                if order.is_ne() {
+                    return order;
+                }
+                a.next();
+                b.next();
+            }
+        }
+    }
+}
+
 /// One pick per conflict, no more, no fewer.
 pub(crate) fn check_picks(picks: usize, conflicts: usize) -> Result<(), String> {
     if picks == conflicts {
@@ -135,11 +184,20 @@ fn merge_value(
             Some(Value::Object(map)) => map,
             _ => &empty,
         };
-        // Ours' order, then the keys only theirs has.
+        // Ours' order, with the keys only theirs (or the base) has put
+        // where the order ours follows puts them.
         let mut keys: Vec<&String> = ours_map.keys().collect();
+        let order = key_order(&keys);
         for key in theirs_map.keys().chain(base_map.keys()) {
-            if !keys.contains(&key) {
-                keys.push(key);
+            if keys.contains(&key) {
+                continue;
+            }
+            match order {
+                Some(order) => {
+                    let at = keys.partition_point(|known| order(known, key).is_lt());
+                    keys.insert(at, key);
+                }
+                None => keys.push(key),
             }
         }
         let mut merged = Map::new();
@@ -247,7 +305,13 @@ fn set(root: &mut Value, path: &[String], value: Option<Value>) {
 fn write(value: &Value, depth: usize, out: &mut String) {
     let indent = |depth: usize| "  ".repeat(depth);
     match value {
-        Value::Object(map) if map.is_empty() => out.push_str("{\n\n}"),
+        // As Foundation writes them: an empty line, then the closing
+        // bracket at the container's own indent.
+        Value::Object(map) if map.is_empty() => {
+            out.push_str("{\n\n");
+            out.push_str(&indent(depth));
+            out.push('}');
+        }
         Value::Object(map) => {
             out.push_str("{\n");
             for (index, (key, value)) in map.iter().enumerate() {
@@ -263,7 +327,11 @@ fn write(value: &Value, depth: usize, out: &mut String) {
             out.push_str(&indent(depth));
             out.push('}');
         }
-        Value::Array(items) if items.is_empty() => out.push_str("[\n\n]"),
+        Value::Array(items) if items.is_empty() => {
+            out.push_str("[\n\n");
+            out.push_str(&indent(depth));
+            out.push(']');
+        }
         Value::Array(items) => {
             out.push_str("[\n");
             for (index, item) in items.iter().enumerate() {
@@ -387,6 +455,28 @@ mod tests {
         let ours_picked = merge.resolve(&[Pick::Ours]).unwrap();
         assert!(ours_picked.contains("variations"));
         assert!(!ours_picked.contains("%lld fichiers"));
+    }
+
+    /// A merge is written as Xcode writes the file, so it adds no noise to the diff: an
+    /// empty container closes at its own indent, and a key only theirs added goes where
+    /// the order ours follows puts it, by bytes or ignoring case with numbers in order.
+    #[test]
+    fn the_merge_is_written_as_xcode_writes_it() {
+        // Ignoring case with numbers in order, as `JSONSerialization` sorts.
+        let base = r#"{"strings":{"a2":{},"a10":{},"c":{}}}"#;
+        let ours = r#"{"strings":{"a2":{},"a10":{},"c":{}}}"#;
+        let theirs = r#"{"strings":{"a2":{},"a3":{},"a10":{},"B":{},"c":{}}}"#;
+        let written = merge(base, ours, theirs).unwrap().resolve(&[]).unwrap();
+        assert_eq!(
+            written,
+            "{\n  \"strings\" : {\n    \"a2\" : {\n\n    },\n    \"a3\" : {\n\n    },\n    \"a10\" : {\n\n    },\n    \"B\" : {\n\n    },\n    \"c\" : {\n\n    }\n  }\n}\n"
+        );
+
+        // Sorted by bytes, as `JSONEncoder` sorts `Package.resolved`'s keys.
+        let ours = r#"{"Zed":1,"a":1}"#;
+        let theirs = r#"{"Zed":1,"a":1,"B":1}"#;
+        let written = merge("{}", ours, theirs).unwrap().resolve(&[]).unwrap();
+        assert_eq!(written, "{\n  \"B\" : 1,\n  \"Zed\" : 1,\n  \"a\" : 1\n}\n");
     }
 
     /// A key one side removed and the other changed is a choice too, and

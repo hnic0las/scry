@@ -323,3 +323,26 @@ fn git_merge_file(dir: &Path) -> String {
         .unwrap();
     String::from_utf8(output.stdout).unwrap()
 }
+
+/// A rebuilt session shows each conflict at its line in the file, not in the rebuilt text,
+/// which has a base section the file lacks: the line leads to it in another editor.
+#[test]
+fn rebuilt_conflicts_start_where_the_file_has_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let merged = "a\n<<<<<<< HEAD\nX\n=======\nZ\n>>>>>>> other\nb\nc\nd\nf\ng\nh\n\
+                  <<<<<<< HEAD\nY\n=======\nW\n>>>>>>> other\ne\n";
+    let files = files(
+        dir.path(),
+        "a\n1\nb\nc\nd\nf\ng\nh\n2\ne\n",
+        "a\nX\nb\nc\nd\nf\ng\nh\nY\ne\n",
+        "a\nZ\nb\nc\nd\nf\ng\nh\nW\ne\n",
+        merged,
+    );
+    let git = GitCli::new(dir.path().to_path_buf());
+    let session = session::load(&git, &files, "ours", "theirs").unwrap();
+    assert!(session.rebuilt());
+    let lines: Vec<usize> = (0..2)
+        .map(|index| session.analysis(index).start_line)
+        .collect();
+    assert_eq!(lines, [2, 13]);
+}

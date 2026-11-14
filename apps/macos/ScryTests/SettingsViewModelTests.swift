@@ -19,10 +19,20 @@ private final class FakeInstaller: MergetoolInstaller {
 
     func setup() throws -> MergetoolSetup { state }
 
+    var previous: String?
+
     func install() throws {
         if let failure { throw failure }
         installs += 1
+        if case .other(let tool) = state { previous = tool }
         state = .scry(current: true)
+    }
+
+    func previousTool() throws -> String? { previous }
+
+    func uninstall() throws {
+        state = previous.map { .other(tool: $0) } ?? .notSet
+        previous = nil
     }
 }
 
@@ -45,6 +55,24 @@ struct SettingsViewModelTests {
         #expect(installer.installs == 1)
         #expect(settings.isInstalled)
         #expect(!settings.canInstall)
+    }
+
+    /// Trying Scry can be undone: once installed, the settings name the tool
+    /// it replaced, and Stop Using Scry puts it back.
+    @Test func stopsUsingScry() {
+        let installer = FakeInstaller(.other(tool: "opendiff"))
+        let settings = SettingsViewModel(installer: installer, defaults: .isolated)
+        settings.refresh()
+        #expect(!settings.canUninstall)
+
+        settings.install()
+        #expect(settings.canUninstall)
+        #expect(settings.status.hasSuffix("Stop Using Scry puts opendiff back."))
+
+        settings.uninstall()
+        #expect(settings.setup == .other(tool: "opendiff"))
+        #expect(!settings.canUninstall)
+        #expect(settings.canInstall)
     }
 
     /// The settings show the app's own git-scry and the exact command git

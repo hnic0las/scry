@@ -420,6 +420,9 @@ final class MergeEditorViewModel {
     enum Verification: Equatable {
         case parses(String)
         case doesNotParse(line: UInt32)
+        /// The grammar cannot read the file as the sides wrote it, so no
+        /// candidate is checked: "Not checked · the Objective-C grammar…".
+        case checksOff(String)
         case notChecked
     }
 
@@ -428,7 +431,8 @@ final class MergeEditorViewModel {
     }
 
     var verification: Verification {
-        switch model.status.merged {
+        if model.status.checksOff { return .checksOff(languageName) }
+        return switch model.status.merged {
         case .parses: .parses(languageName)
         case .doesNotParse(let line): .doesNotParse(line: line)
         case .notChecked: .notChecked
@@ -501,10 +505,12 @@ final class MergeEditorViewModel {
     }
 
     /// Takes a candidate for the focused conflict, when it offers it.
+    /// A candidate that gives the same text answers for it too: with the
+    /// same change on both sides, "theirs" takes the one card, as ours.
     func take(_ candidate: String) {
         guard !isEditing,
               let conflict = model.conflict(model.current),
-              conflict.candidates.contains(where: { $0.id == candidate })
+              conflict.candidates.contains(where: { $0.id == candidate || $0.aliases.contains(candidate) })
         else { return }
         model.choose(candidate, conflict: model.current)
     }

@@ -13,6 +13,9 @@ protocol MergetoolInstaller {
     var command: String { get }
     func setup() throws -> MergetoolSetup
     func install() throws
+    /// The merge tool Scry replaced, put back by `uninstall`.
+    func previousTool() throws -> String?
+    func uninstall() throws
 }
 
 /// The app's settings: making Scry git's merge tool, so `git mergetool`
@@ -22,6 +25,8 @@ protocol MergetoolInstaller {
 final class SettingsViewModel {
     /// What git's configuration says, once read.
     private(set) var setup: MergetoolSetup?
+    /// The merge tool Scry replaced, if any.
+    private(set) var previousTool: String?
     /// Why git's configuration could not be read or written.
     private(set) var error: String?
 
@@ -68,6 +73,7 @@ final class SettingsViewModel {
             return "git's merge tool is \(tool). Scry will replace it."
         case .scry(current: true):
             return "Scry is git's merge tool: git mergetool opens conflicts here."
+                + (previousTool.map { " Stop Using Scry puts \($0) back." } ?? "")
         case .scry(current: false):
             return "git runs Scry from another place, moved or deleted since."
         }
@@ -76,6 +82,12 @@ final class SettingsViewModel {
     var isInstalled: Bool { setup == .scry(current: true) }
 
     var canInstall: Bool { installer.isAvailable && !isInstalled }
+
+    /// Scry is git's merge tool, from here or from an app moved since.
+    var canUninstall: Bool {
+        if case .scry = setup { return true }
+        return false
+    }
 
     var buttonTitle: String {
         setup == .scry(current: false) ? "Update Merge Tool" : "Use Scry as git's Merge Tool"
@@ -89,9 +101,21 @@ final class SettingsViewModel {
         if stored != editorLayout { editorLayout = stored }
         do {
             setup = try installer.setup()
+            previousTool = try installer.previousTool()
             error = nil
         } catch {
             setup = nil
+            self.error = error.message
+        }
+    }
+
+    /// Puts back the merge tool Scry replaced, or none.
+    func uninstall() {
+        guard canUninstall else { return }
+        do {
+            try installer.uninstall()
+            refresh()
+        } catch {
             self.error = error.message
         }
     }
@@ -127,5 +151,13 @@ struct AppMergetoolInstaller: MergetoolInstaller {
 
     func install() throws {
         try installMergetool(cli: cli, app: app)
+    }
+
+    func previousTool() throws -> String? {
+        try mergetoolPrevious()
+    }
+
+    func uninstall() throws {
+        try uninstallMergetool()
     }
 }

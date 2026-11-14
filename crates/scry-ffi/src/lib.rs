@@ -253,6 +253,9 @@ pub struct CandidateInfo {
     pub provenance: Provenance,
     /// Picked by a rule because no judgement is needed.
     pub suggested: bool,
+    /// IDs that choose this candidate too, giving the same text: "theirs"
+    /// when both sides made the same change.
+    pub aliases: Vec<String>,
 }
 
 /// The theme's roles, from the core (portability rule 5): the app maps
@@ -341,6 +344,9 @@ pub struct Status {
     /// Of the merged file, once every conflict has a choice.
     pub merged: ParseStatus,
     pub language: Option<String>,
+    /// The language's grammar cannot read this file, so nothing is
+    /// checked: the app says so rather than show nothing.
+    pub checks_off: bool,
     pub can_undo: bool,
     pub can_redo: bool,
 }
@@ -518,6 +524,7 @@ impl MergeDocument {
             total: status.total as u32,
             merged: parse_status(status.merged),
             language: status.language.map(|language| language.name().to_string()),
+            checks_off: status.checks_off,
         }
     }
 }
@@ -617,6 +624,7 @@ fn candidate_info(candidate: presentation::CandidateView) -> CandidateInfo {
         parse: parse_status(candidate.parse),
         provenance: provenance(candidate.provenance),
         suggested: candidate.suggested,
+        aliases: candidate.aliases,
     }
 }
 
@@ -1585,8 +1593,27 @@ pub fn mergetool_setup(cli: String, app: String) -> Result<MergetoolSetup, ScryE
 /// configuration.
 #[uniffi::export]
 pub fn install_mergetool(cli: String, app: String) -> Result<(), ScryError> {
+    if mergetool::translocated(Path::new(&app)) {
+        return Err(ScryError::Refused {
+            message: String::from(
+                "macOS runs Scry from a temporary copy, which git could not find once Scry quits. Move Scry to the Applications folder, open it from there, then try again.",
+            ),
+        });
+    }
     let command = mergetool_command(cli, app);
     mergetool::install(&global_git(), &command).map_err(failed)
+}
+
+/// The merge tool Scry replaced, put back when it stops being git's.
+#[uniffi::export]
+pub fn mergetool_previous() -> Result<Option<String>, ScryError> {
+    mergetool::previous_tool(&global_git()).map_err(failed)
+}
+
+/// Stops using Scry as git's merge tool, putting back the one it replaced.
+#[uniffi::export]
+pub fn uninstall_mergetool() -> Result<(), ScryError> {
+    mergetool::uninstall(&global_git()).map_err(failed)
 }
 
 /// Git for the global configuration, run from the home folder.

@@ -58,9 +58,14 @@ struct SettingsView: View {
                     Image(systemName: viewModel.isInstalled ? "checkmark.circle.fill" : "arrow.triangle.merge")
                         .foregroundStyle(viewModel.isInstalled ? Theme.States.resolved : Theme.Surfaces.textSecondary)
                 }
-                if !viewModel.isInstalled {
-                    Button(viewModel.buttonTitle) { viewModel.install() }
-                        .disabled(!viewModel.canInstall)
+                HStack {
+                    if !viewModel.isInstalled {
+                        Button(viewModel.buttonTitle) { viewModel.install() }
+                            .disabled(!viewModel.canInstall)
+                    }
+                    if viewModel.canUninstall {
+                        Button("Stop Using Scry") { viewModel.uninstall() }
+                    }
                 }
                 if let error = viewModel.error {
                     Text(error)
@@ -70,7 +75,7 @@ struct SettingsView: View {
             } header: {
                 Text("Merge Tool")
             } footer: {
-                Text("Sets merge.tool, mergetool.scry.cmd and mergetool.scry.trustExitCode in your global git configuration.")
+                Text("Sets merge.tool, mergetool.scry.cmd and mergetool.scry.trustExitCode in your global git configuration, and keeps the merge tool it replaces to put it back.")
                     .font(Metrics.caption)
                     .foregroundStyle(Theme.Surfaces.textSecondary)
             }
@@ -115,6 +120,8 @@ private struct PreviewInstaller: MergetoolInstaller {
 
     func setup() throws -> MergetoolSetup { state }
     func install() throws {}
+    func previousTool() throws -> String? { "opendiff" }
+    func uninstall() throws {}
 }
 
 #Preview("Settings, no merge tool") {
