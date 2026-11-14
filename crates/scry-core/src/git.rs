@@ -148,9 +148,44 @@ impl GitCli {
             // Paths are file names, never patterns: `[id].tsx` must not
             // also match `i.tsx` or `d.tsx`.
             .env("GIT_LITERAL_PATHSPECS", "1")
+            // A relative `GIT_DIR` from the caller (a hook, `git
+            // --git-dir=… scry`) means the caller's directory, but git
+            // would read it from `-C`'s.
+            .envs(absolute_git_paths(
+                std::env::vars_os(),
+                std::env::current_dir().ok().as_deref(),
+            ))
             .envs(self.environment.iter().map(|(key, value)| (key, value)));
         command
     }
+}
+
+/// The variables naming a repository's paths, those relative made
+/// absolute from `current`, the directory they were set for. Others are
+/// left out.
+fn absolute_git_paths(
+    variables: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    current: Option<&Path>,
+) -> Vec<(std::ffi::OsString, PathBuf)> {
+    const PATHS: [&str; 5] = [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+    ];
+    let Some(current) = current else {
+        return Vec::new();
+    };
+    variables
+        .filter(|(key, value)| {
+            PATHS.iter().any(|name| key == name) && Path::new(value).is_relative()
+        })
+        .map(|(key, value)| {
+            let path = current.join(value);
+            (key, path)
+        })
+        .collect()
 }
 
 impl Git for GitCli {
@@ -228,6 +263,28 @@ impl std::error::Error for GitError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A relative `GIT_DIR` set by whoever ran Scry is made absolute from
+    /// their directory: Scry runs git with `-C` in another folder, where
+    /// the relative path would name the wrong repository or none.
+    #[test]
+    fn relative_repository_paths_become_absolute() {
+        let variables = [
+            ("GIT_DIR", ".git"),
+            ("GIT_INDEX_FILE", "/tmp/index"),
+            ("GIT_WORK_TREE", "home"),
+            ("HOME", "relative"),
+        ]
+        .map(|(key, value)| (key.into(), value.into()));
+        let paths = absolute_git_paths(variables.into_iter(), Some(Path::new("/repo")));
+        assert_eq!(
+            paths,
+            [
+                ("GIT_DIR".into(), PathBuf::from("/repo/.git")),
+                ("GIT_WORK_TREE".into(), PathBuf::from("/repo/home")),
+            ]
+        );
+    }
 
     /// Opened from the Finder, the app must not pick Apple's `/usr/bin/git`
     /// over the git the user installed, which may ask to install Xcode's

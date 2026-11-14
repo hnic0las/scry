@@ -35,8 +35,12 @@ xcodebuild -project apps/macos/Scry.xcodeproj -scheme Scry -configuration Releas
 built="$derived/Build/Products/Release/Scry.app"
 
 echo "Installing $app"
+# Copied beside the old app first: a failed copy leaves it in place.
+staging="$app.installing"
+rm -rf "$staging"
+ditto "$built" "$staging"
 rm -rf "$app"
-ditto "$built" "$app"
+mv "$staging" "$app"
 cli="$app/Contents/Helpers/git-scry"
 
 # The first suitable folder, in the order the PATH lists them.
@@ -52,9 +56,14 @@ for dir in "${path_dirs[@]}"; do
       ;;
   esac
 done
-if [ -n "$link_dir" ]; then
-  ln -sf "$cli" "$link_dir/git-scry"
-  echo "Linked $link_dir/git-scry → $cli"
+existing="$link_dir/git-scry"
+if [ -n "$link_dir" ] && [ -e "$existing" ] && [ ! -L "$existing" ]; then
+  # A git-scry installed some other way (a copied binary) is not replaced.
+  echo "$existing is not a link to Scry: left as it is." >&2
+  echo "  ln -sf '$cli' '$existing' to use the app's" >&2
+elif [ -n "$link_dir" ]; then
+  ln -sf "$cli" "$existing"
+  echo "Linked $existing → $cli"
   first="$(command -v git-scry || true)"
   if [ -n "$first" ] && [ "$first" != "$link_dir/git-scry" ]; then
     echo "Note: $first comes first on your PATH and is used instead." >&2
@@ -79,14 +88,15 @@ for dir in "$HOME/.cargo/bin" "$HOME/.local/bin" "$HOME/bin" /opt/homebrew/bin /
   fi
 done
 
-# The same command the app's settings install, so they show it as current.
+# The same command the app's settings install (`mergetool::command` in
+# the core), so they show it as current.
 if [ "$(git config --global --get merge.tool || true)" = scry ]; then
   git config --global mergetool.scry.cmd \
-    "\"$cli\" resolve --app=\"$app\" \"\$BASE\" \"\$LOCAL\" \"\$REMOTE\" \"\$MERGED\""
+    "\"$cli\" resolve --app=\"$app\" -- \"\$BASE\" \"\$LOCAL\" \"\$REMOTE\" \"\$MERGED\""
   git config --global mergetool.scry.trustExitCode true
   echo "git mergetool now opens $app"
 else
-  echo "To resolve with git mergetool: Scry › Settings › CLI › Install."
+  echo "To resolve with git mergetool: Scry › Settings… › Use Scry as git's Merge Tool."
 fi
 
 echo

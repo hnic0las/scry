@@ -273,9 +273,33 @@ fn key(kind: CandidateKind) -> &'static str {
     }
 }
 
-/// Asks for a candidate for each conflict without a choice. Returns false
-/// when the user quits.
+/// Asks for a candidate for each conflict without a choice, then offers
+/// to go back to the skipped ones, keeping the choices made: once git
+/// gets an exit code other than 0 it puts its own file back, so writing
+/// the file half resolved would keep nothing either. Returns false when
+/// the user quits.
 fn ask_each_conflict(session: &mut MergeSession, ours: &str, theirs: &str) -> bool {
+    loop {
+        if !ask_unchosen_conflicts(session, ours, theirs) {
+            return false;
+        }
+        let skipped = session.unresolved();
+        if skipped == 0
+            || !ask_yes_no(
+                &format!(
+                    "{skipped} conflict(s) skipped, so nothing can be written yet. Go back to them?"
+                ),
+                true,
+            )
+        {
+            return true;
+        }
+    }
+}
+
+/// One pass over the conflicts without a choice. Returns false when the
+/// user quits.
+fn ask_unchosen_conflicts(session: &mut MergeSession, ours: &str, theirs: &str) -> bool {
     let count = session.conflict_count();
     for index in 0..count {
         if session.choice(index).is_some() {

@@ -279,7 +279,6 @@ impl MergeSession {
         session
     }
 
-    /// Spans per line of `text`; none without a highlighter.
     /// The reference file with conflict `i` replaced by `texts[i]`, parsed
     /// incrementally.
     fn variant(&self, texts: &[&str]) -> Option<ParsedFile> {
@@ -705,7 +704,7 @@ impl MergeSession {
         kind: CandidateKind,
     ) -> Result<Vec<Event>, ChooseError> {
         if index >= self.analyses.len() {
-            return Err(ChooseError::NoSuchConflict(index + 1));
+            return Err(ChooseError::NoSuchConflict(index.saturating_add(1)));
         }
         // The rules' candidates are offered checked or not; a closed "both"
         // only once checked.
@@ -740,7 +739,7 @@ impl MergeSession {
     /// gets one, so the line after the conflict stays on its own line.
     pub(crate) fn edit(&mut self, index: usize, text: &str) -> Result<Vec<Event>, ChooseError> {
         if index >= self.conflicts.len() {
-            return Err(ChooseError::NoSuchConflict(index + 1));
+            return Err(ChooseError::NoSuchConflict(index.saturating_add(1)));
         }
         let mut text = text.replace("\r\n", "\n");
         if !text.is_empty() && !text.ends_with('\n') {
@@ -1483,6 +1482,10 @@ fn path_text(path: &Path) -> Result<&str, LoadError> {
 /// link stays a link. The temporary file has a name of its own, never an
 /// existing file's, and the directory is flushed once the rename is done,
 /// so the new name survives a crash too.
+///
+/// A file with other hard links is written in place instead: a rename
+/// would give this name a new file and leave the other names on the old
+/// one. Extended attributes are not carried over by the rename.
 pub fn write_atomically(path: &Path, text: &str) -> io::Result<()> {
     let is_link =
         fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink());
@@ -1491,6 +1494,14 @@ pub fn write_atomically(path: &Path, text: &str) -> io::Result<()> {
     } else {
         path.to_path_buf()
     };
+    if has_other_names(&target) {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&target)?;
+        file.write_all(text.as_bytes())?;
+        return file.sync_all();
+    }
     let (mut file, temporary) = create_temporary(&target)?;
     let result = write_then_rename(&mut file, &target, &temporary, text);
     if result.is_err() {
@@ -1533,6 +1544,18 @@ fn create_temporary(path: &Path) -> io::Result<(File, PathBuf)> {
         io::ErrorKind::AlreadyExists,
         "no free temporary name",
     ))
+}
+
+/// Whether the file has hard links besides this name.
+#[cfg(unix)]
+fn has_other_names(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).is_ok_and(|metadata| metadata.nlink() > 1)
+}
+
+#[cfg(not(unix))]
+fn has_other_names(_path: &Path) -> bool {
+    false
 }
 
 fn write_then_rename(file: &mut File, path: &Path, temporary: &Path, text: &str) -> io::Result<()> {
@@ -1705,6 +1728,9 @@ mod tests {
         session.edit(0, "").unwrap();
         assert_eq!(session.chosen_text(0), Some(""));
         assert_eq!(session.edit(7, "x"), Err(ChooseError::NoSuchConflict(8)));
+        // An index from JSON can be anything: refused, never an overflow.
+        assert!(session.edit(usize::MAX, "x").is_err());
+        assert!(session.choose(usize::MAX, CandidateKind::Ours).is_err());
     }
 
     /// A file with Windows line endings keeps them in the line break added to
@@ -1943,6 +1969,23 @@ mod tests {
             "someone else's\n"
         );
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    /// A file with another hard link keeps it: both names show the
+    /// result, rather than the other name keeping the conflict markers.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_keeps_a_hard_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        let other = dir.path().join("b.txt");
+        fs::write(&path, "old\n").unwrap();
+        fs::hard_link(&path, &other).unwrap();
+
+        write_atomically(&path, "new\n").unwrap();
+
+        assert_eq!(fs::read_to_string(&other).unwrap(), "new\n");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
     }
 
     /// A conflicted file reached through a symbolic link (a dotfiles

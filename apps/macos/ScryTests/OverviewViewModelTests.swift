@@ -327,6 +327,18 @@ struct OverviewViewModelTests {
         #expect(overview.canContinue)
     }
 
+    /// Conflicts with no operation (`git stash pop`) are listed, said to
+    /// need staging only, with nothing to continue or abort.
+    @Test func conflictsWithoutAnOperationAreListed() {
+        let source = FakeOverview(files: [file("a.txt", .unresolved)])
+        source.operation = nil
+        let overview = OverviewViewModel(source: source) { _ in }
+        #expect(overview.rows.map(\.path) == ["a.txt"])
+        #expect(overview.summary.hasPrefix("Conflicts with no operation in progress"))
+        #expect(!overview.canAbort)
+        #expect(!overview.canContinue)
+    }
+
     /// Cancelling a file's sheet reads the list again: the user may have
     /// taken a lockfile's side, or changed the file in a terminal.
     @Test func cancellingASheetReadsTheListAgain() async {

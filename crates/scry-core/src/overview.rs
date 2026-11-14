@@ -436,11 +436,9 @@ impl Overview {
     pub fn refresh(&mut self, git: &dyn Git) -> Result<Snapshot, GitError> {
         let operation = operation::current(git)?;
         let step = operation.as_ref().map(step);
-        let unmerged = if operation.is_some() {
-            operation::conflicted_paths(git)?
-        } else {
-            Vec::new()
-        };
+        // Listed with no operation too: `git stash pop` and `git checkout
+        // --merge` leave conflicts without one, and nothing to continue.
+        let unmerged = operation::conflicted_paths(git)?;
         if step != self.step {
             self.step = step;
             // Files staged at this step before Scry opened: git keeps
@@ -517,10 +515,12 @@ impl Overview {
         command: OverviewCommand,
     ) -> Result<Vec<OverviewEvent>, OverviewError> {
         let snapshot = self.refresh(git)?;
-        let Some(operation) = &snapshot.operation else {
-            return Err(OverviewError::NoOperation);
+        // Files are settled without an operation too (`git stash pop`);
+        // only Continue, Skip and Abort need one.
+        let operation = || match &snapshot.operation {
+            Some(operation) => Ok((operation.kind, verb(operation.kind))),
+            None => Err(OverviewError::NoOperation),
         };
-        let verb = verb(operation.kind);
         let state = |path: &str| {
             snapshot
                 .files
@@ -693,6 +693,7 @@ impl Overview {
                 Ok(vec![OverviewEvent::Staged { paths }])
             }
             OverviewCommand::Continue { message } => {
+                let (_, verb) = operation()?;
                 let left = snapshot
                     .files
                     .iter()
@@ -736,13 +737,15 @@ impl Overview {
                 Ok(vec![OverviewEvent::Continued])
             }
             OverviewCommand::Skip => {
-                if operation.kind == OperationKind::Merge {
+                let (kind, verb) = operation()?;
+                if kind == OperationKind::Merge {
                     return Err(OverviewError::CannotSkipMerge);
                 }
                 Editor::new(git)?.go_on(git, &[verb, "--skip"])?;
                 Ok(vec![OverviewEvent::Skipped])
             }
             OverviewCommand::Abort => {
+                let (_, verb) = operation()?;
                 git.run(&[verb, "--abort"])?;
                 Ok(vec![OverviewEvent::Aborted])
             }

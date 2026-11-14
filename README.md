@@ -55,7 +55,7 @@ Use it as git's merge tool, in the terminal:
 
 ```sh
 git config --global merge.tool scry
-git config --global mergetool.scry.cmd 'git-scry resolve "$BASE" "$LOCAL" "$REMOTE" "$MERGED"'
+git config --global mergetool.scry.cmd 'git-scry resolve -- "$BASE" "$LOCAL" "$REMOTE" "$MERGED"'
 git config --global mergetool.scry.trustExitCode true
 ```
 
@@ -64,7 +64,7 @@ git config --global mergetool.scry.trustExitCode true
 Or in the Scry app: Scry › Settings › Use Scry as git's Merge Tool sets all three for you, running the `git-scry` inside the app (`Scry.app/Contents/Helpers/git-scry`, put there by the Xcode build), so nothing has to be on the `PATH`. By hand, `git-scry resolve --app` opens the app on each file, in front of the terminal, and waits for it. The app is `$SCRY_APP`, `/Applications/Scry.app` or `~/Applications/Scry.app`, unless given as `--app=/path/to/Scry.app`:
 
 ```sh
-git config --global mergetool.scry.cmd 'git-scry resolve --app "$BASE" "$LOCAL" "$REMOTE" "$MERGED"'
+git config --global mergetool.scry.cmd 'git-scry resolve --app -- "$BASE" "$LOCAL" "$REMOTE" "$MERGED"'
 ```
 
 The app shows the base even when the file has none, as the terminal does. Mark as Resolved writes the file and closes the window, and `git mergetool` moves on to the next file. Closing the window without writing leaves the file conflicted.
@@ -79,7 +79,7 @@ To use the app day to day, without Xcode:
 scripts/install-app.sh      # builds in Release, installs /Applications/Scry.app and links git-scry on the PATH
 ```
 
-Then, in a repository with a merge, rebase, cherry-pick or revert in progress, from any folder in it, `git scry` (or `git scry open [path]`) opens the app on its overview. When Scry is git's merge tool, the script points it at the installed app; otherwise Scry › Settings › CLI › Install sets it up, and `git mergetool` then opens each file in the app. Run the script again to update.
+Then, in a repository with a merge, rebase, cherry-pick or revert in progress, from any folder in it, `git scry` (or `git scry open [path]`) opens the app on its overview. When Scry is git's merge tool, the script points it at the installed app; otherwise Scry › Settings › Use Scry as git's Merge Tool sets it up, and `git mergetool` then opens each file in the app. Run the script again to update.
 
 To develop it:
 

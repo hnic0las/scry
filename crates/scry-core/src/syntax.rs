@@ -1,6 +1,5 @@
-//! Whether a text parses, with tree-sitter grammars compiled into Scry.
-//!
-//! The same grammars will drive syntax highlighting (decision 0003).
+//! Whether a text parses, and its highlight spans, with the tree-sitter
+//! grammars compiled into Scry (decision 0003).
 
 use serde::Serialize;
 use std::ops::Range;

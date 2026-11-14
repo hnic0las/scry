@@ -235,7 +235,12 @@ final class OverviewViewModel {
 
     /// The operation in plain words, or that there is none.
     var summary: String {
-        guard let summary = snapshot?.summary else { return "No merge, rebase, cherry-pick or revert in progress." }
+        guard let summary = snapshot?.summary else {
+            // `git stash pop` leaves conflicts with no operation to go on.
+            return rows.isEmpty
+                ? "No merge, rebase, cherry-pick or revert in progress."
+                : "Conflicts with no operation in progress, as git stash pop leaves them. Stage each file once resolved."
+        }
         // The step line under it names the commit: the core's headline,
         // without " · commit 2 of 7: …".
         if stepLine != nil, let headline = snapshot?.headline {

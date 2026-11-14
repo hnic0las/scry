@@ -115,7 +115,7 @@ private struct PreviewInstaller: MergetoolInstaller {
     var isAvailable = true
     var cli = "/Applications/Scry.app/Contents/Helpers/git-scry"
     var command: String {
-        "\"/Applications/Scry.app/Contents/Helpers/git-scry\" resolve --app=\"/Applications/Scry.app\" \"$BASE\" \"$LOCAL\" \"$REMOTE\" \"$MERGED\""
+        "\"/Applications/Scry.app/Contents/Helpers/git-scry\" resolve --app=\"/Applications/Scry.app\" -- \"$BASE\" \"$LOCAL\" \"$REMOTE\" \"$MERGED\""
     }
 
     func setup() throws -> MergetoolSetup { state }

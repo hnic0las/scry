@@ -283,7 +283,7 @@ git init --quiet --initial-branch=main
 git config merge.conflictStyle zdiff3
 if [ "$global_tool" != scry ]; then
   git config merge.tool scry
-  git config mergetool.scry.cmd "cargo run -q --manifest-path '$workspace/Cargo.toml' -p git-scry -- resolve \"\$BASE\" \"\$LOCAL\" \"\$REMOTE\" \"\$MERGED\""
+  git config mergetool.scry.cmd "cargo run -q --manifest-path '$workspace/Cargo.toml' -p git-scry -- resolve -- \"\$BASE\" \"\$LOCAL\" \"\$REMOTE\" \"\$MERGED\""
   git config mergetool.scry.trustExitCode true
 fi
 git config mergetool.prompt false

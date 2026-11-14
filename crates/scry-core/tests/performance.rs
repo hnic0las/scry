@@ -137,3 +137,64 @@ fn report_rows_on_one_large_conflict() {
     time("rows", || session.rows(false));
     time("rows again", || session.rows(false));
 }
+
+/// An Xcode project of about `files` × 3 lines (build files, file
+/// references, the Sources phase), where each side added a file in
+/// `conflicts` places of the Sources phase.
+fn project_file(files: usize, conflicts: usize) -> String {
+    let build = |n: usize| format!("A{n:023X}");
+    let reference = |n: usize| format!("B{n:023X}");
+    let mut text = String::from("// !$*UTF8*$!\n{\n\tobjects = {\n");
+    for n in 0..files + 2 * conflicts {
+        text.push_str(&format!(
+            "\t\t{} /* F{n}.swift in Sources */ = {{isa = PBXBuildFile; fileRef = {} /* F{n}.swift */; }};\n",
+            build(n),
+            reference(n)
+        ));
+        text.push_str(&format!(
+            "\t\t{} /* F{n}.swift */ = {{isa = PBXFileReference; path = F{n}.swift; sourceTree = \"<group>\"; }};\n",
+            reference(n)
+        ));
+    }
+    text.push_str("\t\tC00000000000000000000001 /* Sources */ = {\n\t\t\tisa = PBXSourcesBuildPhase;\n\t\t\tfiles = (\n");
+    let every = files / conflicts;
+    for n in 0..files {
+        text.push_str(&format!(
+            "\t\t\t\t{} /* F{n}.swift in Sources */,\n",
+            build(n)
+        ));
+        if n % every == 0 && n / every < conflicts {
+            let ours = files + 2 * (n / every);
+            text.push_str("<<<<<<< HEAD\n");
+            text.push_str(&format!(
+                "\t\t\t\t{} /* F{ours}.swift in Sources */,\n",
+                build(ours)
+            ));
+            text.push_str("=======\n");
+            text.push_str(&format!(
+                "\t\t\t\t{} /* F{}.swift in Sources */,\n",
+                build(ours + 1),
+                ours + 1
+            ));
+            text.push_str(">>>>>>> feature\n");
+        }
+    }
+    text.push_str("\t\t\t);\n\t\t};\n\t};\n}\n");
+    text
+}
+
+/// Reports how long reviewing and keeping both sides of a large Xcode
+/// project takes; not a pass/fail check.
+#[test]
+#[ignore]
+fn report_project_file_timings() {
+    let text = project_file(13_000, 20);
+    println!("{} lines", text.lines().count());
+    let (review, _) = time("pbxproj review", || {
+        scry_core::pbxproj::review(&text, 7).unwrap()
+    });
+    assert_eq!(review.resolvable, 20);
+    time("pbxproj keep both", || {
+        scry_core::pbxproj::keep_both(&text, 7, true).unwrap()
+    });
+}

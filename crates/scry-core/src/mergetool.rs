@@ -22,10 +22,11 @@ pub enum Setup {
 
 /// The merge tool command that runs `cli` (`git-scry`) to open `app`, the
 /// app bundle. Paths are absolute, so it does not depend on the `PATH` git
-/// gets, and quoted for the shell git runs it in.
+/// gets, and quoted for the shell git runs it in. `--` before the files:
+/// git passes a file named `-dash.txt` as it is.
 pub fn command(cli: &Path, app: &Path) -> String {
     format!(
-        "{} resolve --app={} \"$BASE\" \"$LOCAL\" \"$REMOTE\" \"$MERGED\"",
+        "{} resolve --app={} -- \"$BASE\" \"$LOCAL\" \"$REMOTE\" \"$MERGED\"",
         quote(&cli.to_string_lossy()),
         quote(&app.to_string_lossy())
     )
@@ -206,7 +207,7 @@ mod tests {
         assert_eq!(
             values["mergetool.scry.cmd"],
             "\"/Applications/Scry.app/Contents/Helpers/git-scry\" resolve \
-             --app=\"/Applications/Scry.app\" \"$BASE\" \"$LOCAL\" \"$REMOTE\" \"$MERGED\""
+             --app=\"/Applications/Scry.app\" -- \"$BASE\" \"$LOCAL\" \"$REMOTE\" \"$MERGED\""
         );
         assert_eq!(values["mergetool.scry.trustExitCode"], "true");
         assert_eq!(

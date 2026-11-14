@@ -8,6 +8,8 @@ use tempfile::TempDir;
 
 struct Repo {
     root: TempDir,
+    /// The conflicted file.
+    name: String,
 }
 
 impl Repo {
@@ -16,6 +18,17 @@ impl Repo {
     /// Git's configuration is isolated from the user's. `scry_args` are
     /// appended to the merge tool command.
     fn stopped_rebase(conflict_style: &str, scry_args: &str) -> Repo {
+        Repo::stopped_rebase_on("file.txt", conflict_style, scry_args, "--")
+    }
+
+    /// The same, on the file `name`; `separator` goes between git-scry's
+    /// options and the four files, as the installed command has it.
+    fn stopped_rebase_on(
+        name: &str,
+        conflict_style: &str,
+        scry_args: &str,
+        separator: &str,
+    ) -> Repo {
         let root = tempfile::tempdir().unwrap();
         // Forward slashes: the command runs in git's shell, also on Windows.
         let binary = env!("CARGO_BIN_EXE_git-scry").replace('\\', "/");
@@ -23,12 +36,15 @@ impl Repo {
             "[merge]\n\ttool = scry\n\tconflictStyle = {conflict_style}\n\
              [mergetool]\n\tprompt = false\n\tkeepBackup = false\n\
              [mergetool \"scry\"]\n\
-             \tcmd = \\\"{binary}\\\" resolve \\\"$BASE\\\" \\\"$LOCAL\\\" \\\"$REMOTE\\\" \\\"$MERGED\\\" {scry_args}\n\
+             \tcmd = \\\"{binary}\\\" resolve {scry_args} {separator} \\\"$BASE\\\" \\\"$LOCAL\\\" \\\"$REMOTE\\\" \\\"$MERGED\\\"\n\
              \ttrustExitCode = true\n"
         );
         fs::write(root.path().join("gitconfig"), config).unwrap();
         fs::create_dir(root.path().join("repo")).unwrap();
-        let repo = Repo { root };
+        let repo = Repo {
+            root,
+            name: name.to_string(),
+        };
 
         repo.ok(&["init", "--quiet", "--initial-branch=main"]);
         repo.commit("line\nend\n", "base");
@@ -67,13 +83,13 @@ impl Repo {
     }
 
     fn commit(&self, content: &str, message: &str) {
-        fs::write(self.path().join("file.txt"), content).unwrap();
-        self.ok(&["add", "file.txt"]);
+        fs::write(self.path().join(&self.name), content).unwrap();
+        self.ok(&["add", "--", &self.name]);
         self.ok(&["commit", "--quiet", "-m", message]);
     }
 
     fn file(&self) -> String {
-        fs::read_to_string(self.path().join("file.txt")).unwrap()
+        fs::read_to_string(self.path().join(&self.name)).unwrap()
     }
 
     fn unmerged(&self) -> String {
@@ -91,6 +107,21 @@ fn resolved_file_is_written_and_staged() {
     // Rebuilt with the base, then "your commit" first.
     assert_eq!(repo.file(), "feature line\nmain line\nend\n");
     assert_eq!(repo.unmerged(), "");
+}
+
+/// A file whose name starts with a dash reaches git-scry as a file, not
+/// an option: git passes `-dash.txt` as it is, so the command needs `--`
+/// before the four files.
+#[test]
+fn a_file_named_like_an_option_is_resolved() {
+    let repo = Repo::stopped_rebase_on("-dash.txt", "merge", "--take 1=theirs", "--");
+    let output = repo.git(&["mergetool"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(repo.file(), "feature line\nend\n");
+    assert_eq!(repo.unmerged(), "");
+
+    let without = Repo::stopped_rebase_on("-dash.txt", "merge", "--take 1=theirs", "");
+    assert!(!without.git(&["mergetool"]).status.success());
 }
 
 /// With a conflict left and no terminal to ask in, the file stays untouched and still

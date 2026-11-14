@@ -403,7 +403,7 @@ pub struct MergeDocument {
     /// Per conflict; computed once, since the sides never change.
     commits: Vec<blame::ConflictCommits>,
     // UniFFI shares the object with Swift behind an `Arc`, so methods take
-    // `&self`; the mutex lets `choose` change the session safely.
+    // `&self`; the mutex lets commands change the session safely.
     session: Mutex<MergeSession>,
 }
 

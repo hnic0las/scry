@@ -6,6 +6,8 @@
 //! the merge editor with the reason, and checks the result: every object
 //! the file refers to must still be defined.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::conflict::{self, Conflict, ParseError, Segment};
 
 /// What one conflict of the project file does.
@@ -75,7 +77,7 @@ pub fn review(text: &str, marker_size: usize) -> Result<ProjectReview, ParseErro
             }
         })
         .collect();
-    let ids: Vec<&str> = plan.missing_ids.iter().map(String::as_str).collect();
+    let ids: HashSet<&str> = plan.missing_ids.iter().map(String::as_str).collect();
     let missing_removable = !ids.is_empty()
         && plan
             .text
@@ -108,11 +110,11 @@ pub fn keep_both(
     let result: String = if !remove_missing || plan.missing_ids.is_empty() {
         plan.text
     } else {
+        let missing: HashSet<&str> = plan.missing_ids.iter().map(String::as_str).collect();
         plan.text
             .split_inclusive('\n')
             .filter(|line| {
-                listed(line.trim_end_matches(['\n', '\r']))
-                    .is_none_or(|id| !plan.missing_ids.iter().any(|missing| missing == id))
+                listed(line.trim_end_matches(['\n', '\r'])).is_none_or(|id| !missing.contains(id))
             })
             .collect()
     };
@@ -287,7 +289,7 @@ fn settle(segments: &[Segment], marker_size: usize) -> Settled {
             }
         }
         if !changed {
-            let left: Vec<&str> = conflict::conflicts(segments)
+            let left: HashSet<&str> = conflict::conflicts(segments)
                 .zip(&reasons)
                 .filter(|(_, reason)| reason.is_some())
                 .flat_map(|(conflict, _)| {
@@ -300,11 +302,9 @@ fn settle(segments: &[Segment], marker_size: usize) -> Settled {
                 .collect();
             let mut missing: Vec<String> = Vec::new();
             let mut missing_ids: Vec<String> = Vec::new();
+            let mut seen: HashSet<&str> = HashSet::new();
             for id in text.lines().flat_map(ids) {
-                if !defined.contains(&id)
-                    && !left.contains(&id)
-                    && !missing_ids.iter().any(|known| known == id)
-                {
+                if !defined.contains(id) && !left.contains(id) && seen.insert(id) {
                     missing.push(named(id, &names));
                     missing_ids.push(id.to_string());
                 }
@@ -327,6 +327,7 @@ fn write(
     reasons: &[Option<String>],
     marker_size: usize,
 ) -> String {
+    let ending = line_ending(segments);
     let mut text = String::new();
     let mut index = 0;
     for segment in segments {
@@ -334,17 +335,12 @@ fn write(
             Segment::Common(common) => text.push_str(common),
             Segment::Conflict(conflict) => {
                 if reasons[index].is_none() {
-                    let ending = if conflict.ours.text.contains("\r\n") {
-                        "\r\n"
-                    } else {
-                        "\n"
-                    };
                     for line in Changes::of(&compared[index]).merged() {
                         text.push_str(line);
                         text.push_str(ending);
                     }
                 } else {
-                    text.push_str(&markers(conflict, marker_size));
+                    text.push_str(&markers(conflict, marker_size, ending));
                 }
                 index += 1;
             }
@@ -353,15 +349,27 @@ fn write(
     text
 }
 
-/// A conflict as git writes it.
-fn markers(conflict: &Conflict, size: usize) -> String {
+/// The project's line break: `\r\n` when any of its lines has one, as
+/// a project checked out on Windows does.
+fn line_ending(segments: &[Segment]) -> &'static str {
+    let crlf = segments.iter().any(|segment| match segment {
+        Segment::Common(text) => text.contains("\r\n"),
+        Segment::Conflict(conflict) => {
+            conflict.ours.text.contains("\r\n") || conflict.theirs.text.contains("\r\n")
+        }
+    });
+    if crlf { "\r\n" } else { "\n" }
+}
+
+/// A conflict as git writes it, its marker lines ending with `ending`.
+fn markers(conflict: &Conflict, size: usize, ending: &str) -> String {
     let marker = |character: char, label: &str| {
         let mut line = character.to_string().repeat(size);
         if !label.is_empty() {
             line.push(' ');
             line.push_str(label);
         }
-        line.push('\n');
+        line.push_str(ending);
         line
     };
     let mut text = marker('<', &conflict.ours.label);
@@ -567,19 +575,19 @@ fn value(line: &str) -> String {
 }
 
 /// Every object id with the name its comments give it.
-fn object_names(segments: &[Segment]) -> Vec<(String, String)> {
-    let mut names: Vec<(String, String)> = Vec::new();
+fn object_names(segments: &[Segment]) -> HashMap<String, String> {
+    let mut names: HashMap<String, String> = HashMap::new();
     let mut add = |text: &str| {
         for line in text.lines() {
             for id in ids(line) {
-                if names.iter().any(|(known, _)| known == id) {
+                if names.contains_key(id) {
                     continue;
                 }
                 let after = &line[line.find(id).unwrap_or(0) + id.len()..];
                 if let (Some(start), Some(end)) = (after.find("/* "), after.find(" */"))
                     && start < end
                 {
-                    names.push((id.to_string(), after[start + 3..end].to_string()));
+                    names.insert(id.to_string(), after[start + 3..end].to_string());
                 }
             }
         }
@@ -600,15 +608,15 @@ fn object_names(segments: &[Segment]) -> Vec<(String, String)> {
 }
 
 /// "A2000002 ForecastView.swift".
-fn named(id: &str, names: &[(String, String)]) -> String {
-    match names.iter().find(|(known, _)| known == id) {
-        Some((_, name)) => format!("{id} {name}"),
+fn named(id: &str, names: &HashMap<String, String>) -> String {
+    match names.get(id) {
+        Some(name) => format!("{id} {name}"),
         None => id.to_string(),
     }
 }
 
 /// The object ids the text defines (`<id> /* … */ = {`).
-fn defined(text: &str) -> Vec<&str> {
+fn defined(text: &str) -> HashSet<&str> {
     text.lines()
         .filter(|line| line.contains("= {"))
         .map(key)
@@ -716,6 +724,36 @@ mod tests {
         );
         // Nothing settles, so the file keeps its markers as git wrote it.
         assert!(keep_both(text, 7, true).unwrap().contains("<<<<<<< ours"));
+    }
+
+    /// In a project with Windows line breaks, a conflict left by hand is
+    /// written back with `\r\n` marker lines, as git wrote them, not with
+    /// `\n` ones that leave the file with mixed line breaks.
+    #[test]
+    fn markers_left_in_a_crlf_project_keep_its_line_breaks() {
+        let text = "\
+/* Begin PBXFrameworksBuildPhase section */
+<<<<<<< ours
+\t\tB1000001 /* Frameworks */ = {
+\t\t};
+||||||| base
+=======
+\t\tB2000002 /* Frameworks */ = {
+\t\t};
+>>>>>>> theirs
+\t\tA1000001 /* One.swift in Sources */ = {isa = PBXBuildFile; };
+<<<<<<< ours
+\t\tA1000003 /* Ours.swift in Sources */ = {isa = PBXBuildFile; };
+=======
+\t\tA1000004 /* Theirs.swift in Sources */ = {isa = PBXBuildFile; };
+>>>>>>> theirs
+/* End PBXFrameworksBuildPhase section */
+"
+        .replace('\n', "\r\n");
+        let result = keep_both(&text, 7, true).unwrap();
+        assert!(result.contains("<<<<<<< ours\r\n"));
+        assert!(result.contains("A1000004 /* Theirs.swift in Sources */"));
+        assert_eq!(result.matches('\n').count(), result.matches("\r\n").count());
     }
 
     /// A side whose conflict runs past the end of a list (`);`) used to get

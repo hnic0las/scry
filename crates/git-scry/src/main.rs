@@ -73,7 +73,7 @@ enum Command {
     /// Resolve a conflicted file, as the merge tool `git mergetool` runs:
     ///
     ///   git config merge.tool scry
-    ///   git config mergetool.scry.cmd 'git-scry resolve "$BASE" "$LOCAL" "$REMOTE" "$MERGED"'
+    ///   git config mergetool.scry.cmd 'git-scry resolve -- "$BASE" "$LOCAL" "$REMOTE" "$MERGED"'
     ///   git config mergetool.scry.trustExitCode true
     ///
     /// Asks for a candidate per conflict in the terminal, unless --take or
@@ -113,6 +113,7 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    quiet_on_closed_pipe();
     let cli = Cli::parse();
     let Some(command) = cli.command else {
         return open::run(None, None);
@@ -146,6 +147,26 @@ fn main() -> ExitCode {
             allow_invalid,
         }),
     }
+}
+
+/// `println!` panics when the reader of the output is gone
+/// (`git scry highlight … | head -1`). Like other command-line tools,
+/// git-scry then stops quietly instead of printing a panic: this hook
+/// exits on that one panic and leaves every other to the default hook.
+fn quiet_on_closed_pipe() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if message.contains("Broken pipe") {
+            std::process::exit(0);
+        }
+        default(info);
+    }));
 }
 
 fn list_conflicts(file: &Path) -> ExitCode {

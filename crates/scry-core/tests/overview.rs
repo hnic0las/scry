@@ -1668,3 +1668,44 @@ fn a_refresh_does_not_run_git_per_file() {
     };
     assert_eq!(runs(20), runs(1));
 }
+
+/// `git stash pop` leaves conflicts without an operation: the files are
+/// still listed and can be staged, with nothing to continue or skip.
+#[test]
+fn a_stash_pop_conflict_lists_its_files() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("gitconfig"), "").unwrap();
+    fs::create_dir_all(root.path().join("repo/Sources")).unwrap();
+    let repo = Repo { root };
+    repo.ok(&["init", "--quiet", "--initial-branch=main"]);
+    repo.commit("a\n", "let b = 0\n", "base");
+    fs::write(repo.path().join("a.txt"), "a stashed\n").unwrap();
+    repo.ok(&["stash", "--quiet"]);
+    repo.commit("a main\n", "let b = 0\n", "main change");
+    assert!(!repo.git(&["stash", "pop"]));
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+
+    let snapshot = overview.refresh(&git).unwrap();
+    assert!(snapshot.operation.is_none());
+    let paths: Vec<&str> = snapshot
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    assert_eq!(paths, ["a.txt"]);
+    assert_eq!(snapshot.files[0].state, State::Unresolved);
+    assert!(!snapshot.can_continue());
+    assert!(!snapshot.can_skip());
+
+    fs::write(repo.path().join("a.txt"), "a main and stashed\n").unwrap();
+    overview
+        .apply(
+            &git,
+            OverviewCommand::Stage {
+                paths: vec![String::from("a.txt")],
+            },
+        )
+        .unwrap();
+    assert_eq!(state(&mut overview, &git, "a.txt"), State::Staged);
+}
