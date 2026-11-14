@@ -3,13 +3,16 @@ import Testing
 
 @MainActor
 struct SpecialFileViewModelTests {
-    private func sheet(_ kind: SpecialKind, _ source: FakeOverview, done: @escaping () -> Void = {}) -> SpecialFileViewModel {
-        SpecialFileViewModel(
+    /// The sheet once its file is read, off the main actor.
+    private func sheet(_ kind: SpecialKind, _ source: FakeOverview, done: @escaping () -> Void = {}) async -> SpecialFileViewModel {
+        let viewModel = SpecialFileViewModel(
             file: file("Sources/X", .unresolved, openable: ![.deletedOnOneSide, .binary, .notMerged, .unusual].contains(kind), special: kind),
             source: source,
             done: done,
             openInEditor: { _ in }
         )
+        await viewModel.idle()
+        return viewModel
     }
 
     /// A file deleted on one side says who deleted it and who changed it,
@@ -17,12 +20,13 @@ struct SpecialFileViewModelTests {
     @Test func deletedFileSaysWhoAndIsKeptOrDeleted() async {
         let source = FakeOverview(files: [])
         var closed = 0
-        let viewModel = sheet(.deletedOnOneSide, source) { closed += 1 }
+        let viewModel = await sheet(.deletedOnOneSide, source) { closed += 1 }
 
         #expect(viewModel.explanation == "main · rebase target deleted it; Your commit a1b2c3d · Retry changed it (12 lines). Keep the changed file, or delete it.")
         #expect(viewModel.changesTitle == "What Your commit a1b2c3d · Retry changed, lost if you delete the file")
         #expect(viewModel.changeLines.map(\.kind) == [.hunk, .context, .removed, .added])
         #expect(viewModel.changeLines.map(\.text) == ["@@ -1,2 +1,2", "keep", "old", "new"])
+        #expect(viewModel.actionNote == "Your choice is staged at once. Unstage it from the list to choose again.")
         viewModel.keepFile()
         await viewModel.idle()
         viewModel.deleteFile()
@@ -35,7 +39,7 @@ struct SpecialFileViewModelTests {
     /// the file cannot be taken.
     @Test func binaryTakesOnlyAnExistingVersion() async {
         let source = FakeOverview(files: [])
-        let viewModel = sheet(.binary, source)
+        let viewModel = await sheet(.binary, source)
 
         #expect(viewModel.versionCards.map(\.side) == ["Yours", "Theirs"])
         #expect(viewModel.versionCards[0].size == "2 KB")
@@ -62,6 +66,7 @@ struct SpecialFileViewModelTests {
         let viewModel = SpecialFileViewModel(
             file: file("P", .unresolved, special: .projectFile), source: source, done: {}, openInEditor: { _ in edited += 1 }
         )
+        await viewModel.idle()
         #expect(viewModel.keepBothTitle == "Settle 1 of 2 Conflicts")
         #expect(viewModel.explanation == "1 of 2 conflicts settle by keeping both sides' changes; the merge editor opens on the 1 left.")
         #expect(viewModel.projectRows[1].reason == "MARKETING_VERSION: 1.4 on one side, 2.0 on the other")
@@ -75,7 +80,7 @@ struct SpecialFileViewModelTests {
         #expect(edited == 1)
 
         source.projectInfo = ProjectInfo(oursLabel: "main", theirsLabel: "feature", conflicts: [projectConflict([], [], reason: "x")], resolvable: 0, missing: [], missingRemovable: false)
-        let refused = sheet(.projectFile, source)
+        let refused = await sheet(.projectFile, source)
         #expect(!refused.canKeepBoth)
         refused.keepBoth()
         await refused.idle()
@@ -86,7 +91,7 @@ struct SpecialFileViewModelTests {
     /// a pick, and the picks go in order; a removed value says so.
     @Test func catalogWritesOnceEveryValueIsChosen() async {
         let source = FakeOverview(files: [])
-        let viewModel = sheet(.stringCatalog, source)
+        let viewModel = await sheet(.stringCatalog, source)
 
         #expect(viewModel.explanation == "3 changes merged by key. 2 values were changed on both sides: choose each one.")
         #expect(viewModel.catalogRows[1].ours == "(removed)")
@@ -106,7 +111,7 @@ struct SpecialFileViewModelTests {
     /// and is written once each package moved on both sides has a pick.
     @Test func packagesMergeByPackageWithAChoiceLeft() async {
         let source = FakeOverview(files: [])
-        let viewModel = sheet(.packageResolved, source)
+        let viewModel = await sheet(.packageResolved, source)
 
         #expect(viewModel.explanation == "2 packages taken from the side that moved them. 1 package was moved on both sides: choose each version.")
         #expect(viewModel.pinRows.map(\.change) == ["7.9.0 → 7.10.0", "added 4.4.1"])
@@ -126,7 +131,7 @@ struct SpecialFileViewModelTests {
     @Test func lockfileTakesASideThenShowsTheCommand() async {
         let source = FakeOverview(files: [])
         var closed = 0
-        let viewModel = sheet(.lockfile, source) { closed += 1 }
+        let viewModel = await sheet(.lockfile, source) { closed += 1 }
 
         #expect(!viewModel.canOpenInEditor)
         #expect(viewModel.command == "cd web && npm install")
@@ -144,9 +149,9 @@ struct SpecialFileViewModelTests {
 
         source.lockfileInfo = LockfileInfo(
             oursLabel: "main", theirsLabel: "feature", tool: "Go", manifest: "go.mod", manifestConflicted: true,
-            command: "go mod tidy", mergesByLines: true, changes: []
+            command: "go mod tidy", caveat: nil, mergesByLines: true, changes: []
         )
-        let sum = sheet(.lockfile, source)
+        let sum = await sheet(.lockfile, source)
         #expect(sum.manifestWarning == "go.mod has conflicts too: resolve it first, since Go writes the lockfile from it.")
         sum.mergeLines()
         await sum.idle()
@@ -157,7 +162,7 @@ struct SpecialFileViewModelTests {
     /// one version whole, never staged as it was left.
     @Test func notMergedTakesOneVersion() async {
         let source = FakeOverview(files: [])
-        let viewModel = sheet(.notMerged, source)
+        let viewModel = await sheet(.notMerged, source)
 
         #expect(viewModel.subtitle == "Not merged by git")
         #expect(viewModel.explanation.hasPrefix(".gitattributes tells git not to merge this file"))
@@ -172,7 +177,7 @@ struct SpecialFileViewModelTests {
     @Test func unusualIsMarkedResolvedAsInTheFolder() async {
         let source = FakeOverview(files: [])
         var closed = 0
-        let viewModel = sheet(.unusual, source) { closed += 1 }
+        let viewModel = await sheet(.unusual, source) { closed += 1 }
 
         #expect(viewModel.explanation == "A submodule both sides moved to different commits. Check out the commit you want.")
         #expect(viewModel.folderNote == "It is in the folder: marking it resolved stages it as it is there.")
@@ -182,7 +187,8 @@ struct SpecialFileViewModelTests {
         #expect(closed == 1)
 
         source.unusualInfo = UnusualInfo(what: "Both sides renamed it.", advice: "Mark it resolved.", inFolder: false)
-        #expect(sheet(.unusual, source).folderNote == "It is not in the folder: marking it resolved stages its removal.")
+        let removed = await sheet(.unusual, source)
+        #expect(removed.folderNote == "It is not in the folder: marking it resolved stages its removal.")
     }
 
     /// From the overview, a special file opens its sheet instead of the
@@ -198,6 +204,8 @@ struct SpecialFileViewModelTests {
         let special = try? #require(overview.special)
         #expect(edited.isEmpty)
         let reads = source.reads
+        // The sheet reads the file first; its buttons wait for it.
+        await special?.idle()
         special?.keepFile()
         await special?.idle()
         #expect(overview.special == nil)

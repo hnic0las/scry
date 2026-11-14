@@ -560,6 +560,10 @@ final class OverviewViewModel {
     }
 
     private static func stageItem(_ rows: [FileRow]) -> MenuItem {
+        // No row: nothing to stage, rather than reading the first row below.
+        guard let first = rows.first else {
+            return MenuItem(title: "Stage", detail: nil, enabled: false)
+        }
         let many = rows.count > 1
         let files = "\(rows.count) Files"
         if rows.allSatisfy(\.canUnstage) {
@@ -570,7 +574,7 @@ final class OverviewViewModel {
                     enabled: true
                 )
             }
-            return rows[0].isSpecial
+            return first.isSpecial
                 ? MenuItem(
                     title: "Unstage and Choose Again",
                     detail: "Git gets the conflict back and asks again. Your choice is not kept.",
@@ -582,9 +586,9 @@ final class OverviewViewModel {
                     enabled: true
                 )
         }
-        let title = many ? "Stage \(files)" : rows[0].state == .needsReview ? "Accept and Stage" : "Stage"
+        let title = many ? "Stage \(files)" : first.state == .needsReview ? "Accept and Stage" : "Stage"
         if rows.allSatisfy(\.canStage) {
-            let review = !many && rows[0].state == .needsReview
+            let review = !many && first.state == .needsReview
             return MenuItem(title: title, detail: review ? "Keeps the rule’s result as it is" : nil, enabled: true)
         }
         if rows.contains(where: \.canUnstage) {

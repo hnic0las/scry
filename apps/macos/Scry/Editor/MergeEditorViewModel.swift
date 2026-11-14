@@ -410,9 +410,10 @@ final class MergeEditorViewModel {
     var canRedo: Bool { model.status.canRedo && !isEditing }
 
     /// Every conflict is resolved, and no edit is pending: ⌘↩ applies the
-    /// edit meanwhile.
+    /// edit meanwhile. A file with no conflict left can be written too, so
+    /// `git mergetool` hears it is resolved.
     var canMarkResolved: Bool {
-        model.status.total > 0 && model.status.resolved == model.status.total && !isEditing
+        model.status.resolved == model.status.total && !isEditing
     }
 
     // MARK: Status bar
@@ -481,8 +482,15 @@ final class MergeEditorViewModel {
 
     var invalidWriteMessage: String {
         guard case .doesNotParse(let line) = model.status.merged else { return "" }
-        return "\(model.header.fileName) does not parse as \(languageName) near line \(line)."
+        let parse = "\(model.header.fileName) does not parse as \(languageName) near line \(line)."
+        guard invalidWriteOverwrites else { return parse }
+        return parse + " It also changed on disk since Scry opened it, in another editor or through git: writing replaces those changes."
     }
+
+    /// The file had changed on disk when the user was asked to write a
+    /// result that does not parse: one alert says both, since an alert
+    /// opened from another alert's button may not appear.
+    @ObservationIgnored private var invalidWriteOverwrites = false
 
     /// The last action the core refused; set to `nil` once shown.
     var failure: String? {
@@ -566,15 +574,17 @@ final class MergeEditorViewModel {
     func markResolved() {
         guard canMarkResolved else { return }
         if case .doesNotParse = model.status.merged {
+            invalidWriteOverwrites = model.changedOnDisk()
             confirmingInvalidWrite = true
         } else {
             write()
         }
     }
 
-    /// Writes a result that does not parse, once the user confirmed.
+    /// Writes a result that does not parse, once the user confirmed;
+    /// over a file changed on disk when the alert said so.
     func writeAnyway() {
-        write()
+        write(overwrite: invalidWriteOverwrites)
     }
 
     /// Writes over a file changed on disk, once the user confirmed.
@@ -586,8 +596,8 @@ final class MergeEditorViewModel {
 
     private var languageName: String { model.status.language ?? "code" }
 
-    private func write() {
-        if model.save() == .changedOnDisk {
+    private func write(overwrite: Bool = false) {
+        if model.save(overwrite: overwrite) == .changedOnDisk {
             confirmingOverwrite = true
         }
     }

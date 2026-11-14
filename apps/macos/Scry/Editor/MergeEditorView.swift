@@ -72,6 +72,14 @@ struct MergeEditorView: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
             viewModel.windowWidthChanged(Double(width))
         }
+        // While a conflict is edited by hand, Edit ▸ Undo goes to the text
+        // being typed instead.
+        .focusedSceneValue(\.undoActions, viewModel.isEditing ? nil : UndoActions(
+            canUndo: viewModel.canUndo,
+            canRedo: viewModel.canRedo,
+            undo: { viewModel.undo() },
+            redo: { viewModel.redo() }
+        ))
         .focusedSceneValue(\.editorLayoutActions, EditorLayoutActions(
             layout: viewModel.layout,
             enabled: viewModel.canSwitchLayout,
@@ -269,17 +277,11 @@ struct MergeEditorView: View {
                 .keyboardShortcut(Shortcut.takeBase)
             Button("Take none") { viewModel.take("neither") }
                 .keyboardShortcut(Shortcut.takeNone)
-            // Disabled while editing, so ↩ types a line break and ⌘Z undoes
-            // typing in the editor.
+            // Disabled while editing, so ↩ types a line break. Undo and
+            // Redo are the Edit menu's (`UndoCommands`).
             Button("Edit by hand") { viewModel.startEditing() }
                 .keyboardShortcut(Shortcut.editByHand)
                 .disabled(viewModel.isEditing)
-            Button("Undo", action: { viewModel.undo() })
-                .keyboardShortcut(Shortcut.undo)
-                .disabled(!viewModel.canUndo)
-            Button("Redo", action: { viewModel.redo() })
-                .keyboardShortcut(Shortcut.redo)
-                .disabled(!viewModel.canRedo)
         }
         .frame(width: 0, height: 0)
         .opacity(0)

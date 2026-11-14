@@ -15,11 +15,17 @@ struct SpecialFileView: View {
                 explanation: viewModel.explanation
             )
             Divider()
-            ScrollView {
-                content
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .disabled(viewModel.isRunning)
+            if viewModel.isLoading {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    content
+                        .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .disabled(viewModel.isRunning)
+                }
             }
             Divider()
             footer
@@ -110,6 +116,9 @@ struct SpecialFileView: View {
                     ) { viewModel.takeLockfile(.theirs) }
                 }
                 CommandBox(command: viewModel.command, highlighted: viewModel.taken != nil)
+                if let caveat = viewModel.commandCaveat {
+                    NoteBanner(text: caveat, symbol: "exclamationmark.triangle.fill", color: Theme.Severity.warning)
+                }
                 if !viewModel.lockfileRows.isEmpty {
                     PackageTable(rows: viewModel.lockfileRows, ours: viewModel.oursLabel, theirs: viewModel.theirsLabel)
                 }
@@ -151,6 +160,11 @@ struct SpecialFileView: View {
                     .font(Metrics.callout)
                     .foregroundStyle(Theme.Severity.error)
                     .lineLimit(2)
+            } else if let note = viewModel.actionNote {
+                Text(note)
+                    .font(Metrics.callout)
+                    .foregroundStyle(Theme.Surfaces.textSecondary)
+                    .lineLimit(2)
             }
             Spacer()
             if viewModel.isRunning {
@@ -164,7 +178,7 @@ struct SpecialFileView: View {
             Button("Cancel", role: .cancel) { close() }
                 .keyboardShortcut(Shortcut.cancelSheet)
             actions
-                .disabled(viewModel.isRunning)
+                .disabled(viewModel.isRunning || viewModel.isLoading)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -750,7 +764,7 @@ struct SpecialSamples: OverviewSource {
         LockfileInfo(
             oursLabel: "feature/sync-v2 · current branch", theirsLabel: "main · being merged",
             tool: "CocoaPods", manifest: "ios/Podfile", manifestConflicted: true, command: "cd ios && pod install",
-            mergesByLines: false,
+            caveat: nil, mergesByLines: false,
             changes: [
                 PackageChangeInfo(name: "Alamofire", base: "5.8.0", ours: "5.8.1", theirs: "5.9.0", bothChanged: true),
                 PackageChangeInfo(name: "Firebase/Analytics", base: "10.20.0", ours: "10.20.0", theirs: "10.22.0", bothChanged: false),

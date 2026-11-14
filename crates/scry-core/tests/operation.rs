@@ -17,11 +17,18 @@ struct Repo {
 
 impl Repo {
     fn new() -> Repo {
+        Repo::with_format("files")
+    }
+
+    /// A repository storing its refs as `format` says: `files`, or
+    /// `reftable`, where HEAD and most pseudorefs are not files.
+    fn with_format(format: &str) -> Repo {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join("gitconfig"), "").unwrap();
         fs::create_dir(root.path().join("repo")).unwrap();
         let repo = Repo { root };
-        assert!(repo.git(&["init", "--quiet", "--initial-branch=main"]));
+        let format = format!("--ref-format={format}");
+        assert!(repo.git(&["init", "--quiet", "--initial-branch=main", &format]));
         repo
     }
 
@@ -61,7 +68,11 @@ impl Repo {
 /// main and feature both change the one line of `file.txt`; feature first
 /// adds an unrelated file, so a rebase has two commits to replay.
 fn diverged() -> Repo {
-    let repo = Repo::new();
+    diverged_with_format("files")
+}
+
+fn diverged_with_format(format: &str) -> Repo {
+    let repo = Repo::with_format(format);
     repo.commit("file.txt", "line\n", "base");
     assert!(repo.git(&["switch", "--quiet", "-c", "feature"]));
     repo.commit("other.txt", "other\n", "add other");
@@ -168,6 +179,40 @@ fn revert() {
     assert_eq!(theirs.role, SideRole::RevertedCommit);
     assert_eq!(theirs.commit.subject, "main change");
     assert!(operation.summary().starts_with("Reverting "));
+}
+
+/// In a reftable repository (git 3.0's default), HEAD's file names a
+/// placeholder branch and the pseudorefs of a cherry-pick, a revert or a
+/// rebase are not files: each operation is still found, on its branch.
+#[test]
+fn operations_in_a_reftable_repository() {
+    let repo = diverged_with_format("reftable");
+    assert!(!repo.git(&["cherry-pick", "feature"]));
+    let operation = operation::current(&repo.scry_git()).unwrap().unwrap();
+    assert_eq!(operation.kind, OperationKind::CherryPick);
+    assert_eq!(operation.ours.label(), "main · current branch");
+    assert_eq!(operation.theirs.unwrap().commit.subject, "feature change");
+    assert!(repo.git(&["cherry-pick", "--abort"]));
+
+    repo.commit("file.txt", "main line 2\n", "second main change");
+    assert!(!repo.git(&["revert", "--no-edit", "HEAD~1"]));
+    let operation = operation::current(&repo.scry_git()).unwrap().unwrap();
+    assert_eq!(operation.kind, OperationKind::Revert);
+    assert_eq!(operation.theirs.unwrap().commit.subject, "main change");
+    assert!(repo.git(&["revert", "--abort"]));
+
+    assert!(repo.git(&["switch", "--quiet", "feature"]));
+    assert!(!repo.git(&["merge", "main"]));
+    let operation = operation::current(&repo.scry_git()).unwrap().unwrap();
+    assert_eq!(operation.kind, OperationKind::Merge);
+    assert_eq!(operation.branch.as_deref(), Some("feature"));
+    assert_eq!(operation.summary(), "Merging main into feature");
+    assert!(repo.git(&["merge", "--abort"]));
+
+    assert!(!repo.git(&["rebase", "main"]));
+    let operation = operation::current(&repo.scry_git()).unwrap().unwrap();
+    assert_eq!(operation.kind, OperationKind::Rebase);
+    assert_eq!(operation.theirs.unwrap().commit.subject, "feature change");
 }
 
 /// Outside a repository git fails, and the error comes back instead of a wrong answer.

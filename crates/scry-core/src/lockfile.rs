@@ -105,15 +105,21 @@ impl Format {
     }
 
     /// The command that writes the lockfile again from the manifest,
-    /// keeping the versions already locked.
-    pub fn command(self) -> &'static str {
+    /// keeping the versions already locked where the tool can. `manifest`
+    /// is the manifest's text (empty when it cannot be read): a Dart
+    /// package without Flutter is fetched with `dart`, as `flutter` may
+    /// not be installed.
+    pub fn command(self, manifest: &str) -> &'static str {
         match self {
+            Format::Pub if !depends_on_flutter(manifest) => "dart pub get",
             Format::Cargo => "cargo update --workspace",
             Format::Npm => "npm install",
             Format::Yarn => "yarn install",
             Format::Pnpm => "pnpm install",
             Format::CocoaPods => "pod install",
             Format::Bundler => "bundle install",
+            // Poetry 2 keeps locked versions by default and refuses
+            // `--no-update`; Poetry 1 needs it (see `caveat`).
             Format::Poetry => "poetry lock",
             Format::Composer => "composer update --lock",
             Format::GoSum => "go mod tidy",
@@ -131,10 +137,37 @@ impl Format {
         }
     }
 
+    /// Where `command` may not keep the locked versions, what to know
+    /// before running it.
+    pub fn caveat(self) -> Option<&'static str> {
+        match self {
+            Format::Poetry => Some(
+                "With Poetry 1.x, run poetry lock --no-update instead: without it, Poetry 1 moves every package to its newest allowed version.",
+            ),
+            Format::Pipenv => Some(
+                "Pipenv has no command that keeps the locked versions: it locks every package again at the newest version the Pipfile allows. Check the lockfile's changes before staging it.",
+            ),
+            Format::Carthage => Some(
+                "Carthage has no lock-only update: it resolves every dependency again within the Cartfile's requirements. Check the Cartfile.resolved changes before staging it.",
+            ),
+            _ => None,
+        }
+    }
+
     /// `go.sum` only lists checksums: both sides' lines can be kept.
     pub fn merges_by_lines(self) -> bool {
         self == Format::GoSum
     }
+}
+
+/// Whether a `pubspec.yaml` depends on the Flutter SDK
+/// (`sdk: flutter` under a dependency).
+fn depends_on_flutter(pubspec: &str) -> bool {
+    pubspec.lines().any(|line| {
+        let line = line.trim();
+        line.strip_prefix("sdk:")
+            .is_some_and(|value| value.trim().trim_matches(['"', '\'']) == "flutter")
+    })
 }
 
 /// A package one side or both changed: its version in each, joined
@@ -578,12 +611,27 @@ mod tests {
         assert_eq!(Format::of("ios/Podfile.lock"), Some(Format::CocoaPods));
         assert_eq!(Format::of("Cargo.lock"), Some(Format::Cargo));
         assert_eq!(Format::of("package.json"), None);
-        assert_eq!(Format::CocoaPods.command(), "pod install");
+        assert_eq!(Format::CocoaPods.command(""), "pod install");
         assert_eq!(Format::of("backend/uv.lock"), Some(Format::Uv));
         assert_eq!(
             Format::Gradle.manifests(),
             ["build.gradle.kts", "build.gradle"]
         );
+    }
+
+    /// The command offered keeps the locked versions where the tool can:
+    /// a pure Dart package is fetched with `dart`, which needs no Flutter,
+    /// and Poetry and Pipenv, whose command may move every package, say so.
+    #[test]
+    fn commands_keep_locked_versions_or_say_they_do_not() {
+        let flutter = "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n";
+        let dart = "name: tool\ndependencies:\n  args: ^2.4.0\n";
+        assert_eq!(Format::Pub.command(flutter), "flutter pub get");
+        assert_eq!(Format::Pub.command(dart), "dart pub get");
+        assert_eq!(Format::Poetry.command(""), "poetry lock");
+        assert!(Format::Poetry.caveat().unwrap().contains("--no-update"));
+        assert!(Format::Pipenv.caveat().is_some());
+        assert_eq!(Format::Npm.caveat(), None);
     }
 
     /// Each side's upgrades are listed by package, and a package both

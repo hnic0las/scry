@@ -125,6 +125,12 @@ final class MergeModel {
     /// Writes the result. Refuses a file changed on disk since it was
     /// opened, unless `overwrite`.
     @discardableResult
+    /// The file is no longer what was read or last written: a save
+    /// without `overwrite` would be refused.
+    func changedOnDisk() -> Bool {
+        document.changedOnDisk()
+    }
+
     func save(overwrite: Bool = false) -> SaveOutcome {
         do {
             try apply(.save(overwrite: overwrite))

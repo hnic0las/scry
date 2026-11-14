@@ -575,6 +575,16 @@ impl MergeSession {
         Ok(())
     }
 
+    /// Whether the file is no longer what the session read or last wrote,
+    /// so that a save without `overwrite` would be refused: asked before
+    /// writing, so the user is told once.
+    pub fn changed_on_disk(&self) -> bool {
+        let Some(path) = self.file.as_deref() else {
+            return false;
+        };
+        fs::read(path).map_or(true, |bytes| bytes != self.on_disk.as_bytes())
+    }
+
     pub fn conflict_count(&self) -> usize {
         self.conflicts.len()
     }

@@ -170,6 +170,44 @@ struct RootViewModelTests {
         #expect(root.exitStatus == 1)
     }
 
+    /// Under `git mergetool`, a file whose conflicts were all removed by
+    /// hand before Scry opened it can still be written, so git hears it
+    /// is resolved instead of always reading 1.
+    @Test func aMergetoolFileWithNoConflictLeftAnswersZero() async throws {
+        let files = try ConflictFile.mergetool(merged: "let a = 3\n")
+        let root = RootViewModel()
+        await root.open(mergetool: files)
+        let editor = try #require(root.editor)
+        #expect(editor.canMarkResolved)
+
+        editor.markResolved()
+        #expect(root.finished)
+        #expect(root.exitStatus == 0)
+        #expect(try String(contentsOfFile: files.merged, encoding: .utf8) == "let a = 3\n")
+    }
+
+    /// A file of the overview that cannot be opened says why over the
+    /// list: the empty window, which shows the reason otherwise, is not
+    /// on display.
+    @Test func aFileThatFailsToOpenFromTheOverviewSaysWhy() async throws {
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let source = FakeOverview(files: [file("Gone.swift", .unresolved, absolutePath: missing)])
+        let root = RootViewModel()
+        await root.open(overview: source)
+        let overview = try #require(root.overview)
+        #expect(!root.failedOverOverview)
+
+        overview.open("Gone.swift")
+        for _ in 0..<100 where root.openError == nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(root.editor == nil)
+        #expect(root.failedOverOverview)
+
+        root.dismissOpenError()
+        #expect(!root.failedOverOverview)
+    }
+
     /// File > Open works from the empty window and the overview, but never
     /// over a file in the editor, whose choices may not be written, nor
     /// under `git mergetool`, which owns the window's file.

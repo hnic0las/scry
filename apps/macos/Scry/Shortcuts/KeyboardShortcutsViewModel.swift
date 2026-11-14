@@ -47,7 +47,9 @@ final class KeyboardShortcutsViewModel: Identifiable {
 
     var isEmpty: Bool { groups.isEmpty }
 
-    var footer: String { "Every shortcut is also in a menu." }
+    /// Only some shortcuts have a menu item (Open, Undo, Redo, Show Base,
+    /// Switch Layout, Keyboard Shortcuts); the others work in the window.
+    var footer: String { "Shortcuts with a menu item are also in the menu bar; the others work in the window." }
 
     private static func matches(_ shortcut: Shortcut, _ needle: String) -> Bool {
         shortcut.title.lowercased().contains(needle)

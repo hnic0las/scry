@@ -11,6 +11,12 @@ final class RootViewModel {
     private(set) var overview: OverviewViewModel?
     /// Why the last file could not be opened.
     private(set) var openError: String?
+    /// What could not be opened over the overview, shown as an alert
+    /// until dismissed: the empty window, which shows `openError`, is
+    /// not on display then.
+    var failedOverOverview: Bool {
+        overview != nil && editor == nil && opening == nil && openError != nil
+    }
     /// The name of the file being opened, while it is.
     private(set) var opening: String?
     /// Launched by `git mergetool` (through `git-scry resolve --app`): the
@@ -61,6 +67,7 @@ final class RootViewModel {
 
     /// Shows the operation in progress in the repository holding `path`.
     func openRepository(_ path: String) async {
+        guard opening == nil else { return }
         opening = URL(fileURLWithPath: path).lastPathComponent
         defer { opening = nil }
         do {
@@ -82,6 +89,10 @@ final class RootViewModel {
         overview = OverviewViewModel(source: source, snapshot: snapshot) { [weak self] file in
             Task { await self?.open(fromOverview: file) }
         }
+    }
+
+    func dismissOpenError() {
+        openError = nil
     }
 
     /// Opens a file of the overview in the editor, with a way back.
@@ -112,7 +123,11 @@ final class RootViewModel {
         mergetoolEditor = editor
     }
 
+    /// One file or repository at a time: a second open while the first
+    /// one loads is ignored, so the slower one cannot replace the editor
+    /// the user is already using.
     private func open(named path: String, _ load: () async throws -> MergeModel) async {
+        guard opening == nil else { return }
         opening = URL(fileURLWithPath: path).lastPathComponent
         defer { opening = nil }
         do {

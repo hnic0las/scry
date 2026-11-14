@@ -159,6 +159,9 @@ pub struct LockfileReview {
     /// What to run once a side is taken, from the root
     /// ("cd web && npm install").
     pub command: String,
+    /// What to know before running it, when it may not keep the locked
+    /// versions (Poetry 1, Pipenv, Carthage).
+    pub caveat: Option<String>,
     /// Both sides' lines can be kept (`go.sum`).
     pub merges_by_lines: bool,
     /// The packages each side changed since the base.
@@ -582,6 +585,10 @@ impl Overview {
                     )))
                 }
             }
+            // Keeping, deleting and taking a version stage at once, unlike
+            // the kinds below that only write: git keeps these conflicts in
+            // the index (a missing side, a file it left as ours), so the
+            // list would still read the file as unresolved from the folder.
             OverviewCommand::KeepFile { path } => {
                 self.deletion(git, &path)?;
                 git.run(&["add", "--", &path])?;
@@ -834,14 +841,15 @@ impl Overview {
         path: &str,
     ) -> Result<(BinaryVersion, BinaryVersion), OverviewError> {
         let (ours_label, theirs_label) = side_labels(git)?;
+        // The size first: a version too large to preview is never read,
+        // so a 2 GB asset does not pass through memory to say how big it is.
         let version = |version: Version, label: String| -> Result<BinaryVersion, OverviewError> {
-            let bytes = stage(git, path, version)?;
-            let size = bytes.as_ref().map(|bytes| bytes.len() as u64);
-            Ok(BinaryVersion {
-                label,
-                size,
-                bytes: bytes.filter(|bytes| (bytes.len() as u64) <= BINARY_PREVIEW_LIMIT),
-            })
+            let size = stage_size(git, path, version.stage())?;
+            let bytes = match size {
+                Some(size) if size <= BINARY_PREVIEW_LIMIT => stage(git, path, version)?,
+                _ => None,
+            };
+            Ok(BinaryVersion { label, size, bytes })
         };
         Ok((
             version(Version::Ours, ours_label)?,
@@ -897,15 +905,17 @@ impl Overview {
             .unwrap_or(&candidates[0])
             .clone();
         let manifest_conflicted = operation::conflicted_paths(git)?.contains(&manifest);
+        let manifest_text = std::fs::read_to_string(self.root.join(&manifest)).unwrap_or_default();
         let command = match directory {
-            Some(directory) => format!("cd {directory} && {}", format.command()),
-            None => format.command().to_string(),
+            Some(directory) => format!("cd {directory} && {}", format.command(&manifest_text)),
+            None => format.command(&manifest_text).to_string(),
         };
         Ok(LockfileReview {
             tool: format.tool().to_string(),
             manifest,
             manifest_conflicted,
             command,
+            caveat: format.caveat().map(String::from),
             merges_by_lines: format.merges_by_lines(),
             changes: lockfile::changes(
                 format,
@@ -1245,6 +1255,16 @@ fn picks_of(versions: &[Version]) -> Vec<catalog::Pick> {
 
 fn is_package_resolved(path: &str) -> bool {
     path == "Package.resolved" || path.ends_with("/Package.resolved")
+}
+
+/// A staged version's size in bytes; `None` when there is none.
+fn stage_size(git: &dyn Git, path: &str, stage: &str) -> Result<Option<u64>, GitError> {
+    let spec = format!(":{stage}:{path}");
+    let output = git.output(&["cat-file", "-s", &spec])?;
+    if output.status != Some(0) {
+        return Ok(None);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().parse().ok())
 }
 
 fn stage_number(git: &dyn Git, path: &str, stage: &str) -> Result<Option<Vec<u8>>, GitError> {

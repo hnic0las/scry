@@ -86,7 +86,7 @@ final class FakeOverview: OverviewSource, @unchecked Sendable {
 
     var lockfileInfo = LockfileInfo(
         oursLabel: "main", theirsLabel: "feature", tool: "npm", manifest: "web/package.json", manifestConflicted: false,
-        command: "cd web && npm install", mergesByLines: false,
+        command: "cd web && npm install", caveat: nil, mergesByLines: false,
         changes: [PackageChangeInfo(name: "lodash", base: "4.17.20", ours: "4.17.21", theirs: nil, bothChanged: false)]
     )
 

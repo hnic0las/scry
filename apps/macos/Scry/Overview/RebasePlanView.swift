@@ -22,21 +22,37 @@ struct RebasePlanView: View {
             .padding(.horizontal, 12)
             .padding(.top, 10)
             .padding(.bottom, 6)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    if let branch {
-                        BranchTipRow(name: branch)
+            // Lazy, as a long rebase has hundreds of steps; the step git
+            // stopped on is scrolled into view, wherever it is in the list.
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        if let branch {
+                            BranchTipRow(name: branch)
+                        }
+                        ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                            PlanStepRow(row: row, startsLine: index == 0 && branch == nil)
+                        }
+                        PlanBaseRow(base: base)
                     }
-                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                        PlanStepRow(row: row, startsLine: index == 0 && branch == nil)
-                    }
-                    PlanBaseRow(base: base)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 10)
                 }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 10)
+                .onAppear { scrollToCurrent(proxy) }
+                .onChange(of: current) { scrollToCurrent(proxy) }
             }
         }
         .background(Theme.Surfaces.sidebar)
+    }
+
+    /// The step git stopped on.
+    private var current: OverviewViewModel.PlanRow.ID? {
+        rows.first { $0.state == .current }?.id
+    }
+
+    private func scrollToCurrent(_ proxy: ScrollViewProxy) {
+        guard let current else { return }
+        proxy.scrollTo(current, anchor: .center)
     }
 }
 

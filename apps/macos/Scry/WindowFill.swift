@@ -6,6 +6,8 @@ import SwiftUI
 /// one puts it back. Not native full screen (the green button): the window
 /// stays a window, beside the others. macOS's own double-click action
 /// (zoom) sizes a SwiftUI window to its content, which here is little.
+/// Only when the user's setting is to zoom: Minimize and Do Nothing are
+/// left to macOS.
 struct TitleBarDoubleClick: NSViewRepresentable {
     func makeNSView(context: Context) -> MonitorView {
         MonitorView()
@@ -33,6 +35,7 @@ struct TitleBarDoubleClick: NSViewRepresentable {
 
         private func handle(_ event: NSEvent) -> NSEvent? {
             guard let window, event.window === window, event.clickCount == 2,
+                  WindowFill.zooms(UserDefaults.standard),
                   !window.styleMask.contains(.fullScreen),
                   let screen = window.screen,
                   Self.isEmptyTitleBar(window: window, at: event.locationInWindow)
@@ -78,6 +81,17 @@ struct TitleBarDoubleClick: NSViewRepresentable {
 
 /// Where a double-click on the title bar takes the window.
 enum WindowFill {
+    /// Whether System Settings › Desktop & Dock › "Double-click a window's
+    /// title bar to" is Zoom, the default: `AppleActionOnDoubleClick` is
+    /// "Maximize", or unset with the older `AppleMiniaturizeOnDoubleClick`
+    /// not set.
+    static func zooms(_ defaults: UserDefaults) -> Bool {
+        if let action = defaults.string(forKey: "AppleActionOnDoubleClick") {
+            return action == "Maximize"
+        }
+        return !defaults.bool(forKey: "AppleMiniaturizeOnDoubleClick")
+    }
+
     /// The screen's visible frame, or back to the saved frame when the
     /// window already fills it; `saved` is what to keep for next time.
     static func next(current: NSRect, visible: NSRect, saved: NSRect?) -> (frame: NSRect, saved: NSRect?) {

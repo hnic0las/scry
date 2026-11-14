@@ -515,6 +515,12 @@ impl MergeDocument {
             .collect()
     }
 
+    /// Whether a save without `overwrite` would be refused because the
+    /// file changed on disk: the app asks once, before writing.
+    pub fn changed_on_disk(&self) -> bool {
+        self.lock().changed_on_disk()
+    }
+
     pub fn status(&self) -> Status {
         let status = self.lock().status();
         Status {
@@ -853,6 +859,9 @@ pub struct LockfileInfo {
     pub manifest_conflicted: bool,
     /// "cd ios && pod install".
     pub command: String,
+    /// What to know before running it, when it may not keep the locked
+    /// versions.
+    pub caveat: Option<String>,
     /// Both sides' lines can be kept (`go.sum`).
     pub merges_by_lines: bool,
     pub changes: Vec<PackageChangeInfo>,
@@ -1518,6 +1527,7 @@ impl RepositoryOverview {
             manifest: review.manifest,
             manifest_conflicted: review.manifest_conflicted,
             command: review.command,
+            caveat: review.caveat,
             merges_by_lines: review.merges_by_lines,
             changes: review
                 .changes
@@ -1870,7 +1880,8 @@ mod tests {
     /// A file changed on disk after it was opened (resolved in another
     /// editor, an aborted rebase) is not written over without the user's
     /// say: `save` reports it apart, so the app can ask, and `overwrite`
-    /// writes anyway.
+    /// writes anyway. `changed_on_disk` tells it before writing, so the
+    /// app asks once instead of chaining alerts.
     #[test]
     fn save_refuses_a_file_changed_on_disk() {
         let dir = tempfile::tempdir().unwrap();
@@ -1883,7 +1894,9 @@ mod tests {
         let document = MergeDocument::open(path.display().to_string()).unwrap();
         choose(&document, "theirs").unwrap();
 
+        assert!(!document.changed_on_disk());
         std::fs::write(&path, "let a = 42\n").unwrap();
+        assert!(document.changed_on_disk());
         assert!(matches!(
             save(&document, false),
             Err(ScryError::ChangedOnDisk { .. })
@@ -1892,6 +1905,7 @@ mod tests {
 
         save(&document, true).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "let a = 2\n");
+        assert!(!document.changed_on_disk());
     }
 
     /// The app sends conflict indices it got from the core, but a stale

@@ -19,6 +19,19 @@ struct WindowFillTests {
         #expect(back.saved == nil)
     }
 
+    /// The double-click fills the screen only when the user's setting is
+    /// Zoom: Minimize and Do Nothing are macOS's to carry out, as in
+    /// every other app.
+    @Test func followsTheDoubleClickSetting() {
+        let defaults = UserDefaults.isolated
+        defaults.set("Maximize", forKey: "AppleActionOnDoubleClick")
+        #expect(WindowFill.zooms(defaults))
+        defaults.set("Minimize", forKey: "AppleActionOnDoubleClick")
+        #expect(!WindowFill.zooms(defaults))
+        defaults.set("None", forKey: "AppleActionOnDoubleClick")
+        #expect(!WindowFill.zooms(defaults))
+    }
+
     /// A window the user already stretched to fill the screen, with
     /// nothing saved, stays as it is rather than jumping to some size.
     @Test func leavesAWindowFilledByHand() {

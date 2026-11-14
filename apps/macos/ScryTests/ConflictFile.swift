@@ -42,7 +42,9 @@ struct ConflictFile {
 
     /// The four files `git mergetool` writes for a file in git's default
     /// `merge` style, without the base, in a temporary directory.
-    static func mergetool() throws -> MergetoolFiles {
+    static func mergetool(
+        merged: String = "<<<<<<< ours\nlet a = 1\n=======\nlet a = 2\n>>>>>>> theirs\n"
+    ) throws -> MergetoolFiles {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "ScryTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -55,7 +57,7 @@ struct ConflictFile {
             base: try write("Sample_BASE.swift", "let a = 0\n"),
             local: try write("Sample_LOCAL.swift", "let a = 1\n"),
             remote: try write("Sample_REMOTE.swift", "let a = 2\n"),
-            merged: try write("Sample.swift", "<<<<<<< ours\nlet a = 1\n=======\nlet a = 2\n>>>>>>> theirs\n")
+            merged: try write("Sample.swift", merged)
         )
     }
 

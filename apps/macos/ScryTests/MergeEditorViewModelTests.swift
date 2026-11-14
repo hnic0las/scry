@@ -411,6 +411,29 @@ struct MergeEditorViewModelTests {
         #expect(file.contents == "let a = 2\nlet b = 0\nfunc f( {\n")
     }
 
+    /// A result that does not parse, in a file that also changed on disk,
+    /// is confirmed by one alert that says both: an alert opened from
+    /// another alert's button may not appear, and the write would then
+    /// silently not happen.
+    @Test func oneAlertSaysTheResultDoesNotParseAndTheFileChanged() throws {
+        let file = try ConflictFile()
+        let editor = try file.editor()
+        editor.take("theirs")
+        editor.startEditing(1)
+        editor.editBlock?.draft = "func f( {\n"
+        editor.editBlock?.apply()
+        try "resolved elsewhere\n".write(to: file.url, atomically: true, encoding: .utf8)
+
+        editor.markResolved()
+        #expect(editor.confirmingInvalidWrite)
+        #expect(editor.invalidWriteMessage.contains("changed on disk"))
+
+        editor.writeAnyway()
+        #expect(!editor.confirmingOverwrite)
+        #expect(editor.written)
+        #expect(file.contents == "let a = 2\nlet b = 0\nfunc f( {\n")
+    }
+
     /// A file changed on disk after it was opened (resolved in another
     /// editor, an aborted rebase) is not written over silently: Mark as
     /// Resolved asks, and only Overwrite replaces it.

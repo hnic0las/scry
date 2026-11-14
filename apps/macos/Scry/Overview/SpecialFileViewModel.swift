@@ -108,6 +108,9 @@ final class SpecialFileViewModel {
     @ObservationIgnored private let source: OverviewSource
     /// Git is writing or staging the file: the buttons wait for it.
     private(set) var isRunning = false
+    /// The file's versions are being read, off the main actor: a binary
+    /// version can be large, and a project file's review takes a moment.
+    private(set) var isLoading = true
 
     @ObservationIgnored private let changed: (OverviewSnapshot) -> Void
     @ObservationIgnored private let done: () -> Void
@@ -129,7 +132,7 @@ final class SpecialFileViewModel {
         self.changed = changed
         self.done = done
         self.openInEditor = openInEditor
-        load()
+        work = Task { [weak self] in await self?.load() }
     }
 
     var kind: SpecialKind { file.special ?? .binary }
@@ -199,6 +202,21 @@ final class SpecialFileViewModel {
             }
             let lines = lockfile.mergesByLines ? ", or keep both sides' lines" : ""
             return "\(lockfile.tool) writes this file: don't merge it by hand. Take one side\(lines), then run the command below to bring in the other side's changes."
+        }
+    }
+
+    /// What the choice does to git, under the buttons. Keeping, deleting
+    /// or taking a whole version stages at once: git keeps these
+    /// conflicts in its index, and no file in the folder can show them
+    /// settled. The other kinds only write, and are staged from the list.
+    var actionNote: String? {
+        switch kind {
+        case .deletedOnOneSide, .binary, .notMerged:
+            "Your choice is staged at once. Unstage it from the list to choose again."
+        case .projectFile, .stringCatalog, .packageResolved:
+            "The file is written, not staged: stage it from the list."
+        case .lockfile, .unusual:
+            nil
         }
     }
 
@@ -355,6 +373,8 @@ final class SpecialFileViewModel {
 
     /// "cd ios && pod install".
     var command: String { lockfile?.command ?? "" }
+    /// Under the command, when it may not keep the locked versions.
+    var commandCaveat: String? { lockfile?.caveat }
 
     var canMergeLines: Bool { lockfile?.mergesByLines ?? false }
 
@@ -468,32 +488,53 @@ final class SpecialFileViewModel {
 
     // MARK: Private
 
-    private func load() {
-        do {
-            switch kind {
-            case .deletedOnOneSide: deletion = try source.deletion(path: file.path)
-            case .binary, .notMerged: binary = try source.binary(path: file.path)
-            case .unusual: unusual = try source.unusual(path: file.path)
-            case .projectFile: project = try source.project(path: file.path)
-            case .stringCatalog:
-                let catalog = try source.catalog(path: file.path)
-                self.catalog = catalog
-                picks = Array(repeating: nil, count: catalog.conflicts.count)
-            case .packageResolved:
-                let packages = try source.packages(path: file.path)
-                self.packages = packages
-                picks = Array(repeating: nil, count: packages.conflicts.count)
-            case .lockfile: lockfile = try source.lockfile(path: file.path)
-            }
-        } catch {
-            self.error = error.message
+    /// What the core read for the sheet, handed back to the main actor.
+    private enum Loaded: Sendable {
+        case deletion(DeletionInfo)
+        case binary(BinaryInfo)
+        case unusual(UnusualInfo)
+        case project(ProjectInfo)
+        case catalog(CatalogInfo)
+        case packages(PackagesInfo)
+        case lockfile(LockfileInfo)
+    }
+
+    private func load() async {
+        let (source, path, kind) = (source, file.path, kind)
+        let result = await Task.detached { Result { try Self.read(kind, path: path, from: source) } }.value
+        isLoading = false
+        switch result {
+        case .success(.deletion(let info)): deletion = info
+        case .success(.binary(let info)): binary = info
+        case .success(.unusual(let info)): unusual = info
+        case .success(.project(let info)): project = info
+        case .success(.catalog(let info)):
+            catalog = info
+            picks = Array(repeating: nil, count: info.conflicts.count)
+        case .success(.packages(let info)):
+            packages = info
+            picks = Array(repeating: nil, count: info.conflicts.count)
+        case .success(.lockfile(let info)): lockfile = info
+        case .failure(let failure): error = failure.message
+        }
+    }
+
+    nonisolated private static func read(_ kind: SpecialKind, path: String, from source: OverviewSource) throws -> Loaded {
+        switch kind {
+        case .deletedOnOneSide: .deletion(try source.deletion(path: path))
+        case .binary, .notMerged: .binary(try source.binary(path: path))
+        case .unusual: .unusual(try source.unusual(path: path))
+        case .projectFile: .project(try source.project(path: path))
+        case .stringCatalog: .catalog(try source.catalog(path: path))
+        case .packageResolved: .packages(try source.packages(path: path))
+        case .lockfile: .lockfile(try source.lockfile(path: path))
         }
     }
 
     /// Runs the action off the main actor, one at a time; on success the
     /// overview gets the snapshot the core read after it.
     private func run(_ action: OverviewAction, then next: (() -> Void)? = nil) {
-        guard !isRunning else { return }
+        guard !isRunning, !isLoading else { return }
         isRunning = true
         let source = source
         work = Task { [weak self] in
@@ -511,7 +552,7 @@ final class SpecialFileViewModel {
         }
     }
 
-    /// Waits for the action in flight, if any.
+    /// Waits for the reading or the action in flight, if any.
     func idle() async {
         await work?.value
     }

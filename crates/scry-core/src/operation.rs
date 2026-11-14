@@ -193,11 +193,11 @@ pub fn current(git: &dyn Git) -> Result<Option<Operation>, GitError> {
             SideRole::RevertedCommit,
         ),
     ];
-    for (kind, file, role) in others {
-        let Some(theirs_id) = first_line(&git_dir.join(file)) else {
+    for (kind, pseudoref, role) in others {
+        let Some(theirs_id) = resolve(git, pseudoref)? else {
             continue;
         };
-        let branch = current_branch(git_dir);
+        let branch = current_branch(git)?;
         let ours = Side {
             role: SideRole::CurrentBranch,
             name: branch
@@ -272,7 +272,7 @@ fn rebase(git: &dyn Git, git_dir: &Path) -> Result<Option<Operation>, GitError> 
         commit: head,
     };
 
-    let theirs = match first_line(&git_dir.join("REBASE_HEAD")) {
+    let theirs = match resolve(git, "REBASE_HEAD")? {
         Some(id) => {
             let commit = commit(git, &id)?;
             Some(Side {
@@ -293,10 +293,37 @@ fn rebase(git: &dyn Git, git_dir: &Path) -> Result<Option<Operation>, GitError> 
     }))
 }
 
-/// The branch HEAD points to, read from the HEAD file of this working tree.
-fn current_branch(git_dir: &Path) -> Option<String> {
-    let head = first_line(&git_dir.join("HEAD"))?;
-    head.strip_prefix("ref: refs/heads/").map(String::from)
+/// The branch HEAD points to, asked of git: in a reftable repository the
+/// HEAD file names a placeholder, `refs/heads/.invalid`.
+fn current_branch(git: &dyn Git) -> Result<Option<String>, GitError> {
+    let output = git.output(&["symbolic-ref", "--quiet", "HEAD"])?;
+    if output.status != Some(0) {
+        // Detached.
+        return Ok(None);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .strip_prefix("refs/heads/")
+        .map(String::from))
+}
+
+/// The commit a pseudoref such as `MERGE_HEAD` names, or `None` when it
+/// is not set. Asked of git rather than read from `.git`: a reftable
+/// repository keeps `CHERRY_PICK_HEAD`, `REVERT_HEAD` and `REBASE_HEAD`
+/// in its tables, not in files.
+fn resolve(git: &dyn Git, pseudoref: &str) -> Result<Option<String>, GitError> {
+    let output = git.output(&[
+        "rev-parse",
+        "--quiet",
+        "--verify",
+        "--end-of-options",
+        pseudoref,
+    ])?;
+    if output.status != Some(0) {
+        return Ok(None);
+    }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!id.is_empty()).then_some(id))
 }
 
 fn commit(git: &dyn Git, revision: &str) -> Result<Commit, GitError> {

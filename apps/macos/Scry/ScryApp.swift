@@ -27,6 +27,9 @@ struct ScryApp: App {
                 OpenCommands()
                 FileRowCommands()
             }
+            CommandGroup(replacing: .undoRedo) {
+                UndoCommands()
+            }
             CommandGroup(after: .toolbar) {
                 LayoutCommands()
             }
@@ -59,6 +62,12 @@ final class ScryAppDelegate: NSObject, NSApplicationDelegate {
     /// Whether the window lets the app quit now; when it does not, it
     /// asks the user first.
     @MainActor static var shouldQuit: () -> Bool = { true }
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Window ▸ Merge All Windows and the tab bar's + would give the
+        // merge a second window, a second session on the same file.
+        NSWindow.allowsAutomaticWindowTabbing = false
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Started by `git-scry resolve` from a terminal, the app would open
@@ -136,7 +145,45 @@ struct LayoutCommands: View {
     }
 }
 
+/// What Edit ▸ Undo and Redo do in the merge editor that has the focus:
+/// the core's history of choices.
+struct UndoActions {
+    let canUndo: Bool
+    let canRedo: Bool
+    let undo: () -> Void
+    let redo: () -> Void
+}
+
+/// Edit ▸ Undo (⌘Z) and Redo (⇧⌘Z): the merge editor's choices, or else
+/// what AppKit's own items do, sent to the text being typed (a conflict
+/// edited by hand, a commit message, a search field).
+struct UndoCommands: View {
+    @FocusedValue(\.undoActions) private var actions
+
+    var body: some View {
+        Button(Shortcut.undo.title) {
+            if let actions {
+                actions.undo()
+            } else {
+                NSApp.sendAction(Selector(("undo:")), to: nil, from: nil)
+            }
+        }
+        .keyboardShortcut(Shortcut.undo)
+        .disabled(actions.map { !$0.canUndo } ?? false)
+        Button(Shortcut.redo.title) {
+            if let actions {
+                actions.redo()
+            } else {
+                NSApp.sendAction(Selector(("redo:")), to: nil, from: nil)
+            }
+        }
+        .keyboardShortcut(Shortcut.redo)
+        .disabled(actions.map { !$0.canRedo } ?? false)
+    }
+}
+
 extension FocusedValues {
+    @Entry var undoActions: UndoActions?
     @Entry var editorLayoutActions: EditorLayoutActions?
     @Entry var openActions: OpenActions?
     @Entry var shortcutActions: ShortcutActions?
@@ -223,6 +270,17 @@ struct RootView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(viewModel.closeMessage)
+        }
+        .alert(
+            "Scry could not open it",
+            isPresented: Binding(
+                get: { viewModel.failedOverOverview },
+                set: { if !$0 { viewModel.dismissOpenError() } }
+            )
+        ) {
+            Button("OK") { viewModel.dismissOpenError() }
+        } message: {
+            Text(viewModel.openError ?? "")
         }
         .onChange(of: viewModel.finished) { _, finished in
             if finished { dismissWindow(id: ScryApp.window) }
