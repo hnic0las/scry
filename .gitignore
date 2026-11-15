@@ -47,6 +47,8 @@ GEMINI.md
 # Xcode
 xcuserdata/
 DerivedData/
+# Apps exported from the Organizer (notarised releases), never committed
+/apps/macos/builds/
 
 # cargo-mutants reports
 /mutants.out/
