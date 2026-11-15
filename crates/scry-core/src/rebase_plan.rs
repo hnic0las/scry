@@ -326,5 +326,38 @@ mod tests {
         assert_eq!(steps[6].action, Action::Break);
         assert_eq!(steps[7].action, Action::Other);
         assert_eq!(steps[7].subject, "label onto");
+        // A plain fixup names its own commit; only `-C` and `-c` come
+        // before the id.
+        assert_eq!(steps[1].short_id.as_deref(), Some("bbbbbbb"));
+    }
+
+    /// `edit` and `e` stop to amend a commit, and every action is shown
+    /// with git's own word for it.
+    #[test]
+    fn edit_lines_and_action_names() {
+        let steps = steps("", "edit aaaaaaa One\ne bbbbbbb Two\n");
+        assert_eq!(steps[0].action, Action::Edit);
+        assert_eq!(steps[1].action, Action::Edit);
+        assert_eq!(steps[1].short_id.as_deref(), Some("bbbbbbb"));
+        let names: Vec<&str> = [
+            Action::Pick,
+            Action::Reword,
+            Action::Edit,
+            Action::Squash,
+            Action::Fixup,
+            Action::Drop,
+            Action::Exec,
+            Action::Break,
+            Action::Other,
+        ]
+        .into_iter()
+        .map(Action::name)
+        .collect();
+        assert_eq!(
+            names,
+            [
+                "pick", "reword", "edit", "squash", "fixup", "drop", "exec", "break", "other"
+            ]
+        );
     }
 }

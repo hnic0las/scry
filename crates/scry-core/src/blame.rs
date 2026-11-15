@@ -307,6 +307,31 @@ pub fn age(time: i64, now: i64) -> String {
 mod tests {
     use super::*;
 
+    /// The lens reads ages from the clock, in the same words as `age`.
+    #[test]
+    fn ages_are_read_from_the_clock() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert_eq!(age_from_now(now - 3 * 86_400), "3 days ago");
+    }
+
+    /// With git before 2.41, a conflict's side is found in the blamed
+    /// revision by its text: nearest the line it had, nowhere for an empty
+    /// side or a revision shorter than the side.
+    #[test]
+    fn a_side_is_found_by_its_text_nearest_its_line() {
+        let texts: Vec<String> = ["", "a", "b", "x", "a", "b"]
+            .iter()
+            .map(|text| text.to_string())
+            .collect();
+        assert_eq!(find_block(&texts, &["a", "b"], 1), Some(1));
+        assert_eq!(find_block(&texts, &["a", "b"], 5), Some(4));
+        assert_eq!(find_block(&texts, &[], 2), None);
+        assert_eq!(find_block(&texts[..2], &["a", "b", "c"], 1), None);
+    }
+
     /// Ages read like the prototype's lens rows, with the unit growing as the
     /// commit gets older so the text stays short.
     #[test]

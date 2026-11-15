@@ -278,14 +278,7 @@ impl ParsedFile {
     /// first error node of the whole tree; they are the same or nearby.
     pub(crate) fn check_with(&self, replacements: &[(Range<usize>, &str)]) -> ParseCheck {
         let mut tree = self.tree.clone();
-        let mut shift: isize = 0;
-        // Where each replacement lands in the new text.
-        let mut pieces: Vec<(usize, usize, &[u8])> = Vec::new();
-        for (range, replacement) in replacements {
-            let start = (range.start as isize + shift) as usize;
-            pieces.push((start, range.start, replacement.as_bytes()));
-            shift += replacement.len() as isize - range.len() as isize;
-        }
+        let pieces = landings(replacements);
         for (range, replacement) in replacements.iter().rev() {
             let start = self.point(range.start);
             tree.edit(&InputEdit {
@@ -365,8 +358,21 @@ fn parser(language: Language) -> Option<Parser> {
     Some(parser)
 }
 
+/// Where each replacement lands in the new text: its start there, its start
+/// in the old text, and its bytes.
+fn landings<'a>(replacements: &[(Range<usize>, &'a str)]) -> Vec<(usize, usize, &'a [u8])> {
+    let mut shift: isize = 0;
+    let mut pieces = Vec::new();
+    for (range, replacement) in replacements {
+        let start = (range.start as isize + shift) as usize;
+        pieces.push((start, range.start, replacement.as_bytes()));
+        shift += replacement.len() as isize - range.len() as isize;
+    }
+    pieces
+}
+
 /// The row of `offset` in `text` with `replacements` made, `pieces` giving
-/// where each lands (`check_with`).
+/// where each lands (`landings`).
 fn row_in(
     pieces: &[(usize, usize, &[u8])],
     replacements: &[(Range<usize>, &str)],
@@ -532,6 +538,14 @@ mod tests {
             ],
             vec![(far..far + 6, "\"open")],
             vec![(a..a + 9, ""), (print..print + 10, "}\n}\n")],
+            // Several replacements of other lengths that parse: the text
+            // after each one is read shifted by the ones before.
+            vec![
+                (a..a + 9, "let a = 22222"),
+                (print..print + 10, "print(1)"),
+                (far..far + 6, "g(1)"),
+            ],
+            vec![(a..a + 9, ""), (far..far + 6, "g(150, 151)")],
             vec![],
         ];
         for replacements in cases {
@@ -600,6 +614,30 @@ mod tests {
             ("fastlane/Fastfile", Language::Ruby),
             ("Cargo.lock", Language::Toml),
             ("ci.YML", Language::Yaml),
+            ("Package.resolved", Language::Json),
+            ("hash.c", Language::C),
+            ("app.js", Language::JavaScript),
+            ("worker.mjs", Language::JavaScript),
+            ("config.cjs", Language::JavaScript),
+            ("View.jsx", Language::JavaScript),
+            ("api.ts", Language::TypeScript),
+            ("api.mts", Language::TypeScript),
+            ("api.cts", Language::TypeScript),
+            ("index.html", Language::Html),
+            ("index.htm", Language::Html),
+            ("site.css", Language::Css),
+            ("tool.py", Language::Python),
+            ("stubs.pyi", Language::Python),
+            ("Main.kt", Language::Kotlin),
+            ("build.gradle.kts", Language::Kotlin),
+            ("Main.java", Language::Java),
+            ("main.go", Language::Go),
+            ("lib.rb", Language::Ruby),
+            ("Alamofire.podspec", Language::Ruby),
+            ("tool.gemspec", Language::Ruby),
+            ("build.sh", Language::Bash),
+            ("setup.bash", Language::Bash),
+            ("pyproject.toml", Language::Toml),
         ];
         for (path, language) in cases {
             assert_eq!(
@@ -699,6 +737,86 @@ mod tests {
     fn swift_from_the_demo_parses() {
         let text = "func upload(_ item: Item) async throws {\n    try await retry(times: 3, backoff: .exponential) {\n        try await client.send(item, timeout: .seconds(30))\n    }\n}\n";
         assert_eq!(check(Language::Swift, text), ParseCheck::Parses);
+    }
+
+    /// The line `check_with` reports when it stops early is the line of that
+    /// byte in the edited text: compared with counting the lines of the
+    /// edited text itself, at every offset, for replacements that add,
+    /// remove and keep lines.
+    #[test]
+    fn rows_of_the_edited_text_are_counted_across_replacements() {
+        let text = "a\nbb\nccc\ndddd\neeeee\n";
+        let cases: Vec<Vec<(Range<usize>, &str)>> = vec![
+            vec![],
+            vec![(2..4, "x\ny\nz")],
+            vec![(0..2, ""), (5..9, "q")],
+            vec![(2..5, "1\n2\n"), (9..14, ""), (14..20, "end\n")],
+        ];
+        for replacements in cases {
+            let mut edited = String::new();
+            let mut copied = 0;
+            for (range, replacement) in &replacements {
+                edited.push_str(&text[copied..range.start]);
+                edited.push_str(replacement);
+                copied = range.end;
+            }
+            edited.push_str(&text[copied..]);
+            let pieces = landings(&replacements);
+            for offset in 0..=edited.len() {
+                assert_eq!(
+                    row_in(&pieces, &replacements, text, offset),
+                    edited[..offset].matches('\n').count(),
+                    "{replacements:?} at {offset} in {edited:?}"
+                );
+            }
+        }
+    }
+
+    /// `with_changes` names every replaced range in the new file, even
+    /// where tree-sitter sees the same structure (a renamed call), so the
+    /// result pane repaints it; ranges after a replacement of another
+    /// length are shifted by it.
+    #[test]
+    fn changed_ranges_include_every_replacement() {
+        let text = "let a = 1\nfunc b() {\n    g(1)\n}\nfunc c() {\n    g(2)\n}\n";
+        let base = ParsedFile::new(Language::Swift, text.to_string()).unwrap();
+        let a = text.find("let a = 1").unwrap();
+        let g = text.find("g(2)").unwrap();
+        let replacements = [(a..a + 9, "let a = 100000"), (g..g + 4, "h(3)")];
+        let (edited, changed) = base.with_changes(&replacements).unwrap();
+        for (start, replacement) in [(a, "let a = 100000"), (g + 5, "h(3)")] {
+            let range = start..start + replacement.len();
+            assert_eq!(&edited.text()[range.clone()], replacement);
+            assert!(
+                changed
+                    .iter()
+                    .any(|found| found.start <= range.start && range.end <= found.end),
+                "{range:?} not in {changed:?}"
+            );
+        }
+    }
+
+    /// The line reported for a file that does not parse is where the user
+    /// must look: a missing token where it is missing, an error on one line
+    /// at that line, and an unclosed block at its last line, not the empty
+    /// line after the end of the file.
+    #[test]
+    fn errors_are_reported_on_the_line_to_fix() {
+        assert_eq!(
+            check(Language::C, "int a(\n\nint b;\n"),
+            ParseCheck::DoesNotParse { line: 3 }
+        );
+        assert_eq!(
+            check(
+                Language::Java,
+                "class A {\n  void a() {\n    int x = ;\n  }\n}\n"
+            ),
+            ParseCheck::DoesNotParse { line: 3 }
+        );
+        assert_eq!(
+            check(Language::Swift, "func a() {\n    b()\n"),
+            ParseCheck::DoesNotParse { line: 2 }
+        );
     }
 
     /// A missing closing brace is reported, with the line where it is missing.

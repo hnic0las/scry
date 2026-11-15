@@ -85,6 +85,7 @@ impl Repo {
     /// The full message of `commit`, without its last newline.
     fn message(&self, commit: &str) -> String {
         let output = Command::new("git")
+            .envs(Repo::environment(self.root.path()))
             .arg("-C")
             .arg(self.path())
             .args(["show", "--no-patch", "--format=%B", commit])
@@ -99,6 +100,7 @@ impl Repo {
     /// The full id of `commit`.
     fn rev(&self, commit: &str) -> String {
         let output = Command::new("git")
+            .envs(Repo::environment(self.root.path()))
             .arg("-C")
             .arg(self.path())
             .args(["rev-parse", commit])
@@ -155,9 +157,20 @@ fn files_go_from_unresolved_to_staged_then_the_rebase_continues() {
             .iter()
             .all(|file| file.state == State::Unresolved)
     );
+    // What each row offers: an unresolved file opens, nothing else.
+    let actions = |file: &scry_core::overview::FileView| {
+        (file.can_open(), file.can_stage(), file.can_unstage())
+    };
+    assert_eq!(actions(&snapshot.files[1]), (true, false, false));
+    assert!(!snapshot.can_continue());
+    assert!(snapshot.can_skip());
 
     fs::write(repo.path().join("a.txt"), "a both\n").unwrap();
     assert_eq!(state(&mut overview, &git, "a.txt"), State::Resolved);
+    assert_eq!(
+        actions(&file(&mut overview, &git, "a.txt")),
+        (true, true, false)
+    );
     assert_eq!(
         overview
             .apply(&git, OverviewCommand::StageResolved)
@@ -167,6 +180,12 @@ fn files_go_from_unresolved_to_staged_then_the_rebase_continues() {
         }]
     );
     assert_eq!(state(&mut overview, &git, "a.txt"), State::Staged);
+    // A staged file is unstaged before it opens again.
+    assert_eq!(
+        actions(&file(&mut overview, &git, "a.txt")),
+        (false, false, true)
+    );
+    assert!(!overview.refresh(&git).unwrap().can_continue());
 
     assert!(matches!(
         overview.apply(&git, OverviewCommand::Continue { message: None }),
@@ -257,6 +276,7 @@ fn an_interactive_rebase_shows_its_plan_and_what_git_applied() {
         repo.ok(&["add", "."]);
         repo.ok(&["commit", "--quiet", "-m", message]);
         let output = Command::new("git")
+            .envs(Repo::environment(repo.root.path()))
             .arg("-C")
             .arg(repo.path())
             .args(["rev-parse", "HEAD"])
@@ -341,6 +361,24 @@ fn an_interactive_rebase_shows_its_plan_and_what_git_applied() {
     assert_eq!(lines.last().unwrap().text, "notes");
     // Skipping would keep the commit made, so it is not offered.
     assert!(!snapshot.can_skip());
+    // "You" is git's `user.email`: the commit is the user's only when it
+    // names the same address, whatever its case.
+    assert!(!commit.by_you);
+    fs::write(
+        repo.root.path().join("gitconfig"),
+        "[user]\n\temail = someone@example.com\n",
+    )
+    .unwrap();
+    let other = overview.refresh(&git).unwrap();
+    assert!(!other.reword.unwrap().commit.unwrap().by_you);
+    fs::write(
+        repo.root.path().join("gitconfig"),
+        "[user]\n\temail = Test@Example.com\n",
+    )
+    .unwrap();
+    let mine = overview.refresh(&git).unwrap();
+    assert!(mine.reword.unwrap().commit.unwrap().by_you);
+    fs::write(repo.root.path().join("gitconfig"), "").unwrap();
     // Step 1 kept its message through the commit after its conflict.
     assert_eq!(repo.message("HEAD~1"), "change a");
 
@@ -1021,6 +1059,7 @@ fn same_second_commits(repo: &Repo, commits: &[(&str, &str, &str)]) -> Vec<Strin
             .unwrap();
         assert!(committed.status.success());
         let id = Command::new("git")
+            .envs(Repo::environment(repo.root.path()))
             .arg("-C")
             .arg(repo.path())
             .args(["rev-parse", "HEAD"])
@@ -1720,4 +1759,102 @@ fn a_stash_pop_conflict_lists_its_files() {
         )
         .unwrap();
     assert_eq!(state(&mut overview, &git, "a.txt"), State::Staged);
+}
+
+/// A binary version is read for its preview when it is a few megabytes,
+/// as images are; a version too large to preview is never read, only
+/// measured, so a large asset does not pass through memory.
+#[test]
+fn large_binary_versions_are_measured_not_read() {
+    const MB: usize = 1024 * 1024;
+    let repo = stopped_merge(|repo, side| {
+        let fill = side.as_bytes()[0];
+        let mut image = vec![0u8; 2 * MB];
+        image[0] = fill;
+        fs::write(repo.path().join("photo.png"), &image).unwrap();
+        let mut asset = vec![0u8; 9 * MB];
+        asset[0] = fill;
+        fs::write(repo.path().join("asset.bin"), &asset).unwrap();
+        repo.ok(&["add", "."]);
+    });
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    overview.refresh(&git).unwrap();
+
+    let (ours, theirs) = overview.binary(&git, "photo.png").unwrap();
+    assert_eq!(ours.size, Some(2 * MB as u64));
+    assert_eq!(ours.bytes.as_ref().map(|bytes| bytes[0]), Some(b'm'));
+    assert_eq!(theirs.bytes.as_ref().map(|bytes| bytes[0]), Some(b'f'));
+
+    let (ours, theirs) = overview.binary(&git, "asset.bin").unwrap();
+    assert_eq!(ours.size, Some(9 * MB as u64));
+    assert_eq!(theirs.size, Some(9 * MB as u64));
+    assert!(ours.bytes.is_none() && theirs.bytes.is_none());
+}
+
+/// Git's default style writes a project's conflicts without the base; the
+/// review rebuilds them with it, so a file one side removed from a group
+/// is reported as removed, not missed.
+#[test]
+fn a_project_in_the_default_style_is_reviewed_with_its_base() {
+    let repo = stopped_merge(|repo, side| {
+        let children = match side {
+            "base" => "\t\t\t\tA1 /* One.swift */,\n\t\t\t\tA2 /* Two.swift */,\n",
+            "main" => "\t\t\t\tA1 /* One.swift */,\n\t\t\t\tA3 /* Three.swift */,\n",
+            _ => {
+                "\t\t\t\tA1 /* One.swift */,\n\t\t\t\tA2 /* Two.swift */,\n\t\t\t\tA4 /* Four.swift */,\n"
+            }
+        };
+        let project = format!(
+            "\t\tA1 /* One.swift */ = {{isa = PBXFileReference; }};\n\
+             \t\tA2 /* Two.swift */ = {{isa = PBXFileReference; }};\n\
+             \t\tA3 /* Three.swift */ = {{isa = PBXFileReference; }};\n\
+             \t\tA4 /* Four.swift */ = {{isa = PBXFileReference; }};\n\
+             \t\tchildren = (\n{children}\t\t\t);\n"
+        );
+        fs::write(repo.path().join("project.pbxproj"), project).unwrap();
+        repo.ok(&["add", "."]);
+    });
+    let written = fs::read_to_string(repo.path().join("project.pbxproj")).unwrap();
+    assert!(!written.contains("|||||||"), "{written}");
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    overview.refresh(&git).unwrap();
+
+    let review = overview.project(&git, "project.pbxproj").unwrap();
+    assert_eq!(review.conflicts.len(), 1);
+    let conflict = &review.conflicts[0];
+    assert_eq!(conflict.ours_adds, ["Three.swift"]);
+    assert_eq!(conflict.ours_removes, ["Two.swift"]);
+    assert_eq!(conflict.theirs_adds, ["Four.swift"]);
+    assert!(conflict.theirs_removes.is_empty());
+    assert!(review.can_keep_both());
+}
+
+/// A file whose `conflict-marker-size` attribute makes git write longer
+/// markers (it holds lines of `=======` itself) is read with that size:
+/// listed with its conflict, unresolved, not taken for a file without
+/// markers.
+#[test]
+fn the_marker_size_attribute_is_read_for_the_list() {
+    let repo = stopped_merge(|repo, side| {
+        fs::write(
+            repo.path().join(".gitattributes"),
+            "*.md conflict-marker-size=10\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("notes.md"),
+            format!("Title\n=======\n\n{side}\n"),
+        )
+        .unwrap();
+        repo.ok(&["add", "."]);
+    });
+    let written = fs::read_to_string(repo.path().join("notes.md")).unwrap();
+    assert!(written.contains("<<<<<<<<<< "), "{written}");
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    let notes = file(&mut overview, &git, "notes.md");
+    assert_eq!(notes.conflicts, Some(1));
+    assert_eq!(notes.state, State::Unresolved);
 }

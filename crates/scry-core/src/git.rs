@@ -264,6 +264,40 @@ impl std::error::Error for GitError {}
 mod tests {
     use super::*;
 
+    /// Error messages name the git command, so the user can run it again.
+    #[test]
+    fn errors_say_which_git_command_failed() {
+        let failed = GitError::Failed {
+            command: String::from("add a.txt"),
+            stderr: String::from("fatal: oops"),
+        };
+        assert_eq!(failed.to_string(), "git add a.txt failed: fatal: oops");
+        let unexpected = GitError::UnexpectedOutput {
+            command: String::from("rev-list --count"),
+            output: String::from("x"),
+        };
+        assert_eq!(
+            unexpected.to_string(),
+            "unexpected output from git rev-list --count: \"x\""
+        );
+    }
+
+    /// Git for a file runs from that file's folder, so a file in a
+    /// subfolder is read relative to it.
+    #[test]
+    fn git_beside_a_file_runs_from_its_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        let isolated = |git: GitCli| {
+            git.with_env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .with_env("GIT_CONFIG_NOSYSTEM", "1")
+        };
+        let init = isolated(GitCli::new(dir.path().to_path_buf()));
+        init.run(&["init", "--quiet"]).unwrap();
+        let git = isolated(GitCli::beside(&dir.path().join("sub").join("a.txt")));
+        assert_eq!(git.run(&["rev-parse", "--show-prefix"]).unwrap(), "sub/\n");
+    }
+
     /// A relative `GIT_DIR` set by whoever ran Scry is made absolute from
     /// their directory: Scry runs git with `-C` in another folder, where
     /// the relative path would name the wrong repository or none.

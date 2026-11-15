@@ -523,6 +523,33 @@ mod tests {
         session.choose(0, CandidateKind::Neither).unwrap();
         let rows = session.rows(false);
         assert_eq!(kinds(&rows)[2], "Conflict Removed Conflict");
+        // The removal is said once; the other rows of the block are spacers.
+        assert_eq!(kinds(&rows)[3], "Spacer Spacer Conflict");
+        assert_eq!(kinds(&rows)[4], "Spacer Spacer Conflict");
+    }
+
+    /// Each conflict's rows show its own sides, not the first conflict's.
+    #[test]
+    fn each_conflict_shows_its_own_sides() {
+        let text = "<<<<<<< ours\none\n=======\nuno\n>>>>>>> theirs\nmid\n<<<<<<< ours\ntwo\n=======\ndos\n>>>>>>> theirs\n";
+        let session = MergeSession::from_text(text, None).unwrap();
+        let sides: Vec<(String, String)> = session
+            .rows(false)
+            .iter()
+            .filter_map(|row| match row {
+                Row::Code { ours, theirs, .. } if ours.kind == CellKind::Conflict => {
+                    Some((ours.text.clone(), theirs.text.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sides,
+            [
+                (String::from("one"), String::from("uno")),
+                (String::from("two"), String::from("dos"))
+            ]
+        );
     }
 
     /// Tabs become spaces up to the next stop of four columns, and wide

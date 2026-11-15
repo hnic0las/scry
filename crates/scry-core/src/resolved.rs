@@ -388,6 +388,107 @@ mod tests {
         assert!(error.contains("format 2"), "{error}");
     }
 
+    /// Two packages both sides moved are two choices, each answered on its
+    /// own: ours for the first, theirs for the second.
+    #[test]
+    fn each_conflicting_package_takes_its_own_pick() {
+        let base = resolved(
+            "h0",
+            &[
+                pin("alamofire", "5.8.0", "a0"),
+                pin("kingfisher", "7.9.0", "k0"),
+            ],
+        );
+        let ours = resolved(
+            "h0",
+            &[
+                pin("alamofire", "5.8.1", "a1"),
+                pin("kingfisher", "7.9.1", "k1"),
+            ],
+        );
+        let theirs = resolved(
+            "h0",
+            &[
+                pin("alamofire", "5.9.0", "a2"),
+                pin("kingfisher", "7.10.0", "k2"),
+            ],
+        );
+        let merge = merge(&base, &ours, &theirs).unwrap();
+        assert_eq!(merge.conflicts.len(), 2);
+        assert_eq!(
+            merge.resolve(&[Pick::Ours, Pick::Theirs]).unwrap(),
+            resolved(
+                "h0",
+                &[
+                    pin("alamofire", "5.8.1", "a1"),
+                    pin("kingfisher", "7.10.0", "k2")
+                ],
+            )
+        );
+    }
+
+    /// A pin moved by one side only is taken from it, and the app says
+    /// which side: ours when ours moved it, theirs otherwise.
+    #[test]
+    fn an_automatic_pin_says_which_side_moved_it() {
+        let base = resolved(
+            "h0",
+            &[
+                pin("alamofire", "5.8.0", "a0"),
+                pin("kingfisher", "7.9.0", "k0"),
+            ],
+        );
+        let ours = resolved(
+            "h0",
+            &[
+                pin("alamofire", "5.8.1", "a1"),
+                pin("kingfisher", "7.9.0", "k0"),
+            ],
+        );
+        let theirs = resolved(
+            "h0",
+            &[
+                pin("alamofire", "5.8.0", "a0"),
+                pin("kingfisher", "7.10.0", "k1"),
+            ],
+        );
+        let merge = merge(&base, &ours, &theirs).unwrap();
+        let moved: Vec<(&str, bool)> = merge
+            .automatic
+            .iter()
+            .map(|change| (change.identity.as_str(), change.moved_by_ours()))
+            .collect();
+        assert_eq!(moved, [("alamofire", true), ("kingfisher", false)]);
+    }
+
+    /// `originHash` is stale only when both sides changed it differently;
+    /// changed by theirs alone it is taken from theirs, and the same change
+    /// on both sides, or another top-level value changed on both, says
+    /// nothing about it.
+    #[test]
+    fn the_origin_hash_is_stale_only_when_both_sides_changed_it() {
+        let pins = [pin("alamofire", "5.8.0", "a0")];
+        let stale = |base: &str, ours: &str, theirs: &str| {
+            let merge = merge(
+                &resolved(base, &pins),
+                &resolved(ours, &pins),
+                &resolved(theirs, &pins),
+            )
+            .unwrap();
+            (merge.origin_hash_stale, merge.resolve(&[]).unwrap())
+        };
+        assert_eq!(stale("h0", "h1", "h2"), (true, resolved("h1", &pins)));
+        assert_eq!(stale("h0", "h0", "h2"), (false, resolved("h2", &pins)));
+        assert_eq!(stale("h0", "h1", "h1"), (false, resolved("h1", &pins)));
+        assert_eq!(stale("h0", "h1", "h0"), (false, resolved("h1", &pins)));
+
+        let with_extra = |extra: &str| {
+            resolved("h0", &pins).replacen("{\n", &format!("{{\n  \"extra\" : \"{extra}\",\n"), 1)
+        };
+        let merge = merge(&with_extra("0"), &with_extra("1"), &with_extra("2")).unwrap();
+        assert!(!merge.origin_hash_stale);
+    }
+
     /// Older projects keep version 1 of the format, with the pins under
     /// `object` and named by `package`: they merge pin by pin like the
     /// current versions, and the bump is written back.

@@ -405,6 +405,60 @@ mod tests {
         assert!(chosen.truncated);
     }
 
+    /// A preview shows the first lines and says when there are more: a
+    /// side of exactly that many lines is shown whole.
+    #[test]
+    fn a_preview_is_truncated_only_past_its_lines() {
+        let side = |lines: usize| -> String {
+            (0..lines)
+                .map(|line| format!("let a{line} = 1\n"))
+                .collect()
+        };
+        let text = format!(
+            "<<<<<<< a\n{}=======\n{}>>>>>>> b\n",
+            side(PREVIEW_LINES),
+            side(PREVIEW_LINES + 1)
+        );
+        let session = MergeSession::from_text(&text, None).unwrap();
+        let view = session.conflict_view(0, "a", "b");
+        let candidate = |id: &str| {
+            view.candidates
+                .iter()
+                .find(|candidate| candidate.id == id)
+                .unwrap()
+        };
+        assert_eq!(candidate("ours").preview.len(), PREVIEW_LINES);
+        assert!(!candidate("ours").truncated);
+        assert_eq!(candidate("theirs").preview.len(), PREVIEW_LINES);
+        assert!(candidate("theirs").truncated);
+    }
+
+    /// Only the candidate the analysis suggests carries the mark: here
+    /// ours kept the base, so theirs, the one change, is suggested.
+    #[test]
+    fn only_the_suggested_candidate_is_marked() {
+        let text = "<<<<<<< a\nlet a = 0\n||||||| base\nlet a = 0\n=======\nlet a = 2\n>>>>>>> b\n";
+        let session = MergeSession::from_text(text, Some(Language::Swift)).unwrap();
+        let view = session.conflict_view(0, "a", "b");
+        let suggested: Vec<&str> = view
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.suggested)
+            .map(|candidate| candidate.id.as_str())
+            .collect();
+        assert_eq!(suggested, ["theirs"]);
+    }
+
+    /// A file without conflicts left still gets pane headers, named with
+    /// git's terms, instead of reading a conflict that is not there.
+    #[test]
+    fn header_without_conflicts_uses_gits_terms() {
+        let session = MergeSession::from_text("let a = 1\n", Some(Language::Swift)).unwrap();
+        let header = header(Path::new("A.swift"), &session, None);
+        assert_eq!(header.ours.label, "ours");
+        assert_eq!(header.theirs.label, "theirs");
+    }
+
     /// Without an operation in progress, the panes are named after the
     /// markers' labels, with git's own term under them.
     #[test]

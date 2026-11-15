@@ -320,6 +320,40 @@ fn role(capture: &str) -> Option<SyntaxRole> {
 mod tests {
     use super::*;
 
+    /// Capture names map to the theme's roles as Xcode colours them:
+    /// `self` and `true` as keywords, directives and macros as attributes,
+    /// constants, operators and punctuation each with their own role.
+    #[test]
+    fn capture_names_map_to_roles() {
+        let cases = [
+            ("variable.builtin", Some(SyntaxRole::Keyword)),
+            ("constant.builtin", Some(SyntaxRole::Keyword)),
+            ("boolean", Some(SyntaxRole::Keyword)),
+            ("keyword.directive", Some(SyntaxRole::Attribute)),
+            ("function.macro", Some(SyntaxRole::Attribute)),
+            ("type.qualifier", Some(SyntaxRole::Keyword)),
+            ("type", Some(SyntaxRole::Type)),
+            ("function", Some(SyntaxRole::Function)),
+            ("constant", Some(SyntaxRole::Constant)),
+            ("operator", Some(SyntaxRole::Operator)),
+            ("punctuation.bracket", Some(SyntaxRole::Punctuation)),
+            ("spell", None),
+        ];
+        for (capture, expected) in cases {
+            assert_eq!(role(capture), expected, "{capture}");
+        }
+    }
+
+    /// A query pattern's depth counts its parentheses, not those inside
+    /// its string literals (escapes included), so a pattern matching `"("`
+    /// is not taken for a more specific one.
+    #[test]
+    fn pattern_depth_skips_string_literals() {
+        assert_eq!(depth("(call (identifier))"), 2);
+        assert_eq!(depth(r#"("(" @punctuation)"#), 1);
+        assert_eq!(depth(r#"(a "\"((" (b))"#), 2);
+    }
+
     /// Painting a few lines of a parsed file gives the same spans as
     /// painting the whole file, even where the lines cut a comment or a
     /// string that starts before them: a draft is coloured this way.

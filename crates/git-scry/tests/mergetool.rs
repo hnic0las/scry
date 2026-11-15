@@ -273,6 +273,8 @@ fn git_scry_open_outside_a_repository_fails() {
         .arg(folder.path())
         .arg(format!("--app={}", app.display()))
         .env("GIT_CEILING_DIRECTORIES", folder.path().parent().unwrap())
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));

@@ -344,7 +344,9 @@ fn keyword_opener_indent(
 }
 
 /// Python has no closing keyword: the opener is the nearest line above,
-/// less indented than the current line, that starts with one of `openers`.
+/// no deeper than the current line, that starts with one of `openers`. At
+/// the same indentation it is that line's clause (an `else` typed under an
+/// inner `if` belongs to it, as in VS Code).
 fn python_opener_indent(above: &str, current: usize, openers: &[&str]) -> Option<String> {
     for line in above.lines().rev() {
         let trimmed = line.trim();
@@ -352,7 +354,7 @@ fn python_opener_indent(above: &str, current: usize, openers: &[&str]) -> Option
             continue;
         }
         let indentation = leading_whitespace(line);
-        if indentation.len() < current && openers.contains(&first_word(trimmed)) {
+        if indentation.len() <= current && openers.contains(&first_word(trimmed)) {
             return Some(indentation);
         }
     }
@@ -664,6 +666,128 @@ mod tests {
         assert_eq!(
             typed_indent("def a\n  # é…\n  end", 'd', UNIT, Some(Language::Ruby)),
             None
+        );
+    }
+
+    /// A file indented with spaces keeps spaces even with a few tab lines,
+    /// and its unit is the step most lines take, counted only from a line
+    /// to a deeper one: lines at the same depth, or back out, say nothing.
+    /// A jump deeper than any unit (a continuation aligned far right) is
+    /// ignored rather than read past the counts.
+    #[test]
+    fn indent_unit_counts_steps_into_deeper_lines() {
+        let mostly_spaces = "a\n  b\n  c\n\td\n";
+        assert_eq!(indent_unit(mostly_spaces), "  ");
+        let two_spaces_back_and_forth = "a\n  b\n    c\n  d\n    e\n  f\n    g\n";
+        assert_eq!(indent_unit(two_spaces_back_and_forth), "  ");
+        let flat_then_two = "a\nb\nc\nd\n  e\n";
+        assert_eq!(indent_unit(flat_then_two), "  ");
+        let far_jump = "call(a,\n         b)\n";
+        assert_eq!(indent_unit(far_jump), "    ");
+    }
+
+    /// Return on an ordinary line keeps its indentation in every brace
+    /// language: only `case` labels move back, and only Python's `return`
+    /// ends a block (a Swift `return` does not), and a C label such as
+    /// `cleanup:` opens nothing.
+    #[test]
+    fn ordinary_lines_keep_their_indentation() {
+        assert_eq!(
+            enter("func a() {\n    b()", "", Language::Swift),
+            "    b()\n    |"
+        );
+        assert_eq!(
+            enter("void a() {\n        b();", "", Language::Java),
+            "        b();\n        |"
+        );
+        assert_eq!(
+            enter("func a() {\n    return x", "", Language::Swift),
+            "    return x\n    |"
+        );
+        assert_eq!(enter("cleanup:", "", Language::C), "cleanup:\n|");
+    }
+
+    /// Return between parentheses puts the closing one on its own line, as
+    /// for braces and brackets.
+    #[test]
+    fn parentheses_open_blocks_like_braces() {
+        assert_eq!(enter("call(", ")", Language::Swift), "call(\n    |\n");
+    }
+
+    /// A closing brace skips the pairs closed in between, however deep:
+    /// with an inner block opened and closed above, it still finds the
+    /// function's opening line.
+    #[test]
+    fn closing_brackets_skip_closed_pairs() {
+        let before = "func a() {\n    if b {\n        c()\n    }\n        ";
+        assert_eq!(typed_indent(before, '}', UNIT, None).as_deref(), Some(""));
+    }
+
+    /// Python's `elif`, `except` and `finally` move back to their own
+    /// opener as the colon is typed, at whatever depth it is.
+    #[test]
+    fn python_clauses_align_with_their_opener() {
+        let python = Some(Language::Python);
+        let before = "if a:\n    b\n    elif";
+        assert_eq!(typed_indent(before, ':', UNIT, python).as_deref(), Some(""));
+        let before = "def f():\n    try:\n        b\n        except";
+        assert_eq!(
+            typed_indent(before, ':', UNIT, python).as_deref(),
+            Some("    ")
+        );
+        let before = "try:\n    a\nexcept E:\n    b\n    finally";
+        assert_eq!(typed_indent(before, ':', UNIT, python).as_deref(), Some(""));
+    }
+
+    /// A clause typed at the indentation of an inner `if` belongs to that
+    /// `if`, as in VS Code: it stays there instead of jumping to an outer
+    /// one; typed deeper, it moves back to the nearest opener above it.
+    #[test]
+    fn python_else_at_an_inner_ifs_indentation_stays_with_it() {
+        let python = Some(Language::Python);
+        let before = "if a:\n    if b:\n        c\n    else";
+        assert_eq!(
+            typed_indent(before, ':', UNIT, python).as_deref(),
+            Some("    ")
+        );
+        let before = "if a:\n    if b:\n        c\n        else";
+        assert_eq!(
+            typed_indent(before, ':', UNIT, python).as_deref(),
+            Some("    ")
+        );
+        let before = "if a:\n    if b:\n        c\nelse";
+        assert_eq!(typed_indent(before, ':', UNIT, python).as_deref(), Some(""));
+    }
+
+    /// Ruby opens a block for `do |x|`, not for a line that only ends in
+    /// `|` (`a ||` continues an expression).
+    #[test]
+    fn ruby_needs_do_for_a_block_parameter_list() {
+        assert_eq!(enter("ok = a ||", "", Language::Ruby), "ok = a ||\n|");
+    }
+
+    /// An HTML closing tag finds its opening tag at any depth, counting a
+    /// line that opens two and closes one as one still open, a line that
+    /// closes two and opens one as one closed, and ignoring tags whose name
+    /// only starts the same (`<divider>`); a self-closing custom element
+    /// opens nothing.
+    #[test]
+    fn html_closing_tags_count_tags_line_by_line() {
+        let html = Some(Language::Html);
+        let before = "<body>\n    <div>\n        <p>a</p>\n        </div";
+        assert_eq!(
+            typed_indent(before, '>', UNIT, html).as_deref(),
+            Some("    ")
+        );
+        let before = "<div>\n  <div><div>a</div>\n  </div>\n  </div";
+        assert_eq!(typed_indent(before, '>', UNIT, html).as_deref(), Some(""));
+        let before = "<div>\n  <div>\n    <div>\n      <div>a</div></div>\n    </div";
+        assert_eq!(typed_indent(before, '>', UNIT, html).as_deref(), Some("  "));
+        let before = "<div>\n  <divider>\n  </div";
+        assert_eq!(typed_indent(before, '>', UNIT, html).as_deref(), Some(""));
+        assert_eq!(
+            enter("<my-card title=\"a\" />", "", Language::Html),
+            "<my-card title=\"a\" />\n|"
         );
     }
 

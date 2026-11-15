@@ -5,8 +5,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+use std::path::Path;
+
 use scry_core::git::GitCli;
 use scry_core::operation::{self, OperationKind, Progress, SideRole};
+use scry_core::presentation;
+use scry_core::session::MergeSession;
 use tempfile::TempDir;
 
 /// A throwaway repository whose git commands ignore the user's own
@@ -129,6 +133,8 @@ fn rebase() {
     let operation = operation::current(&git).unwrap().unwrap();
     assert_eq!(operation.kind, OperationKind::Rebase);
     assert_eq!(operation.branch.as_deref(), Some("feature"));
+    // The header's line, without the step shown on its own.
+    assert_eq!(operation.headline(), "Rebasing feature onto main");
     assert_eq!(
         operation.progress,
         Some(Progress {
@@ -152,6 +158,21 @@ fn rebase() {
         format!(
             "Rebasing feature onto main · commit 2 of 2: {} feature change",
             theirs.commit.short_id
+        )
+    );
+    // The panes: the commit being rebased is named by its subject alone,
+    // the target with its commit id, each with git's own term.
+    let session = MergeSession::from_text("<<<<<<< a\nx\n=======\ny\n>>>>>>> b\n", None).unwrap();
+    let header = presentation::header(Path::new("file.txt"), &session, Some(&operation));
+    assert_eq!(
+        header.theirs.detail,
+        "git calls this side \u{201c}theirs\u{201d}"
+    );
+    assert_eq!(
+        header.ours.detail,
+        format!(
+            "{} · git calls this side \u{201c}ours\u{201d}",
+            operation.ours.commit.short_id
         )
     );
     assert_eq!(operation::conflicted_paths(&git).unwrap(), ["file.txt"]);
@@ -228,4 +249,28 @@ fn not_a_repository() {
         .with_env("GIT_CONFIG_GLOBAL", "/dev/null")
         .with_env("GIT_CONFIG_NOSYSTEM", "1");
     assert!(operation::current(&git).is_err());
+}
+
+/// Ours, in a rebase, is the target plus every commit already replayed,
+/// counted: the label says how many, so the user knows ours is no longer
+/// main as it was.
+#[test]
+fn the_rebase_target_counts_the_commits_replayed() {
+    let repo = Repo::new();
+    repo.commit("file.txt", "line\n", "base");
+    assert!(repo.git(&["switch", "--quiet", "-c", "feature"]));
+    repo.commit("one.txt", "one\n", "add one");
+    repo.commit("two.txt", "two\n", "add two");
+    repo.commit("file.txt", "feature line\n", "feature change");
+    assert!(repo.git(&["switch", "--quiet", "main"]));
+    repo.commit("file.txt", "main line\n", "main change");
+    assert!(repo.git(&["switch", "--quiet", "feature"]));
+    assert!(!repo.git(&["rebase", "main"]));
+
+    let operation = operation::current(&repo.scry_git()).unwrap().unwrap();
+    assert_eq!(operation.ours.role, SideRole::RebaseTarget { replayed: 2 });
+    assert_eq!(
+        operation.ours.label(),
+        "main + 2 rebased commits · rebase target"
+    );
 }

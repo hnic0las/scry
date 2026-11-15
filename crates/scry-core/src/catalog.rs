@@ -463,13 +463,15 @@ mod tests {
     #[test]
     fn the_merge_is_written_as_xcode_writes_it() {
         // Ignoring case with numbers in order, as `JSONSerialization` sorts.
+        // Both sides change the strings, so their keys are merged (with
+        // ours unchanged, theirs would be taken whole, in its own order).
         let base = r#"{"strings":{"a2":{},"a10":{},"c":{}}}"#;
-        let ours = r#"{"strings":{"a2":{},"a10":{},"c":{}}}"#;
+        let ours = r#"{"strings":{"a2":{},"a10":{},"c":{"x":[]}}}"#;
         let theirs = r#"{"strings":{"a2":{},"a3":{},"a10":{},"B":{},"c":{}}}"#;
         let written = merge(base, ours, theirs).unwrap().resolve(&[]).unwrap();
         assert_eq!(
             written,
-            "{\n  \"strings\" : {\n    \"a2\" : {\n\n    },\n    \"a3\" : {\n\n    },\n    \"a10\" : {\n\n    },\n    \"B\" : {\n\n    },\n    \"c\" : {\n\n    }\n  }\n}\n"
+            "{\n  \"strings\" : {\n    \"a2\" : {\n\n    },\n    \"a3\" : {\n\n    },\n    \"a10\" : {\n\n    },\n    \"B\" : {\n\n    },\n    \"c\" : {\n      \"x\" : [\n\n      ]\n    }\n  }\n}\n"
         );
 
         // Sorted by bytes, as `JSONEncoder` sorts `Package.resolved`'s keys.

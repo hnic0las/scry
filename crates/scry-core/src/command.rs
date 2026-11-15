@@ -95,6 +95,16 @@ impl std::error::Error for CommandError {}
 mod tests {
     use super::*;
 
+    /// A refused command reads as the reason itself, which the CLI and
+    /// the app show as they are.
+    #[test]
+    fn errors_read_as_their_reason() {
+        let choose = CommandError::from(ChooseError::NoSuchConflict(4));
+        assert_eq!(choose.to_string(), "no conflict 4");
+        let save = CommandError::from(SaveError::Unresolved(2));
+        assert_eq!(save.to_string(), "2 conflict(s) left");
+    }
+
     /// Commands and events are the contract another UI or the MCP server
     /// speaks: they must read and write as stable JSON, with candidates
     /// named by the same IDs as the CLI.
