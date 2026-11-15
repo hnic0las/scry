@@ -191,7 +191,36 @@ impl MergeSession {
     /// does not gain one.
     pub fn with_final_breaks(mut self, ours: bool, theirs: bool) -> MergeSession {
         self.final_breaks = Some((ours, theirs));
+        if ours != theirs && self.ends_with_conflict() {
+            self.split_theirs_from_ours();
+        }
         self
+    }
+
+    /// Offers theirs as its own candidate in the last conflict when it has
+    /// the same text as ours: the sides still differ by their final line
+    /// break, which only the side taken keeps, as `git merge-file --theirs`
+    /// does.
+    fn split_theirs_from_ours(&mut self) {
+        let Some(analysis) = self.analyses.last_mut() else {
+            return;
+        };
+        let Some(at) = analysis
+            .candidates
+            .iter()
+            .position(|candidate| candidate.aliases.contains(&CandidateKind::Theirs))
+        else {
+            return;
+        };
+        let ours = &mut analysis.candidates[at];
+        ours.aliases.retain(|kind| *kind != CandidateKind::Theirs);
+        let theirs = Candidate {
+            kind: CandidateKind::Theirs,
+            aliases: Vec::new(),
+            ..ours.clone()
+        };
+        let at = at + 1;
+        analysis.candidates.insert(at, theirs);
     }
 
     /// Whether the file ends with a conflict, where git adds a line break
@@ -1912,6 +1941,39 @@ mod tests {
                 "{before:?}"
             );
         }
+    }
+
+    /// A last conflict whose sides have the same text but not the same final line break
+    /// offers ours and theirs apart, so taking theirs keeps theirs' break as `git merge-file
+    /// --theirs` does; with the same break, theirs stays one card with ours.
+    #[test]
+    fn sides_differing_only_by_the_final_break_are_offered_apart() {
+        let text = "a\n<<<<<<< ours\nx y\n=======\nx y\n>>>>>>> theirs\n";
+        let session = |ours, theirs| {
+            MergeSession::from_text(text, None)
+                .unwrap()
+                .with_final_breaks(ours, theirs)
+        };
+        for (ours, theirs) in [(false, true), (true, false)] {
+            let kinds: Vec<CandidateKind> = session(ours, theirs)
+                .analysis(0)
+                .candidates
+                .iter()
+                .map(|candidate| candidate.kind)
+                .collect();
+            assert_eq!(&kinds[..2], [CandidateKind::Ours, CandidateKind::Theirs]);
+            for (kind, break_kept) in [(CandidateKind::Ours, ours), (CandidateKind::Theirs, theirs)]
+            {
+                let mut session = session(ours, theirs);
+                session.choose(0, kind).unwrap();
+                let expected = if break_kept { "a\nx y\n" } else { "a\nx y" };
+                assert_eq!(session.merged_text().as_deref(), Some(expected), "{kind:?}");
+            }
+        }
+        assert_eq!(
+            session(true, true).analysis(0).candidates[0].aliases,
+            [CandidateKind::Theirs]
+        );
     }
 
     /// The file's own line break is the one most of its lines use; a tie, or a file

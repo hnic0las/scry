@@ -54,6 +54,12 @@ git diff HEAD > /tmp/scry.diff && cargo mutants --in-diff /tmp/scry.diff
 
 The whole workspace takes about an hour (`cargo mutants -j 6`; one file: `-f crates/scry-core/src/conflict.rs`; only the mutants that survived last time: `--iterate`). The FFI layer is left out (`.cargo/mutants.toml`): the Swift tests cover it. The report is in `mutants.out/` (`missed.txt` lists the survivors).
 
+Mutation testing tells whether the tests react, not whether the results are right. For that, `tests/merge_file_oracle.rs` checks Scry against `git merge-file` on generated merges: the same conflicts, and taking ours, theirs or both everywhere gives what `--ours`, `--theirs` and `--union` give. It runs 150 cases with the tests; run more before a release:
+
+```sh
+SCRY_ORACLE_CASES=5000 cargo test -p scry-core --test merge_file_oracle   # about 5 minutes
+```
+
 Coverage shows the code no test runs:
 
 ```sh
