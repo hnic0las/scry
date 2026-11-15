@@ -401,13 +401,16 @@ fn prompt(question: &str) -> Option<String> {
 /// Asks a yes-or-no question; Enter gives `default`.
 fn ask_yes_no(question: &str, default: bool) -> bool {
     let hint = if default { "[Y/n]" } else { "[y/N]" };
-    match prompt(&format!("{question} {hint} ")) {
-        Some(answer) => match answer.trim() {
-            "" => default,
-            "y" | "Y" | "yes" => true,
-            _ => false,
-        },
-        None => false,
+    yes_or_no(prompt(&format!("{question} {hint} ")).as_deref(), default)
+}
+
+/// The meaning of an answer to a yes-or-no question: Enter gives
+/// `default`; anything but a yes, or no answer at all (end of input), is no.
+fn yes_or_no(answer: Option<&str>, default: bool) -> bool {
+    match answer.map(str::trim) {
+        Some("") => default,
+        Some("y" | "Y" | "yes") => true,
+        _ => false,
     }
 }
 
@@ -428,5 +431,48 @@ pub fn files(base: &Path, local: &Path, remote: &Path, merged: &Path) -> Mergeto
         local: local.to_path_buf(),
         remote: remote.to_path_buf(),
         merged: merged.to_path_buf(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Enter takes the question's default, so "Write it?" defaults to yes and "Write it
+    /// anyway?" to no; a closed input never says yes for the user.
+    #[test]
+    fn enter_takes_the_default_and_no_answer_is_no() {
+        for default in [true, false] {
+            assert_eq!(yes_or_no(Some("\n"), default), default);
+            assert!(yes_or_no(Some("y\n"), default));
+            assert!(yes_or_no(Some(" Y \n"), default));
+            assert!(yes_or_no(Some("yes\n"), default));
+            assert!(!yes_or_no(Some("n\n"), default));
+            assert!(!yes_or_no(Some("sure\n"), default));
+            assert!(!yes_or_no(None, default));
+        }
+    }
+
+    /// A candidate reads as its key, its title, and a cross when the file would not parse
+    /// with it: the key is what the user types.
+    #[test]
+    fn a_choice_shows_its_key_title_and_parse_mark() {
+        let candidate = |kind, parse| Candidate {
+            kind,
+            text: String::new(),
+            parse,
+            aliases: Vec::new(),
+        };
+        assert_eq!(
+            choice_label(&candidate(
+                CandidateKind::OursThenTheirs,
+                ParseCheck::DoesNotParse { line: 3 }
+            )),
+            "[3] Both · ours first ✗"
+        );
+        assert_eq!(
+            choice_label(&candidate(CandidateKind::Theirs, ParseCheck::Parses)),
+            "[2] Theirs"
+        );
     }
 }

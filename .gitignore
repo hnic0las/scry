@@ -14,8 +14,28 @@
 .env.*
 !.env.example
 
-# Claude Code local settings
-.claude/settings.local.json
+# AI assistants: instructions, settings and caches stay local
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+AGENTS.md
+.agents/
+GEMINI.md
+.gemini/
+.codex/
+.cursor/
+.cursorrules
+.cursorignore
+.windsurf/
+.windsurfrules
+.github/copilot-instructions.md
+.github/instructions/
+.aider*
+.continue/
+.clinerules
+.cline/
+.roo/
+.roomodes
 
 # Throwaway repositories built by scripts/make-conflicts.sh
 /conflicts/
