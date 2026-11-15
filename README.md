@@ -49,10 +49,10 @@ Before committing a change to the core, also check that its tests would catch a 
 brew install cargo-mutants cargo-llvm-cov
 rustup component add llvm-tools          # for cargo-llvm-cov
 
-git diff HEAD > /tmp/scry.diff && cargo mutants --in-diff /tmp/scry.diff
+git diff HEAD > /tmp/scry.diff && scripts/mutants.sh --in-diff /tmp/scry.diff
 ```
 
-The whole workspace takes about an hour (`cargo mutants -j 6`; one file: `-f crates/scry-core/src/conflict.rs`; only the mutants that survived last time: `--iterate`). The FFI layer is left out (`.cargo/mutants.toml`): the Swift tests cover it. The report is in `mutants.out/` (`missed.txt` lists the survivors).
+Always run it through `scripts/mutants.sh`, which passes its arguments to `cargo mutants`: it closes standard input, and kills any test process over 2 GB (`SCRY_MUTANTS_MAX_MB`), since a mutant can turn a loop into one that fills memory; several at once crashed the Mac once. The whole workspace takes about two hours (`scripts/mutants.sh`; one file: `-f crates/scry-core/src/conflict.rs`; only the mutants that survived last time: `--iterate`; 4 at a time, `SCRY_MUTANTS_JOBS` to change it). The FFI layer is left out (`.cargo/mutants.toml`): the Swift tests cover it. The report is in `mutants.out/` (`missed.txt` lists the survivors).
 
 Mutation testing tells whether the tests react, not whether the results are right. For that, `tests/merge_file_oracle.rs` checks Scry against `git merge-file` on generated merges: the same conflicts, and taking ours, theirs or both everywhere gives what `--ours`, `--theirs` and `--union` give. It runs 150 cases with the tests; run more before a release:
 
@@ -68,6 +68,17 @@ cargo llvm-cov --workspace --summary-only
 ```
 
 For the app, the Scry scheme collects coverage of the app target: in Xcode, Report navigator › the test run › Coverage; from the command line, `xcrun xccov view --report` on the `.xcresult` that `xcodebuild test` writes.
+
+When to run what:
+
+| When | What |
+|---|---|
+| Each commit | `fmt`, `clippy`, `test` (with the oracle's 150 cases); `scripts/mutants.sh --in-diff` on the diff when Rust code changed |
+| Each push to `main` | `scripts/mutants.sh --in-diff` on `git diff origin/main` if a commit skipped it; the app's tests (`xcodebuild … test`) when `apps/macos/` or `crates/scry-ffi/` changed |
+| Each tag | `SCRY_ORACLE_CASES=1000` on the oracle, then the CI on macOS, Linux and Windows, all jobs green |
+| Each release | `scripts/mutants.sh` on the whole workspace, Rust and app coverage, `SCRY_ORACLE_CASES=5000`, fuzzing of the parsers (to set up, with `cargo-fuzz` on nightly), and a manual pass through the app and the CLI's prompts |
+
+A bug fix starts with a test that fails without it. A surviving mutant gets a test, or is accepted with its reason when it is equivalent (the same result) or out of reach (it needs the app, a terminal or another OS).
 
 Try the CLI:
 

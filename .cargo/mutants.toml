@@ -6,3 +6,8 @@ exclude_globs = ["crates/scry-ffi/**"]
 test_workspace = true
 # Without debug info each mutant links faster (cargo-mutants' advice).
 profile = "mutants"
+# The tests take about 20 s alone and longer with several mutants at once:
+# a shorter limit timed out unmutated behaviour and counted the mutant as
+# caught. Run through scripts/mutants.sh, which kills a test that fills
+# memory, so a long limit costs time, not the machine.
+minimum_test_timeout = 120
