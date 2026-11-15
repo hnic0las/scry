@@ -276,7 +276,7 @@
 				);
 				MARKETING_VERSION = 0.1.0;
 				OTHER_LDFLAGS = "$(SRCROOT)/../../target/debug/libscry_ffi.a";
-				PRODUCT_BUNDLE_IDENTIFIER = com.bigsool.scry;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.hnic0las.scry;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Generated/include";
 				SWIFT_VERSION = 6.0;
@@ -288,11 +288,12 @@
 			buildSettings = {
 				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = Scry;
-				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_IDENTITY = "Developer ID Application";
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_HARDENED_RUNTIME = NO;
+				DEVELOPMENT_TEAM = 62MFSJTKDL;
+				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Scry;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
@@ -302,7 +303,8 @@
 				);
 				MARKETING_VERSION = 0.1.0;
 				OTHER_LDFLAGS = "$(SRCROOT)/../../target/release/libscry_ffi.a";
-				PRODUCT_BUNDLE_IDENTIFIER = com.bigsool.scry;
+				OTHER_CODE_SIGN_FLAGS = "--timestamp";
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.hnic0las.scry;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Generated/include";
 				SWIFT_VERSION = 6.0;
@@ -319,7 +321,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.bigsool.scry.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.hnic0las.scry.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Generated/include";
 				SWIFT_VERSION = 6.0;
@@ -337,7 +339,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.bigsool.scry.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.hnic0las.scry.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Generated/include";
 				SWIFT_VERSION = 6.0;

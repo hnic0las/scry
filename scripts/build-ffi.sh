@@ -33,7 +33,18 @@ if [ -n "${TARGET_BUILD_DIR:-}" ] && [ -n "${CONTENTS_FOLDER_PATH:-}" ]; then
   mkdir -p "$helpers"
   if ! cmp -s "target/$profile/git-scry" "$helpers/git-scry"; then
     cp "target/$profile/git-scry" "$helpers/git-scry"
-    codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY:--}" "$helpers/git-scry"
+    # Notarisation checks every executable in the app: in Release, signed
+    # with Developer ID, the helper needs the hardened runtime and a secure
+    # timestamp like the app (an ad hoc signature cannot have a timestamp).
+    identity="${EXPANDED_CODE_SIGN_IDENTITY:--}"
+    flags=(--force --sign "$identity")
+    if [ "${ENABLE_HARDENED_RUNTIME:-NO}" = "YES" ]; then
+      flags+=(--options runtime)
+    fi
+    if [ "$identity" != "-" ]; then
+      flags+=(--timestamp)
+    fi
+    codesign "${flags[@]}" "$helpers/git-scry"
   fi
 fi
 

@@ -41,8 +41,11 @@ jobs:
           -destination 'platform=macOS'
           -derivedDataPath "$RUNNER_TEMP/DerivedData"
       - run: CONFIGURATION=Release scripts/build-ffi.sh
+      # Release signs with Nicolas's Developer ID certificate, which the
+      # runner does not have: the CI signs ad hoc, without a timestamp.
       - run: >
           xcodebuild build
           -project apps/macos/Scry.xcodeproj -scheme Scry -configuration Release
           -destination 'platform=macOS'
           -derivedDataPath "$RUNNER_TEMP/DerivedData"
+          CODE_SIGN_IDENTITY=- OTHER_CODE_SIGN_FLAGS=

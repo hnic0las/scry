@@ -11,8 +11,9 @@
 # - when Scry already is git's merge tool, its command now runs this copy.
 #   Otherwise, Scry › Settings › CLI › Install sets it up.
 #
-# The app is signed ad hoc and built on this Mac, so Gatekeeper lets it
-# open; it is not notarised for other Macs.
+# Release signs with the Developer ID Application certificate, which must
+# be in this Mac's keychain, and the hardened runtime. The app is not
+# notarised: built on this Mac, Gatekeeper lets it open here only.
 set -euo pipefail
 
 workspace="$(cd "$(dirname "$0")/.." && pwd)"
