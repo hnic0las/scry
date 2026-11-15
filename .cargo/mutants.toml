@@ -1,5 +1,8 @@
 # cargo-mutants (README, "Test quality"). The FFI layer is tested from
 # Swift, which cargo-mutants cannot run, so its mutants would all survive.
 exclude_globs = ["crates/scry-ffi/**"]
+# Every package's tests, not only the mutated one's: the core is also
+# tested through the FFI and the CLI.
+test_workspace = true
 # Without debug info each mutant links faster (cargo-mutants' advice).
 profile = "mutants"

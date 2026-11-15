@@ -81,6 +81,7 @@ fn markers_with_base_are_kept_as_they_are() {
 
     let git = GitCli::new(dir.path().to_path_buf());
     let mut session = session::load(&git, &files, "ours", "theirs").unwrap();
+    assert_eq!(session.origin(), Origin::File);
     assert!(!session.rebuilt());
     choose(&mut session, CandidateKind::Ours);
     assert_eq!(
@@ -124,6 +125,42 @@ fn edited_markers_without_base_are_kept() {
         session.merged_text().as_deref(),
         Some("theirs\nend, edited\n")
     );
+}
+
+/// An edit inside one side of a conflict counts as much as one outside it: a `merge`-style
+/// file whose theirs side was fixed by hand, or whose ours side was, is used as it is.
+#[test]
+fn an_edit_inside_one_side_is_kept() {
+    let edited = [
+        (
+            "<<<<<<< HEAD\nours\n=======\ntheirs, fixed\n>>>>>>> other\nend\n",
+            "theirs, fixed\nend\n",
+        ),
+        (
+            "<<<<<<< HEAD\nours, fixed\n=======\ntheirs\n>>>>>>> other\nend\n",
+            "ours, fixed\nend\n",
+        ),
+    ];
+    for (merged, kept) in edited {
+        let dir = tempfile::tempdir().unwrap();
+        let files = files(
+            dir.path(),
+            "base\nend\n",
+            "ours\nend\n",
+            "theirs\nend\n",
+            merged,
+        );
+        let git = GitCli::new(dir.path().to_path_buf());
+        let mut session = session::load(&git, &files, "ours", "theirs").unwrap();
+        assert_eq!(session.origin(), Origin::EditedFile, "{merged}");
+        let candidate = if kept.starts_with("theirs") {
+            CandidateKind::Theirs
+        } else {
+            CandidateKind::Ours
+        };
+        choose(&mut session, candidate);
+        assert_eq!(session.merged_text().as_deref(), Some(kept));
+    }
 }
 
 /// A file the user already resolved by hand (or rerere did) has no
@@ -303,9 +340,33 @@ fn a_conflict_with_a_separator_line_is_rebuilt_with_longer_markers() {
         Some("# Title\n\nSummary\n=======\nours\nLicense\n=======\ntheirs\n")
     );
 
-    // Edited since git wrote it: refused as before, never rebuilt over.
+    // Edited since git wrote it: refused as before, never rebuilt over, whether a line was
+    // added or a line changed beyond the first seven characters, as long as markers.
     fs::write(&files.merged, format!("{written}edited\n")).unwrap();
     assert!(session::load(&git, &files, "ours", "theirs").is_err());
+    let changed = written.replacen("Summary\n", "Summary, edited\n", 1);
+    assert_ne!(changed, written);
+    fs::write(&files.merged, changed).unwrap();
+    assert!(session::load(&git, &files, "ours", "theirs").is_err());
+}
+
+/// The rebuilt markers are longer than the longest marker-like line of any version, not
+/// only than git's: a side holding both `=======` and `========` is still read back.
+#[test]
+fn rebuilt_markers_outgrow_the_longest_separator_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = "# Title\n";
+    let local = "# Title\n\nSummary\n=======\nours\n========\n";
+    let remote = "# Title\n\nLicense\n=======\ntheirs\n";
+    let files = files(dir.path(), base, local, remote, "");
+    let git = GitCli::new(dir.path().to_path_buf());
+    fs::write(&files.merged, git_merge_file(dir.path())).unwrap();
+
+    let mut session = session::load(&git, &files, "ours", "theirs").unwrap();
+    assert!(session.rebuilt());
+    assert_eq!(session.conflict_count(), 1);
+    choose(&mut session, CandidateKind::Ours);
+    assert_eq!(session.merged_text().as_deref(), Some(local));
 }
 
 /// The merged file as `git merge-file` writes it from the `files` helper's versions.
@@ -345,4 +406,64 @@ fn rebuilt_conflicts_start_where_the_file_has_them() {
         .map(|index| session.analysis(index).start_line)
         .collect();
     assert_eq!(lines, [2, 13]);
+}
+
+/// git that answers `merge-file` with a given exit code and real git otherwise.
+struct MergeFileExits {
+    git: GitCli,
+    code: Option<i32>,
+}
+
+impl Git for MergeFileExits {
+    fn output(&self, args: &[&str]) -> Result<scry_core::git::GitOutput, scry_core::git::GitError> {
+        let mut output = self.git.output(args)?;
+        if args.first() == Some(&"merge-file") {
+            output.status = self.code;
+        }
+        Ok(output)
+    }
+
+    fn output_with_input(
+        &self,
+        args: &[&str],
+        input: &[u8],
+    ) -> Result<scry_core::git::GitOutput, scry_core::git::GitError> {
+        self.git.output_with_input(args, input)
+    }
+
+    fn output_with_env(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<scry_core::git::GitOutput, scry_core::git::GitError> {
+        self.git.output_with_env(args, env)
+    }
+}
+
+/// `git merge-file` exits with its number of conflicts, at most 127; any other code
+/// (a binary file, a crash, a signal) is a failure, never a merged text to show.
+#[test]
+fn a_failed_merge_file_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let merged = "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> other\nend\n";
+    let files = files(
+        dir.path(),
+        "base\nend\n",
+        "ours\nend\n",
+        "theirs\nend\n",
+        merged,
+    );
+    let git = |code| MergeFileExits {
+        git: GitCli::new(dir.path().to_path_buf()),
+        code,
+    };
+    assert!(session::load(&git(Some(1)), &files, "ours", "theirs").is_ok());
+    assert!(session::load(&git(Some(127)), &files, "ours", "theirs").is_ok());
+    for code in [Some(128), Some(255), Some(-1), None] {
+        let error = session::load(&git(code), &files, "ours", "theirs").err();
+        assert!(
+            matches!(error, Some(session::LoadError::Git(_))),
+            "{code:?}: {error:?}"
+        );
+    }
 }

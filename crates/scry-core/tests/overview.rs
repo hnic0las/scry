@@ -1592,23 +1592,32 @@ fn a_file_opened_from_the_overview_keeps_no_final_line_break() {
     assert_eq!(session.merged_text().as_deref(), Some("a\nfeature"));
 }
 
-/// A Markdown file whose sides both add an underlined heading opens from the overview:
-/// its versions are read from the index and the conflict rebuilt with longer markers.
+/// A Markdown file whose sides both add an underlined heading with text under it opens
+/// from the overview: the `=======` lines inside the conflict make git's markers
+/// unreadable, so its versions are read from the index and the conflict rebuilt with
+/// longer markers. (Sides ending with the underline would share it outside the conflict,
+/// and the file would open without being rebuilt.)
 #[test]
 fn a_file_with_a_separator_line_opens_from_the_overview() {
     let repo = stopped_merge(|repo, side| {
         let text = match side {
             "base" => String::from("# Title\n"),
-            side => format!("# Title\n\n{side}\n=======\n"),
+            side => format!("# Title\n\n{side}\n=======\n{side} text\n"),
         };
         fs::write(repo.path().join("README.md"), text).unwrap();
         repo.ok(&["add", "--all"]);
     });
     let path = repo.path().join("README.md");
+    let written = fs::read_to_string(&path).unwrap();
+    assert!(scry_core::conflict::parse(&written).is_err(), "{written}");
     let session = scry_core::session::open_file(&repo.cli(), &path).unwrap();
+    assert!(session.rebuilt());
     assert_eq!(session.conflict_count(), 1);
-    assert_eq!(session.conflict(0).ours.text, "main\n");
-    assert_eq!(session.conflict(0).theirs.text, "feature\n");
+    assert_eq!(session.conflict(0).ours.text, "main\n=======\nmain text\n");
+    assert_eq!(
+        session.conflict(0).theirs.text,
+        "feature\n=======\nfeature text\n"
+    );
 }
 
 /// Counts the git runs of a `GitCli`.

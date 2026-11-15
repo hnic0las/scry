@@ -1512,24 +1512,24 @@ pub fn write_atomically(path: &Path, text: &str) -> io::Result<()> {
 
 /// A new file next to `path`, named after it, that did not exist before.
 fn create_temporary(path: &Path) -> io::Result<(File, PathBuf)> {
-    let Some(name) = path.file_name() else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "not a file path",
-        ));
-    };
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or(0);
-    for attempt in 0..100 {
-        let mut temporary_name = OsString::from(".");
-        temporary_name.push(name);
-        temporary_name.push(format!(
-            ".scry-{}-{stamp}-{attempt}.tmp",
-            std::process::id()
+    create_temporary_stamped(path, stamp)
+}
+
+/// `create_temporary` with the time stamp its names carry, so that a test
+/// can take a name before it.
+fn create_temporary_stamped(path: &Path, stamp: u128) -> io::Result<(File, PathBuf)> {
+    if path.file_name().is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a file path",
         ));
-        let temporary = path.with_file_name(temporary_name);
+    }
+    for attempt in 0..100 {
+        let temporary = temporary_name(path, stamp, attempt);
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1544,6 +1544,17 @@ fn create_temporary(path: &Path) -> io::Result<(File, PathBuf)> {
         io::ErrorKind::AlreadyExists,
         "no free temporary name",
     ))
+}
+
+/// The hidden file next to `path` that attempt `attempt` writes to.
+fn temporary_name(path: &Path, stamp: u128, attempt: usize) -> PathBuf {
+    let mut name = OsString::from(".");
+    name.push(path.file_name().unwrap_or_default());
+    name.push(format!(
+        ".scry-{}-{stamp}-{attempt}.tmp",
+        std::process::id()
+    ));
+    path.with_file_name(name)
 }
 
 /// Whether the file has hard links besides this name.
@@ -1821,6 +1832,54 @@ mod tests {
         assert!(plain.highlight_draft(0, "func a() {").is_empty());
     }
 
+    /// A draft for a later conflict is painted where it will land, earlier conflicts
+    /// chosen with another length moving it: its spans are those the result pane shows
+    /// once it is applied, whether or not it ends with a line break. An empty draft, or
+    /// one for a conflict that does not exist, has nothing to paint.
+    #[test]
+    fn draft_spans_match_the_applied_edit() {
+        let text = "let a = 1\n\
+            <<<<<<< ours\nlet b = 2\nlet c = 3\n||||||| base\nlet b = 0\n=======\nlet b = \"x\"\n>>>>>>> theirs\n\
+            func f() {\n}\n\
+            <<<<<<< ours\nlet d = 4\n||||||| base\nlet d = 0\n=======\nlet d = 5\n>>>>>>> theirs\n\
+            let z = \"end\"\n";
+        let session = || {
+            let mut session = MergeSession::from_text(text, Some(Language::Swift)).unwrap();
+            // One line instead of ours' two: the second conflict moves up.
+            session.choose(0, CandidateKind::Theirs).unwrap();
+            session
+        };
+        for draft in ["let s = \"q\" // note", "let s = 1\nfunc g() {}\n"] {
+            let spans = session().highlight_draft(1, draft);
+            let mut applied = session();
+            let mut edit = draft.to_string();
+            if !edit.ends_with('\n') {
+                edit.push('\n');
+            }
+            applied
+                .apply(Command::Edit {
+                    conflict: 1,
+                    text: edit,
+                })
+                .unwrap();
+            // The second conflict starts on row 4, after `let a`, `let b`, `func f` and `}`.
+            let rows = draft.lines().count();
+            assert_eq!(spans, applied.result_spans()[4..4 + rows], "{draft:?}");
+        }
+        assert!(session().highlight_draft(1, "").is_empty());
+        assert!(session().highlight_draft(2, "x").is_empty());
+    }
+
+    /// The status counts the conflicts resolved so far out of all of them.
+    #[test]
+    fn status_counts_resolved_conflicts() {
+        let text = "<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\nc\n<<<<<<< ours\nd\n=======\ne\n>>>>>>> theirs\n";
+        let mut session = MergeSession::from_text(text, None).unwrap();
+        assert_eq!((session.status().resolved, session.status().total), (0, 2));
+        session.choose(1, CandidateKind::Theirs).unwrap();
+        assert_eq!((session.status().resolved, session.status().total), (1, 2));
+    }
+
     /// Return keeps the file's own indent unit: the demo indents by four
     /// spaces, so a new line after an opening brace goes four deeper.
     #[test]
@@ -1829,6 +1888,105 @@ mod tests {
         assert_eq!(
             session.newline(0, "func stop() {", "}").text,
             "func stop() {\n    \n"
+        );
+    }
+
+    /// Typing in a later conflict indents for the file as it will be before it: earlier
+    /// conflicts as chosen, so a block one of them opens counts, and only what comes
+    /// before this conflict.
+    #[test]
+    fn indent_in_a_later_conflict_sees_the_earlier_ones() {
+        let text = "func f() {\n\
+            <<<<<<< ours\n    if a {\n=======\n    if b {\n>>>>>>> theirs\n\
+            \x20       mid()\n\
+            <<<<<<< ours\n        c()\n=======\n        d()\n>>>>>>> theirs\n\
+            \x20   }\n}\n";
+        let mut session = MergeSession::from_text(text, Some(Language::Swift)).unwrap();
+        session.choose(0, CandidateKind::Theirs).unwrap();
+        // The brace closes the `if` the first conflict's choice opened, wherever the
+        // cursor's line stood.
+        for before in ["        c()\n        ", "        c()\n            "] {
+            assert_eq!(
+                session.typed_indent(1, before, '}').as_deref(),
+                Some("    "),
+                "{before:?}"
+            );
+        }
+    }
+
+    /// The file's own line break is the one most of its lines use; a tie, or a file
+    /// without any, takes `\n`.
+    #[test]
+    fn the_line_break_is_the_most_used_one() {
+        assert_eq!(line_break("a\r\nb\r\nc\n"), "\r\n");
+        assert_eq!(line_break("a\r\nb\n"), "\n");
+        assert_eq!(line_break("a\nb\n"), "\n");
+        assert_eq!(line_break("a"), "\n");
+    }
+
+    /// A file that ends with common text keeps its final line break whatever the sides' last
+    /// lines were: those only decide when a conflict ends the file.
+    #[test]
+    fn the_final_break_follows_the_sides_only_after_a_last_conflict() {
+        let text = "<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\ntail\n";
+        let mut session = MergeSession::from_text(text, None)
+            .unwrap()
+            .with_final_breaks(false, false);
+        assert!(!session.ends_with_conflict());
+        session.choose(0, CandidateKind::Theirs).unwrap();
+        assert_eq!(session.merged_text().as_deref(), Some("b\ntail\n"));
+    }
+
+    /// Checks need the file to parse both with every conflict as ours and with every
+    /// conflict as theirs: theirs not parsing turns them off, as ours not parsing does.
+    #[test]
+    fn checks_are_off_when_one_side_does_not_parse() {
+        let theirs_broken =
+            "func a() {\n<<<<<<< ours\n    x()\n=======\n    y(\n>>>>>>> theirs\n}\n";
+        let ours_broken = "func a() {\n<<<<<<< ours\n    x(\n=======\n    y()\n>>>>>>> theirs\n}\n";
+        for text in [theirs_broken, ours_broken] {
+            let session = MergeSession::from_text(text, Some(Language::Swift)).unwrap();
+            assert!(session.status().checks_off, "{text}");
+        }
+        let both_parse = "func a() {\n<<<<<<< ours\n    x()\n=======\n    y()\n>>>>>>> theirs\n}\n";
+        let session = MergeSession::from_text(both_parse, Some(Language::Swift)).unwrap();
+        assert!(!session.status().checks_off);
+    }
+
+    /// The closed variants of "both" are offered for any conflict, not only the first: the
+    /// lines after the second conflict close it the same way.
+    #[test]
+    fn closed_both_is_offered_for_a_later_conflict() {
+        let text = format!(
+            "let a = 1\n<<<<<<< ours\nlet x = 1\n||||||| base\nlet x = 0\n=======\nlet x = 2\n>>>>>>> theirs\n{SWIFT}"
+        );
+        let session = MergeSession::from_text(&text, Some(Language::Swift)).unwrap();
+        assert!(
+            session
+                .analysis(1)
+                .candidates
+                .iter()
+                .any(|c| c.kind == CandidateKind::OursThenTheirsClosed)
+        );
+    }
+
+    /// Errors read as sentences that name what went wrong: the CLI and the app show them
+    /// as they are.
+    #[test]
+    fn errors_say_what_went_wrong() {
+        assert_eq!(ChooseError::NoSuchConflict(3).to_string(), "no conflict 3");
+        assert_eq!(
+            ChooseError::NotOffered {
+                conflict: String::from("ab12"),
+                candidate: "ours-then-theirs-closed",
+            }
+            .to_string(),
+            "conflict ab12 has no candidate \"ours-then-theirs-closed\""
+        );
+        assert_eq!(SaveError::Unresolved(2).to_string(), "2 conflict(s) left");
+        assert_eq!(
+            SaveError::ChangedOnDisk(PathBuf::from("a.txt")).to_string(),
+            "a.txt changed on disk since Scry read it"
         );
     }
 
@@ -1988,6 +2146,56 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
     }
 
+    /// A file with a single name is replaced by a new one renamed over it, not rewritten in
+    /// place: a crash or a full disk mid-write then leaves the old file whole. No temporary
+    /// file is left behind.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_replaces_a_single_named_file() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        fs::write(&path, "old\n").unwrap();
+        let before = fs::metadata(&path).unwrap().ino();
+
+        write_atomically(&path, "new\n").unwrap();
+
+        assert_ne!(fs::metadata(&path).unwrap().ino(), before);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// A temporary name already taken (another Scry, a file left by a crash) is skipped and
+    /// left as it is; another error, such as a missing folder, is reported at once rather
+    /// than retried.
+    #[test]
+    fn a_taken_temporary_name_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        let taken = temporary_name(&path, 7, 0);
+        fs::write(&taken, "someone else's\n").unwrap();
+
+        let (_, temporary) = create_temporary_stamped(&path, 7).unwrap();
+
+        assert_eq!(temporary, temporary_name(&path, 7, 1));
+        assert_eq!(fs::read_to_string(&taken).unwrap(), "someone else's\n");
+        let missing = dir.path().join("missing").join("a.txt");
+        let error = create_temporary_stamped(&missing, 7).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// A file that cannot be read back before saving (here a folder in its place) is an
+    /// error to report, not a change on disk the user could overwrite.
+    #[test]
+    fn a_file_that_cannot_be_read_back_is_not_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = MergeSession::from_text(SWIFT, None)
+            .unwrap()
+            .with_file(dir.path().to_path_buf());
+        session.choose(0, CandidateKind::Ours).unwrap();
+        assert!(matches!(session.save(false), Err(SaveError::Io(..))));
+    }
+
     /// A conflicted file reached through a symbolic link (a dotfiles
     /// repository, a shared config) is written where the link points, and
     /// the link stays a link.
@@ -2061,8 +2269,9 @@ mod tests {
     }
 
     /// The result pane is repainted only where a choice changes it; after any sequence of
-    /// choices, undos and hand edits, its spans must be what painting the whole result
-    /// gives, including lines after a conflict whose text opens a string.
+    /// choices, undos and hand edits, the part repainted must succeed and its spans must be
+    /// what painting the whole result gives, including lines after a conflict whose text
+    /// opens a string.
     #[test]
     fn the_result_repainted_in_part_matches_a_full_paint() {
         let text = "let a = 1\n\
@@ -2070,14 +2279,6 @@ mod tests {
             func f() {\n    print(a)\n}\n\
             <<<<<<< ours\nlet d = 4\n||||||| base\nlet d = 0\n=======\nlet d = 5\nlet e = 6\nlet f = 7\n>>>>>>> theirs\n\
             let z = \"end\"\n";
-        let mut session = MergeSession::from_text(text, Some(Language::Swift)).unwrap();
-        let full = |session: &MergeSession| {
-            let texts: Vec<&str> = (0..session.conflict_count())
-                .map(|index| session.chosen_text(index).unwrap_or(""))
-                .collect();
-            session.highlight_variant(&texts)
-        };
-        assert_eq!(session.result_spans(), full(&session));
         let steps = [
             Command::Choose {
                 conflict: 1,
@@ -2105,8 +2306,68 @@ mod tests {
                 candidate: CandidateKind::OursThenTheirs,
             },
         ];
+        assert_repaints_in_part(text, &steps);
+    }
+
+    /// Applying the suggestions changes several conflicts in one step: each later one is
+    /// repainted where the earlier ones, now longer or shorter, moved it.
+    #[test]
+    fn the_result_repainted_after_several_changes_matches_a_full_paint() {
+        let text = "let a = 1\n\
+            <<<<<<< ours\nlet b = 0\n||||||| base\nlet b = 0\n=======\nlet b = 1\nlet c = 2\nlet d = 3\n>>>>>>> theirs\n\
+            func f() {\n}\n\
+            <<<<<<< ours\nlet e = 0\n||||||| base\nlet e = 0\n=======\nlet e = \"x\"\n>>>>>>> theirs\n\
+            let z = 9\n\
+            <<<<<<< ours\nlet g = 0\n||||||| base\nlet g = 0\n=======\nlet g = 1\nlet h = 2\n>>>>>>> theirs\n\
+            let y = \"end\"\n";
+        let steps = [
+            Command::ApplySuggestions,
+            Command::Undo,
+            Command::Redo,
+            Command::Choose {
+                conflict: 0,
+                candidate: CandidateKind::Ours,
+            },
+            Command::Undo,
+        ];
+        assert_repaints_in_part(text, &steps);
+    }
+
+    /// Runs `steps` on a Swift session of `text`, checking after each that the result pane
+    /// repainted in part succeeds and matches a full paint.
+    fn assert_repaints_in_part(text: &str, steps: &[Command]) {
+        let mut session = MergeSession::from_text(text, Some(Language::Swift)).unwrap();
+        let full = |session: &MergeSession| {
+            let texts: Vec<&str> = (0..session.conflict_count())
+                .map(|index| session.chosen_text(index).unwrap_or(""))
+                .collect();
+            session.highlight_variant(&texts)
+        };
+        assert_eq!(session.result_spans(), full(&session));
         for step in steps {
+            // The paint before the step, to repaint from directly: through
+            // `result_spans` a failed repaint falls back to a full paint
+            // unseen, and the pane would be repainted whole on every choice.
+            let last = {
+                let paint = session.result_paint.lock().unwrap();
+                let last = paint.as_ref().unwrap();
+                ResultPaint {
+                    texts: last.texts.clone(),
+                    parsed: last.parsed.clone(),
+                    spans: last.spans.clone(),
+                }
+            };
             session.apply(step.clone()).unwrap();
+            let texts: Vec<&str> = (0..session.conflict_count())
+                .map(|index| session.chosen_text(index).unwrap_or(""))
+                .collect();
+            let highlighter = session.highlighter.as_ref().unwrap();
+            let repainted = session.repaint(highlighter, &last, &texts);
+            assert_eq!(
+                repainted.map(|paint| paint.spans),
+                Some(full(&session)),
+                "repainted in part after {step:?}"
+            );
             assert_eq!(session.result_spans(), full(&session), "after {step:?}");
         }
     }
