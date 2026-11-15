@@ -122,15 +122,15 @@ final class MergeModel {
         case failed
     }
 
-    /// Writes the result. Refuses a file changed on disk since it was
-    /// opened, unless `overwrite`.
-    @discardableResult
     /// The file is no longer what was read or last written: a save
     /// without `overwrite` would be refused.
     func changedOnDisk() -> Bool {
         document.changedOnDisk()
     }
 
+    /// Writes the result. Refuses a file changed on disk since it was
+    /// opened, unless `overwrite`.
+    @discardableResult
     func save(overwrite: Bool = false) -> SaveOutcome {
         do {
             try apply(.save(overwrite: overwrite))
@@ -232,13 +232,15 @@ final class MergeModel {
     }
 
     /// Reads the focused conflict with its candidates checked, once: the
-    /// core keeps the check.
+    /// core keeps the check. The rows are built again only when the check
+    /// shows the choice does not parse, the one fact of it they show.
     private func checkCurrent() {
         guard conflicts.indices.contains(current), !conflicts[current].checked,
               let checked = document.conflict(index: UInt32(current))
         else { return }
+        let wasInvalid = conflicts[current].chosen?.doesNotParse
         conflicts[current] = checked
-        snapshot += 1
+        if checked.chosen?.doesNotParse != wasInvalid { snapshot += 1 }
     }
 }
 

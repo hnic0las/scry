@@ -26,7 +26,8 @@ struct MergeEditorViewModelTests {
     /// Only the focused conflict's candidates are checked by parsing, so a
     /// file with thousands of conflicts opens at once; moving the focus
     /// checks the next one, and moves the focus mark between the two lens
-    /// rows without building the rows again.
+    /// rows without building the rows again, even on a first visit: a large
+    /// file has tens of thousands of rows.
     @Test func checksTheFocusedConflictOnly() throws {
         let model = try MergeModel(path: ConflictFile().url.path)
         let editor = MergeEditorViewModel(model: model, defaults: .isolated)
@@ -34,8 +35,10 @@ struct MergeEditorViewModelTests {
         #expect(model.conflicts.map(\.checked) == [true, false])
         #expect(model.conflicts[0].candidates.allSatisfy { $0.parse == .parses })
         let rows = editor.rows.count
+        let snapshot = model.snapshot
         editor.next()
         #expect(model.conflicts.map(\.checked) == [true, true])
+        #expect(model.snapshot == snapshot)
         #expect(editor.lensRows.map(\.focused) == [false, true])
         editor.previous()
         #expect(editor.lensRows.map(\.focused) == [true, false])

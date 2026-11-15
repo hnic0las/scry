@@ -129,9 +129,10 @@ impl MergeSession {
 
     /// Conflict `index` as far as it is checked (`analysis_so_far`): cheap
     /// for a list of every conflict, where the focused one is asked for
-    /// with `conflict_view`.
+    /// with `conflict_view`. Errors already located keep their line.
     pub fn conflict_view_so_far(&self, index: usize, ours: &str, theirs: &str) -> ConflictView {
-        self.view(self.analysis_so_far(index), None, index, ours, theirs)
+        let checks = self.located_so_far(index);
+        self.view(self.analysis_so_far(index), checks, index, ours, theirs)
     }
 
     /// `checks`, when given, replace the candidates' own (quick) checks.
@@ -496,6 +497,30 @@ mod tests {
         session.edit(0, both).unwrap();
         let view = session.conflict_view(0, "ours", "theirs");
         assert_eq!(view.chosen.unwrap().parse, expected);
+    }
+
+    /// Once a conflict's errors are located, the list of every conflict shows
+    /// them at their line too: the app reloads that list after each choice,
+    /// and the inspector must not go back to where the quick check gave up.
+    #[test]
+    fn the_list_keeps_errors_located_once() {
+        let entry = |index: usize| format!("  \"k{index}\" : {{\n    \"v\" : {index}\n  }},\n");
+        let before: String = (0..3).map(entry).collect();
+        let after: String = (4..100).map(entry).collect();
+        let conflict = "<<<<<<< ours\n  \"k3\" : 1\n=======\n  \"k3\" : 2\n>>>>>>> theirs\n";
+        let text = format!("{{\n{before}{conflict}  ,\n{after}  \"end\" : 0\n}}\n");
+        let both = "  \"k3\" : 1\n  \"k3\" : 2\n";
+        let expected = crate::syntax::check(Language::Json, &text.replace(conflict, both));
+
+        let session = MergeSession::from_text(&text, Some(Language::Json)).unwrap();
+        session.conflict_view(0, "ours", "theirs");
+        let view = session.conflict_view_so_far(0, "ours", "theirs");
+        let both_view = view
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == "ours-then-theirs")
+            .unwrap();
+        assert_eq!(both_view.parse, expected);
     }
 
     /// Without an operation in progress, the panes are named after the

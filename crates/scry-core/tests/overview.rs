@@ -1761,6 +1761,70 @@ fn a_stash_pop_conflict_lists_its_files() {
     assert_eq!(state(&mut overview, &git, "a.txt"), State::Staged);
 }
 
+/// During an operation, a file resolved by keeping `HEAD`'s version is
+/// staged with nothing left to commit for it, and is still listed as
+/// staged until the step ends: the user sees what they resolved.
+#[test]
+fn a_file_resolved_as_head_stays_listed_during_the_step() {
+    let repo = Repo::stopped_rebase();
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    overview.refresh(&git).unwrap();
+
+    let head = std::process::Command::new("git")
+        .current_dir(repo.path())
+        .args(["show", "HEAD:a.txt"])
+        .envs(Repo::environment(repo.root.path()))
+        .output()
+        .unwrap()
+        .stdout;
+    fs::write(repo.path().join("a.txt"), head).unwrap();
+    overview
+        .apply(
+            &git,
+            OverviewCommand::Stage {
+                paths: vec![String::from("a.txt")],
+            },
+        )
+        .unwrap();
+    assert_eq!(state(&mut overview, &git, "a.txt"), State::Staged);
+}
+
+/// With no operation to end it, a file staged after a `git stash pop`
+/// leaves the list once it is committed: the overview does not keep
+/// showing finished conflicts, nor mix them with a later stash's.
+#[test]
+fn a_stash_pop_file_leaves_the_list_once_committed() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("gitconfig"), "").unwrap();
+    fs::create_dir_all(root.path().join("repo/Sources")).unwrap();
+    let repo = Repo { root };
+    repo.ok(&["init", "--quiet", "--initial-branch=main"]);
+    repo.commit("a\n", "let b = 0\n", "base");
+    fs::write(repo.path().join("a.txt"), "a stashed\n").unwrap();
+    repo.ok(&["stash", "--quiet"]);
+    repo.commit("a main\n", "let b = 0\n", "main change");
+    assert!(!repo.git(&["stash", "pop"]));
+    let git = repo.cli();
+    let mut overview = Overview::new(repo.path());
+    assert_eq!(overview.refresh(&git).unwrap().files.len(), 1);
+
+    fs::write(repo.path().join("a.txt"), "a main and stashed\n").unwrap();
+    overview
+        .apply(
+            &git,
+            OverviewCommand::Stage {
+                paths: vec![String::from("a.txt")],
+            },
+        )
+        .unwrap();
+    assert_eq!(state(&mut overview, &git, "a.txt"), State::Staged);
+
+    repo.ok(&["commit", "--quiet", "-m", "stash resolved"]);
+    let snapshot = overview.refresh(&git).unwrap();
+    assert!(snapshot.files.is_empty(), "{:?}", snapshot.files);
+}
+
 /// A binary version is read for its preview when it is a few megabytes,
 /// as images are; a version too large to preview is never read, only
 /// measured, so a large asset does not pass through memory.

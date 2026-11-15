@@ -58,8 +58,9 @@ fn highlight_shows_colours_or_spans() {
 }
 
 /// Piped into a reader that stops early (`git scry highlight … | head -1`), git-scry
-/// stops quietly with 0 like other command-line tools, instead of printing a panic
-/// about a broken pipe.
+/// stops quietly like other command-line tools, instead of printing a panic about a
+/// broken pipe, and with 141 as a tool killed by `SIGPIPE`: not a success, since it did
+/// not finish.
 #[test]
 fn a_closed_pipe_stops_quietly() {
     let dir = tempfile::tempdir().unwrap();
@@ -81,8 +82,40 @@ fn a_closed_pipe_stops_quietly() {
         .unwrap();
     drop(child.stdout.take());
     let output = child.wait_with_output().unwrap();
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(141));
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+/// With its error output closed (`git mergetool 2>&1 | head` once `head` is gone), a
+/// `resolve` that fails still exits with a failure: git trusts the merge tool's exit
+/// code, and a success would stage a file that is still conflicted.
+#[test]
+fn a_failure_with_its_error_output_closed_is_not_a_success() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("gitconfig"), "").unwrap();
+    for (name, content) in [("base", "x\n"), ("local", "a\n"), ("remote", "b\n")] {
+        fs::write(dir.path().join(name), content).unwrap();
+    }
+    let conflicted = "<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n";
+    fs::write(dir.path().join("merged"), conflicted).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_git-scry"))
+        .current_dir(dir.path())
+        .args(["resolve", "--take", "1=nonsense", "--"])
+        .args(["base", "local", "remote", "merged"])
+        .env("GIT_CONFIG_GLOBAL", dir.path().join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stderr.take());
+    let status = child.wait().unwrap();
+    assert!(!status.success(), "{status:?}");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("merged")).unwrap(),
+        conflicted
+    );
 }
 
 /// `session` says which operation is in progress, who is on each side, and which files

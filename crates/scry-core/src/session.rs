@@ -880,6 +880,12 @@ impl MergeSession {
         }
     }
 
+    /// `located_checks` when they are already computed, without
+    /// computing them.
+    pub(crate) fn located_so_far(&self, index: usize) -> Option<&[ParseCheck]> {
+        self.located[index].get().map(Vec::as_slice)
+    }
+
     /// Conflict `index`'s candidate checks, in the order of its analysis,
     /// each error at its exact line: only the texts that do not parse are
     /// checked again, and only those whose quick check stopped early are
@@ -1043,12 +1049,17 @@ impl MergeSession {
 
     /// Whether the merged file ends with a line break: as the side that
     /// ends the last conflict's choice did, when the file ends with a
-    /// conflict; ours for a choice of neither side (base, by hand).
+    /// conflict; ours for a choice of neither side (base, by hand). An
+    /// empty last choice adds no line: the break before it stays.
     fn ends_with_break(&self) -> bool {
         let Some((ours, theirs)) = self.final_breaks else {
             return true;
         };
         if !self.ends_with_conflict() {
+            return true;
+        }
+        let last = self.choices.len() - 1;
+        if self.chosen_text(last).is_some_and(str::is_empty) {
             return true;
         }
         match self.choices.last() {
@@ -1256,6 +1267,9 @@ pub fn load(
     };
     let has_base = {
         let mut conflicts = conflict::conflicts(&segments).peekable();
+        if conflicts.peek().is_none() && left_as_ours(git, files, &merged) {
+            return Err(LoadError::NotMerged(in_repository(git, &files.merged)));
+        }
         conflicts.peek().is_none() || conflicts.all(|conflict| conflict.base.is_some())
     };
     let (ours_break, theirs_break) = (
@@ -1287,6 +1301,22 @@ pub fn load(
             .with_file(files.merged.clone())
             .with_final_breaks(ours_break, theirs_break),
     )
+}
+
+/// Git did not merge `files.merged` (`-merge`, `merge=binary`, the
+/// `binary` macro) and it still holds ours as git left it: answering it
+/// resolved would stage ours and drop theirs unseen.
+fn left_as_ours(git: &dyn Git, files: &MergetoolFiles, merged: &str) -> bool {
+    let path = files.merged.to_string_lossy();
+    let not_merged = git
+        .run(&["check-attr", "merge", "--", &path])
+        .is_ok_and(|output| {
+            matches!(
+                output.trim_end().rsplit(": ").next(),
+                Some("unset" | "binary")
+            )
+        });
+    not_merged && fs::read(&files.local).is_ok_and(|ours| ours == merged.as_bytes())
 }
 
 /// Whether two parsed files have the same text and the same conflict
@@ -1676,6 +1706,9 @@ pub enum LoadError {
     /// The merged file's markers are not ones git writes, usually after a
     /// partial edit.
     Malformed(PathBuf, ParseError),
+    /// Git did not merge the file (`-merge` or `binary` in its
+    /// attributes): it holds ours, with no marker, and nothing is decided.
+    NotMerged(PathBuf),
     Git(GitError),
 }
 
@@ -1712,6 +1745,11 @@ impl fmt::Display for LoadError {
                     "{shown}: {error}; fix the markers, or run `git checkout --merge -- {argument}` at the repository's root to recreate the conflicts (this drops edits made to the file)"
                 )
             }
+            LoadError::NotMerged(path) => write!(
+                f,
+                "git did not merge {} (its merge attribute) and left ours in it; pick a version in Scry's overview (`git scry`), or with `git checkout --ours` or `--theirs`",
+                path.display()
+            ),
             LoadError::Git(error) => write!(f, "{error}"),
         }
     }
@@ -2045,6 +2083,19 @@ mod tests {
         assert!(!session.ends_with_conflict());
         session.choose(0, CandidateKind::Theirs).unwrap();
         assert_eq!(session.merged_text().as_deref(), Some("b\ntail\n"));
+    }
+
+    /// A last conflict resolved with no text (neither side, an empty hand edit) adds no
+    /// line, so the line break that ends the file is the one before it, and stays: taking
+    /// neither side must not join the common text's last line with nothing.
+    #[test]
+    fn an_empty_last_choice_keeps_the_break_before_it() {
+        let text = "a\n<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\n";
+        let mut session = MergeSession::from_text(text, None)
+            .unwrap()
+            .with_final_breaks(false, true);
+        session.choose(0, CandidateKind::Neither).unwrap();
+        assert_eq!(session.merged_text().as_deref(), Some("a\n"));
     }
 
     /// Checks need the file to parse both with every conflict as ours and with every

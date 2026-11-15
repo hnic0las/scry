@@ -453,6 +453,13 @@ impl Overview {
                 self.paths.sort();
             }
         } else {
+            if operation.is_none() && !self.paths.is_empty() {
+                // No step ends to reset the list: a file stays while it
+                // is in conflict or staged, and leaves once committed.
+                let staged = staged_paths(git)?;
+                self.paths
+                    .retain(|path| unmerged.contains(path) || staged.contains(path));
+            }
             for path in &unmerged {
                 if !self.paths.contains(path) {
                     self.paths.push(path.clone());
@@ -1221,6 +1228,16 @@ impl Stages {
 
 /// Paths whose conflict was resolved at this step, by `git add` or
 /// `git rm`: git keeps their versions (resolve-undo) until the step ends.
+/// The paths whose staged content differs from `HEAD`.
+fn staged_paths(git: &dyn Git) -> Result<Vec<String>, GitError> {
+    let output = git.run(&["diff", "--cached", "--name-only", "--no-renames", "-z"])?;
+    Ok(output
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(String::from)
+        .collect())
+}
+
 fn staged_this_step(git: &dyn Git) -> Result<Vec<String>, GitError> {
     let output = git.run(&["ls-files", "--resolve-undo", "-z"])?;
     let mut paths: Vec<String> = Vec::new();

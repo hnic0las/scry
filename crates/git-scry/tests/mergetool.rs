@@ -29,6 +29,18 @@ impl Repo {
         scry_args: &str,
         separator: &str,
     ) -> Repo {
+        Repo::stopped_rebase_with(name, conflict_style, scry_args, separator, "")
+    }
+
+    /// The same, with `attributes` in the repository's
+    /// `.git/info/attributes`.
+    fn stopped_rebase_with(
+        name: &str,
+        conflict_style: &str,
+        scry_args: &str,
+        separator: &str,
+        attributes: &str,
+    ) -> Repo {
         let root = tempfile::tempdir().unwrap();
         // Forward slashes: the command runs in git's shell, also on Windows.
         let binary = env!("CARGO_BIN_EXE_git-scry").replace('\\', "/");
@@ -47,6 +59,7 @@ impl Repo {
         };
 
         repo.ok(&["init", "--quiet", "--initial-branch=main"]);
+        fs::write(repo.path().join(".git/info/attributes"), attributes).unwrap();
         repo.commit("line\nend\n", "base");
         repo.ok(&["switch", "--quiet", "-c", "feature"]);
         repo.commit("feature line\nend\n", "feature change");
@@ -136,6 +149,36 @@ fn unresolved_file_is_left_as_it_was() {
     assert_eq!(repo.file(), before);
     assert!(before.contains("<<<<<<<"));
     assert_eq!(repo.unmerged(), "file.txt\n");
+}
+
+/// A file git did not merge (`-merge` in its attributes) holds ours as git left it,
+/// with no marker: git-scry refuses it rather than answer that it is resolved, which
+/// would stage ours and silently drop theirs.
+#[test]
+fn a_file_git_did_not_merge_is_not_answered_resolved() {
+    let repo = Repo::stopped_rebase_with("file.txt", "merge", "", "--", "file.txt -merge\n");
+    let before = repo.file();
+    assert!(!before.contains("<<<<<<<"));
+    let output = repo.git(&["mergetool"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("git did not merge"),
+        "{output:?}"
+    );
+    assert_eq!(repo.file(), before);
+    assert_eq!(repo.unmerged(), "file.txt\n");
+
+    // Merged by hand before launching the tool: the file is no longer
+    // git's ours, and is answered resolved as it is.
+    fs::write(
+        repo.path().join("file.txt"),
+        "main line\nfeature line\nend\n",
+    )
+    .unwrap();
+    let output = repo.git(&["mergetool"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(repo.file(), "main line\nfeature line\nend\n");
+    assert_eq!(repo.unmerged(), "");
 }
 
 /// An unknown candidate in `--take` fails with a message and writes nothing.

@@ -149,10 +149,15 @@ fn main() -> ExitCode {
     }
 }
 
-/// `println!` panics when the reader of the output is gone
+/// The exit code of a tool killed by `SIGPIPE` (128 + 13).
+const CLOSED_PIPE: i32 = 141;
+
+/// `println!` and `eprintln!` panic when the reader of the output is gone
 /// (`git scry highlight … | head -1`). Like other command-line tools,
 /// git-scry then stops quietly instead of printing a panic: this hook
 /// exits on that one panic and leaves every other to the default hook.
+/// It exits with 141, as a tool killed by `SIGPIPE` does, never 0: the
+/// command did not finish, and git trusts a merge tool's 0 as resolved.
 fn quiet_on_closed_pipe() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -163,7 +168,7 @@ fn quiet_on_closed_pipe() {
             .or_else(|| payload.downcast_ref::<&str>().copied())
             .unwrap_or("");
         if message.contains("Broken pipe") {
-            std::process::exit(0);
+            std::process::exit(CLOSED_PIPE);
         }
         default(info);
     }));
