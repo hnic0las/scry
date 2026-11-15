@@ -121,22 +121,33 @@ fn preview(text: &str) -> (Vec<String>, bool) {
 impl MergeSession {
     /// Conflict `index` in words, with `ours` and `theirs` the sides'
     /// labels; checks its candidates first if they are not yet.
+    /// Each error is at its exact line, for the inspector to point at.
     pub fn conflict_view(&self, index: usize, ours: &str, theirs: &str) -> ConflictView {
-        self.view(self.analysis(index), index, ours, theirs)
+        let checks = self.located_checks(index);
+        self.view(self.analysis(index), Some(checks), index, ours, theirs)
     }
 
     /// Conflict `index` as far as it is checked (`analysis_so_far`): cheap
     /// for a list of every conflict, where the focused one is asked for
     /// with `conflict_view`.
     pub fn conflict_view_so_far(&self, index: usize, ours: &str, theirs: &str) -> ConflictView {
-        self.view(self.analysis_so_far(index), index, ours, theirs)
+        self.view(self.analysis_so_far(index), None, index, ours, theirs)
     }
 
-    fn view(&self, analysis: &Analysis, index: usize, ours: &str, theirs: &str) -> ConflictView {
+    /// `checks`, when given, replace the candidates' own (quick) checks.
+    fn view(
+        &self,
+        analysis: &Analysis,
+        checks: Option<&[ParseCheck]>,
+        index: usize,
+        ours: &str,
+        theirs: &str,
+    ) -> ConflictView {
         let candidates: Vec<CandidateView> = analysis
             .candidates
             .iter()
-            .map(|candidate| {
+            .enumerate()
+            .map(|(position, candidate)| {
                 let (preview, truncated) = preview(&candidate.text);
                 CandidateView {
                     id: candidate.kind.id().to_string(),
@@ -144,7 +155,7 @@ impl MergeSession {
                     subtitle: candidate.kind.subtitle(ours, theirs),
                     preview,
                     truncated,
-                    parse: candidate.parse,
+                    parse: checks.map_or(candidate.parse, |checks| checks[position]),
                     provenance: candidate.kind.provenance(),
                     suggested: analysis.suggestion == Some(candidate.kind),
                     aliases: candidate
@@ -457,6 +468,34 @@ mod tests {
         let header = header(Path::new("A.swift"), &session, None);
         assert_eq!(header.ours.label, "ours");
         assert_eq!(header.theirs.label, "theirs");
+    }
+
+    /// In a large file, a candidate or a hand edit that does not parse is
+    /// shown with the line of its error, as checking the whole file would
+    /// give it, not where the quick check gave up dozens of lines later.
+    #[test]
+    fn errors_in_a_large_file_are_shown_at_their_line() {
+        let entry = |index: usize| format!("  \"k{index}\" : {{\n    \"v\" : {index}\n  }},\n");
+        let before: String = (0..3).map(entry).collect();
+        let after: String = (4..100).map(entry).collect();
+        let conflict = "<<<<<<< ours\n  \"k3\" : 1\n=======\n  \"k3\" : 2\n>>>>>>> theirs\n";
+        let text = format!("{{\n{before}{conflict}  ,\n{after}  \"end\" : 0\n}}\n");
+        let both = "  \"k3\" : 1\n  \"k3\" : 2\n";
+        let expected = crate::syntax::check(Language::Json, &text.replace(conflict, both));
+        assert!(matches!(expected, ParseCheck::DoesNotParse { .. }));
+
+        let mut session = MergeSession::from_text(&text, Some(Language::Json)).unwrap();
+        let view = session.conflict_view(0, "ours", "theirs");
+        let both_view = view
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == "ours-then-theirs")
+            .unwrap();
+        assert_eq!(both_view.parse, expected);
+
+        session.edit(0, both).unwrap();
+        let view = session.conflict_view(0, "ours", "theirs");
+        assert_eq!(view.chosen.unwrap().parse, expected);
     }
 
     /// Without an operation in progress, the panes are named after the

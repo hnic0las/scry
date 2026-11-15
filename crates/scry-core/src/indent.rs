@@ -682,6 +682,8 @@ mod tests {
         assert_eq!(indent_unit(two_spaces_back_and_forth), "  ");
         let flat_then_two = "a\nb\nc\nd\n  e\n";
         assert_eq!(indent_unit(flat_then_two), "  ");
+        let deep_fours_some_twos = "a\n    b\n        c\n            d\ne\n  f\ng\n  h\n";
+        assert_eq!(indent_unit(deep_fours_some_twos), "    ");
         let far_jump = "call(a,\n         b)\n";
         assert_eq!(indent_unit(far_jump), "    ");
     }

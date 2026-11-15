@@ -274,9 +274,27 @@ impl ParsedFile {
     /// parse, so it stops there: past an error tree-sitter can rarely reuse
     /// the old tree, and parsing on to the end of a large file for each
     /// candidate made opening a file quadratic in its conflicts. The line
-    /// reported is then where the parser met the error, rather than the
-    /// first error node of the whole tree; they are the same or nearby.
+    /// reported is then where the parser gave up, which can be dozens of
+    /// lines past the error: right for the verdict, not for pointing the
+    /// user at it (`locate_with` does).
     pub(crate) fn check_with(&self, replacements: &[(Range<usize>, &str)]) -> ParseCheck {
+        self.check_with_stop(replacements).0
+    }
+
+    /// Like `check_with`, but the line of an error is always the full
+    /// check's: when the quick check stopped early, the edited file is
+    /// parsed to its end. For what the user reads, one text at a time.
+    pub(crate) fn locate_with(&self, replacements: &[(Range<usize>, &str)]) -> ParseCheck {
+        match self.check_with_stop(replacements) {
+            (check, true) => self
+                .with(replacements)
+                .map_or(check, |edited| edited.check()),
+            (check, false) => check,
+        }
+    }
+
+    /// `check_with`, and whether it stopped before the end of the file.
+    fn check_with_stop(&self, replacements: &[(Range<usize>, &str)]) -> (ParseCheck, bool) {
         let mut tree = self.tree.clone();
         let pieces = landings(replacements);
         for (range, replacement) in replacements.iter().rev() {
@@ -319,20 +337,26 @@ impl ParsedFile {
         };
         let options = tree_sitter::ParseOptions::new().progress_callback(&mut stop);
         let Some(mut parser) = parser(self.language) else {
-            return ParseCheck::NotChecked;
+            return (ParseCheck::NotChecked, false);
         };
         let parsed = parser.parse_with_options(&mut read, Some(&tree), Some(options));
         match (parsed, failed_at) {
-            (Some(tree), _) => match first_error(tree.root_node()) {
-                None => ParseCheck::Parses,
-                Some(node) => ParseCheck::DoesNotParse {
-                    line: error_row(node) + 1,
+            (Some(tree), _) => {
+                let check = match first_error(tree.root_node()) {
+                    None => ParseCheck::Parses,
+                    Some(node) => ParseCheck::DoesNotParse {
+                        line: error_row(node) + 1,
+                    },
+                };
+                (check, false)
+            }
+            (None, Some(offset)) => (
+                ParseCheck::DoesNotParse {
+                    line: row_in(&pieces, replacements, &self.text, offset) + 1,
                 },
-            },
-            (None, Some(offset)) => ParseCheck::DoesNotParse {
-                line: row_in(&pieces, replacements, &self.text, offset) + 1,
-            },
-            (None, None) => ParseCheck::NotChecked,
+                true,
+            ),
+            (None, None) => (ParseCheck::NotChecked, false),
         }
     }
 
@@ -751,6 +775,8 @@ mod tests {
             vec![(2..4, "x\ny\nz")],
             vec![(0..2, ""), (5..9, "q")],
             vec![(2..5, "1\n2\n"), (9..14, ""), (14..20, "end\n")],
+            // Several lines between two replacements.
+            vec![(0..1, "A"), (14..19, "E")],
         ];
         for replacements in cases {
             let mut edited = String::new();
@@ -817,6 +843,30 @@ mod tests {
             check(Language::Swift, "func a() {\n    b()\n"),
             ParseCheck::DoesNotParse { line: 2 }
         );
+    }
+
+    /// On a large file the quick check stops where the parser gives up,
+    /// dozens of lines past the error; `locate_with` gives the full check's
+    /// line, the one to show the user.
+    #[test]
+    fn an_early_stop_is_located_at_the_error() {
+        let entries: Vec<String> = (0..100)
+            .map(|index| format!("  \"k{index}\" : {{\n    \"v\" : {index}\n  }}"))
+            .collect();
+        let text = format!("{{\n{}\n}}\n", entries.join(",\n"));
+        let base = ParsedFile::new(Language::Json, text.clone()).unwrap();
+        let at = text.find("\"k3\"").unwrap();
+        let broken = [(at..at + 6, "\"k3\" { ")];
+        let full = base.with(&broken).unwrap().check();
+        assert_eq!(full, ParseCheck::DoesNotParse { line: 11 });
+        let (quick, stopped) = base.check_with_stop(&broken);
+        assert!(stopped);
+        assert!(matches!(quick, ParseCheck::DoesNotParse { .. }));
+        assert_eq!(base.locate_with(&broken), full);
+        // A check that ran to the end already has the full check's line.
+        let whole = [(at..at + 6, "\"k3\" : ,")];
+        assert!(!base.check_with_stop(&whole).1);
+        assert_eq!(base.locate_with(&whole), base.with(&whole).unwrap().check());
     }
 
     /// A missing closing brace is reported, with the line where it is missing.

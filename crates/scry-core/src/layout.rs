@@ -532,7 +532,19 @@ mod tests {
     #[test]
     fn each_conflict_shows_its_own_sides() {
         let text = "<<<<<<< ours\none\n=======\nuno\n>>>>>>> theirs\nmid\n<<<<<<< ours\ntwo\n=======\ndos\n>>>>>>> theirs\n";
-        let session = MergeSession::from_text(text, None).unwrap();
+        let mut session = MergeSession::from_text(text, None).unwrap();
+        session.choose(1, CandidateKind::Theirs).unwrap();
+        let chosen: Vec<String> = session
+            .rows(false)
+            .iter()
+            .filter_map(|row| match row {
+                Row::Code { result, .. } if result.kind == CellKind::Chosen => {
+                    Some(result.text.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(chosen, ["dos"]);
         let sides: Vec<(String, String)> = session
             .rows(false)
             .iter()

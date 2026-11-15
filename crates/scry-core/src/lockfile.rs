@@ -689,6 +689,16 @@ mod tests {
         );
     }
 
+    /// The `PODS:` list goes on past a pod's own dependencies, indented
+    /// deeper, and ends at the next section even without a blank line.
+    #[test]
+    fn cocoapods_reads_the_whole_pods_list_and_only_it() {
+        let lock = "PODS:\n  - SnapKit (5.6.0):\n    - Alamofire (~> 5.0)\n  - Zip (2.1.0)\nDEPENDENCIES:\n  - Kingfisher (~> 7.0)\n";
+        let found = packages(Format::CocoaPods, lock);
+        let names: Vec<&str> = found.keys().map(String::as_str).collect();
+        assert_eq!(names, ["SnapKit", "Zip"]);
+    }
+
     /// Each side's upgrades are listed by package, and a package both
     /// sides moved to different versions is flagged: the tool decides. The
     /// requirements under DEPENDENCIES are not installed versions.

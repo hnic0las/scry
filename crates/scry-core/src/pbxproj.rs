@@ -808,6 +808,7 @@ mod tests {
         // a slash inside it.
         assert!(!balanced("name = Sources/App {"));
         assert!(balanced("A1 /* Sources/(old) */ = 1;"));
+        assert!(balanced("A1 /* a/(b */ = 1;"));
     }
 
     /// With the base, an entry one side removed stays removed while the

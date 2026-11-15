@@ -474,6 +474,16 @@ mod tests {
             "{\n  \"strings\" : {\n    \"a2\" : {\n\n    },\n    \"a3\" : {\n\n    },\n    \"a10\" : {\n\n    },\n    \"B\" : {\n\n    },\n    \"c\" : {\n      \"x\" : [\n\n      ]\n    }\n  }\n}\n"
         );
 
+        // A digit before a letter, as `JSONSerialization` puts it.
+        let base = r#"{"a2":1,"a10":1,"aB":1}"#;
+        let ours = r#"{"a2":1,"a10":1,"aB":2}"#;
+        let theirs = r#"{"a2":1,"a3":1,"a10":1,"aB":1}"#;
+        let written = merge(base, ours, theirs).unwrap().resolve(&[]).unwrap();
+        assert_eq!(
+            written,
+            "{\n  \"a2\" : 1,\n  \"a3\" : 1,\n  \"a10\" : 1,\n  \"aB\" : 2\n}\n"
+        );
+
         // Sorted by bytes, as `JSONEncoder` sorts `Package.resolved`'s keys.
         let ours = r#"{"Zed":1,"a":1}"#;
         let theirs = r#"{"Zed":1,"a":1,"B":1}"#;

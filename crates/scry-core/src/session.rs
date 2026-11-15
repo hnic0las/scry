@@ -119,6 +119,10 @@ pub struct MergeSession {
     /// asked for, since checking every conflict of a large file up front
     /// took seconds.
     checked: Vec<OnceLock<Analysis>>,
+    /// Each checked conflict's candidate checks with the exact line of
+    /// each error, for the conflict shown in detail: the quick check can
+    /// stop dozens of lines past an error on a large file.
+    located: Vec<OnceLock<Vec<ParseCheck>>>,
     /// Each conflict's line changes, ours then theirs, against its base:
     /// the sides never change, so they are worked out once, when first
     /// shown.
@@ -272,6 +276,7 @@ impl MergeSession {
             segments,
             conflicts,
             checked: analyses.iter().map(|_| OnceLock::new()).collect(),
+            located: analyses.iter().map(|_| OnceLock::new()).collect(),
             line_changes: analyses.iter().map(|_| OnceLock::new()).collect(),
             result_paint: Mutex::new(None),
             analyses,
@@ -870,9 +875,28 @@ impl MergeSession {
         }
         // The other conflicts stay as ours, as in the reference file.
         match &self.reference {
-            Some(reference) => reference.check_with(&[(self.ranges[index].clone(), text)]),
+            Some(reference) => reference.locate_with(&[(self.ranges[index].clone(), text)]),
             None => ParseCheck::NotChecked,
         }
+    }
+
+    /// Conflict `index`'s candidate checks, in the order of its analysis,
+    /// each error at its exact line: only the texts that do not parse are
+    /// checked again, and only those whose quick check stopped early are
+    /// parsed in full, once per conflict.
+    pub(crate) fn located_checks(&self, index: usize) -> &[ParseCheck] {
+        self.located[index].get_or_init(|| {
+            let reference = self.reference.as_ref().filter(|_| self.checkable);
+            self.analysis(index)
+                .candidates
+                .iter()
+                .map(|candidate| match (candidate.parse, reference) {
+                    (ParseCheck::DoesNotParse { .. }, Some(reference)) => reference
+                        .locate_with(&[(self.ranges[index].clone(), candidate.text.as_str())]),
+                    (parse, _) => parse,
+                })
+                .collect()
+        })
     }
 
     /// Chooses the rule suggestion for every conflict that has one and no
@@ -1973,6 +1997,30 @@ mod tests {
         assert_eq!(
             session(true, true).analysis(0).candidates[0].aliases,
             [CandidateKind::Theirs]
+        );
+    }
+
+    /// When the base has that same text too, the card ours keeps answers
+    /// for it; the theirs card split off answers for theirs alone, so no
+    /// choice is offered by two cards.
+    #[test]
+    fn a_split_theirs_card_answers_for_theirs_alone() {
+        let text = "a\n<<<<<<< ours\nx y\n||||||| base\nx y\n=======\nx y\n>>>>>>> theirs\n";
+        let session = MergeSession::from_text(text, None)
+            .unwrap()
+            .with_final_breaks(false, true);
+        let answers: Vec<(CandidateKind, Vec<CandidateKind>)> = session
+            .analysis(0)
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.kind, candidate.aliases.clone()))
+            .collect();
+        assert_eq!(
+            answers[..2],
+            [
+                (CandidateKind::Ours, vec![CandidateKind::Base]),
+                (CandidateKind::Theirs, vec![])
+            ]
         );
     }
 
