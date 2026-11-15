@@ -41,14 +41,27 @@ impl Random {
 
 /// Lines from a small alphabet, so that the sides share lines and git finds
 /// both clean merges and conflicts.
-fn line(random: &mut Random) -> String {
-    ["a", "b", "c", "d", "e", "", "x y"][random.below(7)].to_string()
+/// A line from the small alphabet or from `extra`.
+fn line_from(random: &mut Random, extra: &[&str]) -> String {
+    const ALPHABET: [&str; 7] = ["a", "b", "c", "d", "e", "", "x y"];
+    let at = random.below(ALPHABET.len() + extra.len());
+    ALPHABET
+        .get(at)
+        .copied()
+        .unwrap_or_else(|| extra[at - ALPHABET.len()])
+        .to_string()
 }
 
 /// A base of up to 8 lines and two sides, each edited from it by a few
 /// deletions, insertions and changes.
 fn versions(seed: u64) -> (Vec<String>, Vec<String>, Vec<String>) {
+    versions_with(seed, &[])
+}
+
+/// Like `versions`, with lines also drawn from `extra`.
+fn versions_with(seed: u64, extra: &[&str]) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut random = Random::new(seed);
+    let line = |random: &mut Random| line_from(random, extra);
     let base: Vec<String> = (0..random.below(9)).map(|_| line(&mut random)).collect();
     let side = |random: &mut Random| {
         let mut lines = base.clone();
@@ -201,17 +214,35 @@ fn reading_git_markers_agrees_with_merge_file() {
 /// Through `git mergetool`'s files, with git's default `merge` style: Scry
 /// rebuilds the conflicts with their base, and whatever it rebuilt, taking
 /// ours or theirs everywhere still gives what git gives. Sides without a
-/// final line break are generated too, which git's markers hide.
+/// final line break are generated too, which git's markers hide, and CRLF
+/// or mixed line endings.
 #[test]
 fn loading_mergetool_files_agrees_with_merge_file() {
     let mut failures: Vec<String> = Vec::new();
     for seed in 0..cases() {
         let (base, ours, theirs) = versions(seed);
         let mut random = Random::new(seed ^ 0xA5A5);
+        // LF, CRLF, or each line its own.
+        let ending = random.below(3);
         let mut unterminated = |lines: &[String]| {
-            let text = text(lines);
+            let text: String = lines
+                .iter()
+                .map(|line| {
+                    let crlf = match ending {
+                        0 => false,
+                        1 => true,
+                        _ => random.below(2) == 0,
+                    };
+                    format!("{line}{}", if crlf { "\r\n" } else { "\n" })
+                })
+                .collect();
+            // Without its final line break, "\r\n" or "\n".
             match random.below(4) {
-                0 if !text.is_empty() => text[..text.len() - 1].to_string(),
+                0 => text
+                    .strip_suffix("\r\n")
+                    .or_else(|| text.strip_suffix('\n'))
+                    .unwrap_or(&text)
+                    .to_string(),
                 _ => text,
             }
         };
@@ -252,5 +283,79 @@ fn loading_mergetool_files_agrees_with_merge_file() {
         "{} cases differ:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+}
+
+/// Line endings and marker sizes git also writes: CRLF files (git writes its
+/// markers with CRLF too), files mixing both, and the marker size the
+/// `conflict-marker-size` attribute sets, with lines that look like git's
+/// usual 7-character markers inside the sides, which is why that attribute
+/// exists. Read with that size, Scry finds git's conflicts, and taking ours,
+/// theirs or both gives git's text byte for byte, line endings included.
+/// One style per case, drawn with the rest, to keep the test quick.
+#[test]
+fn line_endings_and_marker_sizes_agree_with_merge_file() {
+    let mut conflicts = 0;
+    for seed in 0..cases() {
+        let mut random = Random::new(seed ^ 0x5A5A);
+        let marker_size = [2, 7, 12][random.below(3)];
+        let extra: &[&str] = if marker_size == 7 {
+            &[]
+        } else {
+            &["=======", "<<<<<<< x", ">>>>>>> y", "|||||||"]
+        };
+        let (base, ours, theirs) = versions_with(seed, extra);
+        let ending = random.below(3);
+        let mut with_endings = |lines: &[String]| -> String {
+            lines
+                .iter()
+                .map(|line| {
+                    let crlf = match ending {
+                        0 => false,
+                        1 => true,
+                        _ => random.below(2) == 0,
+                    };
+                    format!("{line}{}", if crlf { "\r\n" } else { "\n" })
+                })
+                .collect()
+        };
+        let (base, ours, theirs) = (
+            with_endings(&base),
+            with_endings(&ours),
+            with_endings(&theirs),
+        );
+        let case = Case::new(&base, &ours, &theirs);
+        let size = format!("--marker-size={marker_size}");
+        let mut options = vec![size.as_str()];
+        let style = ["--merge", "--diff3", "--zdiff3"][random.below(3)];
+        if style != "--merge" {
+            options.push(style);
+        }
+        let (written, count) = case.merge_file(&options);
+        let label = format!("seed {seed} {style} size {marker_size} ending {ending}");
+        let session = || {
+            MergeSession::from_text_with_marker_size(&written, None, marker_size)
+                .unwrap_or_else(|error| panic!("{label}: {error}\n{written:?}"))
+        };
+        assert_eq!(
+            session().conflict_count(),
+            count as usize,
+            "{label}: conflict count\n{written:?}"
+        );
+        conflicts += count;
+        for (kind, option) in RESOLUTIONS {
+            let mut with_option = options.clone();
+            with_option.push(option);
+            let (expected, _) = case.merge_file(&with_option);
+            assert_eq!(
+                resolved_with(session(), kind).as_deref(),
+                Ok(expected.as_str()),
+                "{label} {option}\nbase {base:?}\nours {ours:?}\ntheirs {theirs:?}\n{written:?}"
+            );
+        }
+    }
+    assert!(
+        conflicts > i32::try_from(cases()).unwrap() / 2,
+        "{conflicts}"
     );
 }
