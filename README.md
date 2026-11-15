@@ -11,15 +11,65 @@
 
 Scry (`git-scry`) is a local-first tool, integrated with git, for merging and reviewing changes. It resolves conflicts through `git mergetool`, reviews branches and pull requests, runs built-in checks such as secret scanning, and takes proposals from agents through MCP that a human validates.
 
-What it does today:
+Status: the merge tool (the macOS app and the `git-scry` CLI) is close to its first release. MCP, agents, the diff tool and review come next (see [Roadmap](#roadmap)).
 
-- **Understands the whole operation.** A merge, rebase, cherry-pick or revert opens on its overview: the conflicted files, who is on each side, and a rebase's plan as a graph, with where git stopped.
-- **Resolves conflict by conflict.** Pick ours, theirs, both or base with one key, or edit the result by hand, with undo and redo, word-level differences and syntax highlighting.
-- **Checks every candidate.** In 19 languages, Scry parses each resolution and marks the ones that would break the file before you write it.
-- **Handles the files text merges get wrong.** Xcode projects, String Catalogs, `Package.resolved`, lockfiles from 18 package managers, binary files and files deleted on one side each get their own view.
-- **Stays in your workflow.** It plugs into `git mergetool`, works in the terminal as well as in the app, and never stages, commits or pushes on its own.
+## Features
 
-Status: early development. The core, the `git-scry` CLI (merge tool in the terminal) and a first macOS merge editor work; review, MCP and agents are not built yet.
+### The whole operation at a glance
+
+- A merge, rebase, cherry-pick or revert opens on its **overview**: the conflicted files and their state, and who is on each side.
+- A rebase shows its **plan as a graph**: each pick, reword, fixup or drop, where git stopped, and which steps it ran on its own. A merge shows both branches since their merge base.
+- **Drive the operation from the app**: Stage and Unstage per file (Unstage hands the conflict back to git and keeps your resolution), Stage resolved, Continue, Skip and Abort.
+- A `reword` step asks for the commit message in the overview, before Continue: git never opens an editor of its own.
+
+### Conflict by conflict
+
+- **One key per choice**: ours, theirs, both in either order, base or none, from the keyboard, the lens row's menu, the › ‹ buttons beside each conflict or the inspector.
+- **Edit the result by hand**, conflict by conflict, with undo and redo throughout.
+- **Word-level differences** and **syntax highlighting** in the three panes.
+- **Show the base** (⌥⌘B) under each conflict, to see what both sides changed from.
+- **Two layouts**: three columns, or both sides above the result (⌥⌘L). The second is chosen automatically in a narrow window.
+- **Overview ruler**: one mark per conflict, coloured by its state; click one to go to it.
+- Synchronised scrolling, horizontal included, and every shortcut listed in Help › Keyboard Shortcuts (⌘/).
+
+### Checked before it is written
+
+- In **19 languages** (Swift, Objective-C, C, C++, Rust, JavaScript, TypeScript, TSX, HTML, CSS, Python, Kotlin, Java, Go, Ruby, Bash, JSON including `.xcstrings`, YAML, TOML), Scry parses each candidate and marks the ones that would break the file, at the line of the error.
+- A file that would not parse is written only after you confirm it.
+- Merging an **Xcode project**, Scry checks that every reference still points to an object.
+
+### Files a text merge gets wrong
+
+Each of these gets its own view:
+
+- a file **deleted on one side**: keep it or delete it;
+- a **binary file**: take one version, with an image preview;
+- an **Xcode project** (`.pbxproj`): keep both sides' additions;
+- a **String Catalog**: merge key by key;
+- **`Package.resolved`**: merge package by package, each pin whole;
+- **lockfiles from 18 package managers** (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock`, `deno.lock`, `Cargo.lock`, `Podfile.lock`, `Cartfile.resolved`, `Gemfile.lock`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `composer.lock`, `pubspec.lock`, `gradle.lockfile`, `flake.lock`, `mix.lock`, `go.sum`): take one side, see the packages each side changed and the command that writes the file again. `go.sum` can also keep both sides' lines.
+
+### In your workflow
+
+- **`git mergetool`**, in the app or in the terminal with the same digits as the app's shortcuts. Scry › Settings sets git up for you.
+- **`git scry`** opens the app on the operation in progress, from any folder of the repository.
+- `git scry session`, `conflicts` and `highlight` print what the app shows, for scripts and terminals.
+- Scry never stages, commits or pushes on its own: each of those steps is a button you press.
+- Local first: no account and no server; nothing leaves your Mac.
+
+### Tested against git
+
+Scry's merges are checked against `git merge-file` on generated conflicts, line endings and marker sizes included. Mutation testing checks that the tests catch changes in the code. The hand-written parsers are fuzzed. See [Development](#development).
+
+## Roadmap
+
+- **An MCP server** (`git scry mcp`), so your agent, for example Claude Code, can read the conflicts and propose resolutions that appear live in the app.
+- **Explain**, **Suggest** and **Ask** on a conflict, with your own Claude API key, or handed to your agent when there is none. Every proposal keeps its source, is checked by code and is accepted by you; no agent stages, commits, pushes or posts.
+- **More files merged well**: storyboards and `.xib` files; migrations both sides added (Django, Alembic, Rails `schema.rb`), which leave two heads without any text conflict; Jupyter notebooks, `.strings` in UTF-16, Android `strings.xml`, `.po`, `.resx`; `CHANGELOG.md`, where both sides add at the top; running `npm install` or `yarn install` directly to repair their lockfiles.
+- **A diff tool**: `git difftool` and `git scry diff [ref..ref]`, with a side-by-side view and the list of changed files.
+- **Review of branches and pull requests**, with built-in checks such as secret scanning.
+- **Editing the whole file**, not only conflicts.
+- **Other front ends**: the core holds all the logic and is built and tested on macOS, Linux and Windows, so another app could use it.
 
 The binary is named `git-scry`, so that git runs it as `git scry`.
 
