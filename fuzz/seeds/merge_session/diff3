@@ -1,0 +1,10 @@
+fn main() {
+<<<<<<< ours
+    let total = sum(values);
+||||||| base
+    let total = 0;
+=======
+    let total = values.iter().sum();
+>>>>>>> theirs
+    println!("{total}");
+}

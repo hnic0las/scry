@@ -22,6 +22,13 @@ fn save(session: &mut session::MergeSession, overwrite: bool) -> Result<Vec<Even
     session.apply(Command::Save { overwrite })
 }
 
+/// Git in `dir`, with the user's and the system's configuration left out.
+fn isolated_git(dir: &Path) -> GitCli {
+    GitCli::new(dir.to_path_buf())
+        .with_env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .with_env("GIT_CONFIG_NOSYSTEM", "1")
+}
+
 fn files(dir: &Path, base: &str, local: &str, remote: &str, merged: &str) -> MergetoolFiles {
     let files = MergetoolFiles {
         base: dir.join("file_BASE.txt"),
@@ -50,7 +57,7 @@ fn markers_without_base_are_rebuilt_with_it() {
         merged,
     );
 
-    let git = GitCli::new(dir.path().to_path_buf());
+    let git = isolated_git(dir.path());
     let mut session = session::load(&git, &files, "main · rebase target", "Your commit").unwrap();
     assert!(session.rebuilt());
     assert_eq!(session.conflict_count(), 1);
@@ -79,7 +86,7 @@ fn markers_with_base_are_kept_as_they_are() {
         merged,
     );
 
-    let git = GitCli::new(dir.path().to_path_buf());
+    let git = isolated_git(dir.path());
     let mut session = session::load(&git, &files, "ours", "theirs").unwrap();
     assert_eq!(session.origin(), Origin::File);
     assert!(!session.rebuilt());
@@ -96,7 +103,7 @@ fn non_utf8_files_are_refused() {
     let dir = tempfile::tempdir().unwrap();
     let files = files(dir.path(), "a\n", "b\n", "c\n", "x\n");
     fs::write(&files.merged, [0xff, 0xfe, b'\n']).unwrap();
-    let git = GitCli::new(dir.path().to_path_buf());
+    let git = isolated_git(dir.path());
     let error = session::load(&git, &files, "ours", "theirs").err().unwrap();
     assert!(error.to_string().contains("not UTF-8"));
 }
@@ -116,7 +123,7 @@ fn edited_markers_without_base_are_kept() {
         merged,
     );
 
-    let git = GitCli::new(dir.path().to_path_buf());
+    let git = isolated_git(dir.path());
     let mut session = session::load(&git, &files, "ours", "theirs").unwrap();
     assert_eq!(session.origin(), Origin::EditedFile);
     assert!(session.conflict(0).base.is_none());
@@ -150,7 +157,7 @@ fn an_edit_inside_one_side_is_kept() {
             "theirs\nend\n",
             merged,
         );
-        let git = GitCli::new(dir.path().to_path_buf());
+        let git = isolated_git(dir.path());
         let mut session = session::load(&git, &files, "ours", "theirs").unwrap();
         assert_eq!(session.origin(), Origin::EditedFile, "{merged}");
         let candidate = if kept.starts_with("theirs") {
@@ -178,7 +185,7 @@ fn file_without_conflicts_is_kept() {
         merged,
     );
 
-    let git = GitCli::new(dir.path().to_path_buf());
+    let git = isolated_git(dir.path());
     let session = session::load(&git, &files, "ours", "theirs").unwrap();
     assert_eq!(session.origin(), Origin::File);
     assert_eq!(session.conflict_count(), 0);
@@ -193,7 +200,7 @@ fn malformed_markers_are_refused() {
     let merged = "<<<<<<< HEAD\nours\nend\n";
     let files = files(dir.path(), "base\n", "ours\n", "theirs\n", merged);
 
-    let git = GitCli::new(dir.path().to_path_buf());
+    let git = isolated_git(dir.path());
     let error = session::load(&git, &files, "ours", "theirs").err().unwrap();
     assert!(error.to_string().contains("git checkout --merge"));
     assert_eq!(fs::read_to_string(&files.merged).unwrap(), merged);
@@ -204,7 +211,7 @@ fn malformed_markers_are_refused() {
 #[test]
 fn malformed_markers_advice_names_the_file_from_the_root() {
     let dir = tempfile::tempdir().unwrap();
-    let git = GitCli::new(dir.path().to_path_buf());
+    let git = isolated_git(dir.path());
     git.run(&["init", "--quiet"]).unwrap();
     let files = files(
         dir.path(),
@@ -232,7 +239,7 @@ fn save_refuses_a_file_changed_on_disk() {
     let dir = tempfile::tempdir().unwrap();
     let merged = "<<<<<<< HEAD\nours\n||||||| base\nbase\n=======\ntheirs\n>>>>>>> other\n";
     let files = files(dir.path(), "base\n", "ours\n", "theirs\n", merged);
-    let git = GitCli::new(dir.path().to_path_buf());
+    let git = isolated_git(dir.path());
     let mut session = session::load(&git, &files, "ours", "theirs").unwrap();
 
     assert!(matches!(
@@ -271,6 +278,8 @@ fn save_refuses_a_file_changed_on_disk() {
 fn marker_size_comes_from_the_attributes() {
     let dir = tempfile::tempdir().unwrap();
     let init = std::process::Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["init", "--quiet"])
         .current_dir(dir.path())
         .status()
@@ -290,7 +299,7 @@ fn marker_size_comes_from_the_attributes() {
         merged,
     );
 
-    let git = GitCli::new(dir.path().to_path_buf());
+    let git = isolated_git(dir.path());
     let session = session::load(&git, &files, "ours", "theirs").unwrap();
     assert_eq!(session.conflict_count(), 1);
     assert_eq!(session.origin(), Origin::Rebuilt);
@@ -306,7 +315,7 @@ fn a_file_without_a_final_line_break_keeps_it() {
     // As git writes it: a line break after each side.
     let merged = "a\n<<<<<<< ours\nours\n||||||| base\nb\n=======\ntheirs\n>>>>>>> theirs\n";
     let files = files(dir.path(), "a\nb", "a\nours", "a\ntheirs\n", merged);
-    let git = GitCli::new(dir.path().to_path_buf());
+    let git = isolated_git(dir.path());
 
     let mut session = session::load(&git, &files, "ours", "theirs").unwrap();
     choose(&mut session, CandidateKind::Ours);
@@ -327,7 +336,7 @@ fn a_conflict_with_a_separator_line_is_rebuilt_with_longer_markers() {
     let local = "# Title\n\nSummary\n=======\nours\n";
     let remote = "# Title\n\nLicense\n=======\ntheirs\n";
     let files = files(dir.path(), base, local, remote, "");
-    let git = GitCli::new(dir.path().to_path_buf());
+    let git = isolated_git(dir.path());
     let written = git_merge_file(dir.path());
     fs::write(&files.merged, &written).unwrap();
 
@@ -359,7 +368,7 @@ fn rebuilt_markers_outgrow_the_longest_separator_line() {
     let local = "# Title\n\nSummary\n=======\nours\n========\n";
     let remote = "# Title\n\nLicense\n=======\ntheirs\n";
     let files = files(dir.path(), base, local, remote, "");
-    let git = GitCli::new(dir.path().to_path_buf());
+    let git = isolated_git(dir.path());
     fs::write(&files.merged, git_merge_file(dir.path())).unwrap();
 
     let mut session = session::load(&git, &files, "ours", "theirs").unwrap();
@@ -372,6 +381,8 @@ fn rebuilt_markers_outgrow_the_longest_separator_line() {
 /// The merged file as `git merge-file` writes it from the `files` helper's versions.
 fn git_merge_file(dir: &Path) -> String {
     let output = std::process::Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(dir)
         .args([
             "merge-file",
@@ -399,7 +410,7 @@ fn rebuilt_conflicts_start_where_the_file_has_them() {
         "a\nZ\nb\nc\nd\nf\ng\nh\nW\ne\n",
         merged,
     );
-    let git = GitCli::new(dir.path().to_path_buf());
+    let git = isolated_git(dir.path());
     let session = session::load(&git, &files, "ours", "theirs").unwrap();
     assert!(session.rebuilt());
     let lines: Vec<usize> = (0..2)
@@ -454,7 +465,7 @@ fn a_failed_merge_file_is_an_error() {
         merged,
     );
     let git = |code| MergeFileExits {
-        git: GitCli::new(dir.path().to_path_buf()),
+        git: isolated_git(dir.path()),
         code,
     };
     assert!(session::load(&git(Some(1)), &files, "ours", "theirs").is_ok());

@@ -1,0 +1,14 @@
+/* Begin PBXBuildFile section */
+		A1000001 /* SyncEngine.swift in Sources */ = {isa = PBXift in Sources */ = {isa = PBXBuildFile; fileRef = A2000001 /* SyncEngine.swift */; };
+<<<<<<< ours
+		A1000003 /* */ =Queue.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000003 /* OfflineQueue.swift */; };
+=======
+		A1000004 /* Forecas|Cache.swift in Sources */ = {isa = PBXBuildFile;fileRef = A1000002 /* ForecastCache.swift */; };
+>>>>>>> theirs
+/* End PBXBuildFile section */
+		A20.00:1 /* SyncEngine.swift */ = {isa = PBXFileReference; path = SyncEngine.swift; };
+<<<<<<< ours
+		A2000003 /* Offline+ueue.swift */ = {isa = PlineQueue.swf i;t};
+=======
+		A2000004 /* ForecastCache.swift */ = {isa = PBXFileRefernece; path = ForecastCache.swift; };
+>>>>>>> theirs

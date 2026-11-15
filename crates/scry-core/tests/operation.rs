@@ -62,6 +62,11 @@ impl Repo {
 
     fn scry_git(&self) -> GitCli {
         GitCli::new(self.path())
+            .with_env(
+                "GIT_CONFIG_GLOBAL",
+                &self.root.path().join("gitconfig").display().to_string(),
+            )
+            .with_env("GIT_CONFIG_NOSYSTEM", "1")
     }
 }
 
@@ -219,5 +224,8 @@ fn operations_in_a_reftable_repository() {
 #[test]
 fn not_a_repository() {
     let dir = tempfile::tempdir().unwrap();
-    assert!(operation::current(&GitCli::new(dir.path().to_path_buf())).is_err());
+    let git = GitCli::new(dir.path().to_path_buf())
+        .with_env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .with_env("GIT_CONFIG_NOSYSTEM", "1");
+    assert!(operation::current(&git).is_err());
 }

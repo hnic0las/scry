@@ -519,12 +519,20 @@ fn key(line: &str) -> &str {
 /// Sources"), or else the setting's line.
 fn entry_name(line: &str) -> String {
     let line = line.trim();
-    if let (Some(start), Some(end)) = (line.find("/* "), line.find(" */"))
-        && start < end
-    {
-        return line[start + 3..end].to_string();
+    if let Some(name) = comment(line) {
+        return name.to_string();
     }
     line.trim_end_matches([';', ',']).to_string()
+}
+
+/// The name in the first comment of `text`: "Sync.swift" in
+/// `A1 /* Sync.swift */`. The closing ` */` is looked for after the opening
+/// `/* `, which an empty comment, `/* */`, shares with it: that one names
+/// nothing.
+fn comment(text: &str) -> Option<&str> {
+    let open = text.find("/* ")?;
+    let close = open + 2 + text[open + 2..].find(" */")?;
+    text.get(open + 3..close).filter(|name| !name.is_empty())
 }
 
 /// A side's additions and removals by name, with the entries it changed
@@ -584,10 +592,8 @@ fn object_names(segments: &[Segment]) -> HashMap<String, String> {
                     continue;
                 }
                 let after = &line[line.find(id).unwrap_or(0) + id.len()..];
-                if let (Some(start), Some(end)) = (after.find("/* "), after.find(" */"))
-                    && start < end
-                {
-                    names.insert(id.to_string(), after[start + 3..end].to_string());
+                if let Some(name) = comment(after) {
+                    names.insert(id.to_string(), name.to_string());
                 }
             }
         }
@@ -722,6 +728,11 @@ mod tests {
                 .unwrap()
                 .contains("across several lines")
         );
+        // The entries each side adds, without the brackets that close them.
+        assert_eq!(
+            review.conflicts[0].ours_adds,
+            ["Frameworks", "isa = PBXFrameworksBuildPhase", "files = ("]
+        );
         // Nothing settles, so the file keeps its markers as git wrote it.
         assert!(keep_both(text, 7, true).unwrap().contains("<<<<<<< ours"));
     }
@@ -793,6 +804,10 @@ mod tests {
         assert!(!balanced("\t\t};"));
         assert!(!balanced("files = ("));
         assert!(!balanced("}{"));
+        // A slash outside a comment opens none, and a comment ends at `*/`, not at
+        // a slash inside it.
+        assert!(!balanced("name = Sources/App {"));
+        assert!(balanced("A1 /* Sources/(old) */ = 1;"));
     }
 
     /// With the base, an entry one side removed stays removed while the
@@ -829,6 +844,9 @@ mod tests {
         assert_eq!(result.matches("D1 /* d.swift in Sources */").count(), 1);
     }
 
+    /// Theirs removing a file from a group while ours adds one beside it:
+    /// keeping both must keep the removal too, or the group would list a
+    /// file theirs deleted, which Xcode shows in red.
     #[test]
     fn a_removal_beside_an_addition_stays_removed() {
         let text = "\
@@ -887,6 +905,9 @@ mod tests {
         assert!(review.conflicts[0].ours_adds.is_empty());
         assert!(review.conflicts[0].theirs_removes.is_empty());
         assert_eq!(review.resolvable, 1);
+        // Nothing is missing, so there is nothing to offer to remove.
+        assert!(review.missing.is_empty());
+        assert!(!review.missing_removable);
         let result = keep_both(text, 7, true).unwrap();
         assert!(
             result.starts_with("<<<<<<< ours\n\t\t\t\tMARKETING_VERSION = 1.4;\n||||||| base\n")
@@ -925,5 +946,75 @@ mod tests {
         let repaired = keep_both(text, 7, true).unwrap();
         assert!(!repaired.contains("ForecastView"));
         assert!(repaired.contains("children = (\n\t\t\t);"));
+    }
+
+    /// An object whose opening line is in a conflict and whose body and closing bracket
+    /// come after it is left by hand: keeping both opening lines would open the object
+    /// twice and break the project.
+    #[test]
+    fn an_object_opened_in_a_conflict_is_left_by_hand() {
+        let text = "\
+<<<<<<< ours
+\t\tB1000001 /* Frameworks */ = {
+=======
+\t\tB2000002 /* Frameworks */ = {
+>>>>>>> theirs
+\t\t\tisa = PBXFrameworksBuildPhase;
+\t\t};
+";
+        let review = review(text, 7).unwrap();
+        assert_eq!(review.resolvable, 0);
+        assert!(
+            review.conflicts[0]
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("across several lines")
+        );
+    }
+
+    /// An empty comment, `/* */`, has its closing ` */` inside its opening
+    /// `/* `: the review read it as a name ending before it starts and
+    /// panicked, which closes the app on a project (found by fuzzing).
+    /// It names nothing, so the entry reads as its line.
+    #[test]
+    fn an_empty_comment_names_nothing() {
+        let text = "\
+\t\tA2000001 /* */ = {isa = PBXFileReference; path = Sync.swift; };
+<<<<<<< ours
+\t\tA1000003 /* */ = {isa = PBXBuildFile; fileRef = A2000001 /* */; };
+=======
+\t\tA1000004 /* Cache.swift in Sources */ = {isa = PBXBuildFile; };
+>>>>>>> theirs
+";
+        let review = review(text, 7).unwrap();
+        assert_eq!(
+            review.conflicts[0].ours_adds,
+            ["A1000003 /* */ = {isa = PBXBuildFile; fileRef = A2000001 /* */; }"]
+        );
+        assert_eq!(review.conflicts[0].theirs_adds, ["Cache.swift in Sources"]);
+    }
+
+    /// A file renamed on one side reads as its old and new names, not as its raw
+    /// definition line.
+    #[test]
+    fn a_renamed_file_reads_by_its_names() {
+        let text = "\
+<<<<<<< ours
+\t\tA2000003 /* Queue.swift */ = {isa = PBXFileReference; path = Queue.swift; };
+||||||| base
+\t\tA2000003 /* OfflineQueue.swift */ = {isa = PBXFileReference; path = OfflineQueue.swift; };
+=======
+\t\tA2000003 /* OfflineQueue.swift */ = {isa = PBXFileReference; path = OfflineQueue.swift; };
+\t\tA2000004 /* ForecastCache.swift */ = {isa = PBXFileReference; path = ForecastCache.swift; };
+>>>>>>> theirs
+";
+        let review = review(text, 7).unwrap();
+        let changes = &review.conflicts[0].ours_changes;
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert!(
+            changes[0].ends_with("OfflineQueue.swift → Queue.swift"),
+            "{changes:?}"
+        );
     }
 }

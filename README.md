@@ -69,6 +69,13 @@ cargo llvm-cov --workspace --summary-only
 
 For the app, the Scry scheme collects coverage of the app target: in Xcode, Report navigator › the test run › Coverage; from the command line, `xcrun xccov view --report` on the `.xcresult` that `xcodebuild test` writes.
 
+Fuzzing feeds the hand-written parsers generated input, to find panics and endless loops on files nobody writes by hand. It needs the nightly toolchain and cargo-fuzz (`rustup toolchain install nightly`, `cargo install cargo-fuzz`); the targets are in `fuzz/` (conflict markers, a merge session, Xcode projects, String Catalogs, `Package.resolved`, lockfiles), outside the workspace:
+
+```sh
+scripts/fuzz.sh            # every target, 30 minutes each (3 hours)
+scripts/fuzz.sh 60 pbxproj # one target, one minute
+```
+
 When to run what:
 
 | When | What |
@@ -76,7 +83,7 @@ When to run what:
 | Each commit | `fmt`, `clippy`, `test` (with the oracle's 150 cases); `scripts/mutants.sh --in-diff` on the diff when Rust code changed |
 | Each push to `main` | `scripts/mutants.sh --in-diff` on `git diff origin/main` if a commit skipped it; the app's tests (`xcodebuild … test`) when `apps/macos/` or `crates/scry-ffi/` changed |
 | Each tag | `SCRY_ORACLE_CASES=1000` on the oracle, then the CI on macOS, Linux and Windows, all jobs green |
-| Each release | `scripts/mutants.sh` on the whole workspace, Rust and app coverage, `SCRY_ORACLE_CASES=5000`, fuzzing of the parsers (to set up, with `cargo-fuzz` on nightly), and a manual pass through the app and the CLI's prompts |
+| Each release | `scripts/mutants.sh` on the whole workspace, Rust and app coverage, `SCRY_ORACLE_CASES=5000`, `scripts/fuzz.sh` (30 minutes per parser), and a manual pass through the app and the CLI's prompts |
 
 A bug fix starts with a test that fails without it. A surviving mutant gets a test, or is accepted with its reason when it is equivalent (the same result) or out of reach (it needs the app, a terminal or another OS).
 

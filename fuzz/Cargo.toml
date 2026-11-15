@@ -1,0 +1,64 @@
+# Fuzzing of the hand-written parsers, with cargo-fuzz (libFuzzer): run
+# through `scripts/fuzz.sh`, before each release. Its own workspace, on the
+# nightly toolchain, so that `cargo test --workspace` never builds it.
+[package]
+name = "scry-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1.0.154"
+scry-core = { path = "../crates/scry-core" }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "conflict_markers"
+path = "fuzz_targets/conflict_markers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "merge_session"
+path = "fuzz_targets/merge_session.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pbxproj"
+path = "fuzz_targets/pbxproj.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "catalog"
+path = "fuzz_targets/catalog.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resolved"
+path = "fuzz_targets/resolved.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lockfile"
+path = "fuzz_targets/lockfile.rs"
+test = false
+doc = false
+bench = false

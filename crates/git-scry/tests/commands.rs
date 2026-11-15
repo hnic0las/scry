@@ -1,7 +1,7 @@
 //! The CLI's read-only commands, run as the binary.
 
 use std::fs;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 /// `git-scry` with git's configuration isolated from the user's.
 fn git_scry(dir: &std::path::Path, args: &[&str]) -> Output {
@@ -55,4 +55,95 @@ fn highlight_shows_colours_or_spans() {
 
     let output = git_scry(dir.path(), &["highlight", "a.unknown"]);
     assert_eq!(output.status.code(), Some(2));
+}
+
+/// Piped into a reader that stops early (`git scry highlight … | head -1`), git-scry
+/// stops quietly with 0 like other command-line tools, instead of printing a panic
+/// about a broken pipe.
+#[test]
+fn a_closed_pipe_stops_quietly() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("gitconfig"), "").unwrap();
+    // More than a pipe holds, so that git-scry still writes after the reader is gone.
+    fs::write(
+        dir.path().join("a.swift"),
+        "func upload() {}\n".repeat(20_000),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_git-scry"))
+        .current_dir(dir.path())
+        .args(["highlight", "a.swift"])
+        .env("GIT_CONFIG_GLOBAL", dir.path().join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+/// `session` says which operation is in progress, who is on each side, and which files
+/// still have conflicts: what the user needs before choosing a side.
+#[test]
+fn session_names_the_operation_its_sides_and_files() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("gitconfig"), "").unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", dir.path().join("gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Scry Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Scry Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    assert!(git(&["init", "--quiet", "--initial-branch=main"]));
+    let output = git_scry(dir.path(), &["session"]);
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "No merge, rebase, cherry-pick or revert in progress.\n"
+    );
+
+    fs::write(dir.path().join("a.txt"), "base\n").unwrap();
+    assert!(git(&["add", "a.txt"]));
+    assert!(git(&["commit", "--quiet", "-m", "base"]));
+    assert!(git(&["switch", "--quiet", "-c", "feature"]));
+    fs::write(dir.path().join("a.txt"), "feature\n").unwrap();
+    assert!(git(&["commit", "--quiet", "-am", "feature change"]));
+    assert!(git(&["switch", "--quiet", "main"]));
+    fs::write(dir.path().join("a.txt"), "main\n").unwrap();
+    assert!(git(&["commit", "--quiet", "-am", "main change"]));
+    assert!(!git(&["merge", "feature"]));
+
+    let output = git_scry(dir.path(), &["session"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.starts_with("Merging feature into main\n\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("  ours    main · current branch\n          at "),
+        "{stdout}"
+    );
+    assert!(stdout.contains(" main change\n"), "{stdout}");
+    assert!(
+        stdout.contains("  theirs  feature · being merged\n          at "),
+        "{stdout}"
+    );
+    assert!(stdout.contains(" feature change\n"), "{stdout}");
+    assert!(
+        stdout.ends_with("\nFiles with conflicts (1):\n  a.txt\n"),
+        "{stdout}"
+    );
 }

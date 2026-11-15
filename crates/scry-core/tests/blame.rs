@@ -57,7 +57,17 @@ impl Repo {
 
     /// The commits of every conflict of `file.txt`, as the app computes them.
     fn conflict_commits(&self) -> Vec<blame::ConflictCommits> {
-        self.conflict_commits_with(&GitCli::new(self.path()))
+        self.conflict_commits_with(&self.scry_git())
+    }
+
+    /// Git as the app runs it, with the user's configuration left out.
+    fn scry_git(&self) -> GitCli {
+        GitCli::new(self.path())
+            .with_env(
+                "GIT_CONFIG_GLOBAL",
+                &self.root.path().join("gitconfig").display().to_string(),
+            )
+            .with_env("GIT_CONFIG_NOSYSTEM", "1")
     }
 
     fn conflict_commits_with(&self, git: &dyn Git) -> Vec<blame::ConflictCommits> {
@@ -238,7 +248,7 @@ fn an_older_git_still_finds_each_sides_commit() {
     assert!(repo.git(&["switch", "--quiet", "feature"], "Scry Test"));
     assert!(!repo.git(&["rebase", "main"], "Scry Test"));
 
-    let commits = repo.conflict_commits_with(&OldGit(GitCli::new(repo.path())));
+    let commits = repo.conflict_commits_with(&OldGit(repo.scry_git()));
     assert_eq!(
         subject_and_author(&commits[0].ours),
         Some(("Add a timeout", "Alex Martin"))

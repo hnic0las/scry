@@ -607,9 +607,30 @@ mod tests {
     /// right command; other files are not lockfiles.
     #[test]
     fn lockfiles_are_recognised_by_name() {
-        assert_eq!(Format::of("web/package-lock.json"), Some(Format::Npm));
-        assert_eq!(Format::of("ios/Podfile.lock"), Some(Format::CocoaPods));
-        assert_eq!(Format::of("Cargo.lock"), Some(Format::Cargo));
+        let names = [
+            ("Cargo.lock", Format::Cargo),
+            ("web/package-lock.json", Format::Npm),
+            ("npm-shrinkwrap.json", Format::Npm),
+            ("yarn.lock", Format::Yarn),
+            ("pnpm-lock.yaml", Format::Pnpm),
+            ("ios/Podfile.lock", Format::CocoaPods),
+            ("Gemfile.lock", Format::Bundler),
+            ("poetry.lock", Format::Poetry),
+            ("composer.lock", Format::Composer),
+            ("go.sum", Format::GoSum),
+            ("backend/uv.lock", Format::Uv),
+            ("Pipfile.lock", Format::Pipenv),
+            ("pubspec.lock", Format::Pub),
+            ("Cartfile.resolved", Format::Carthage),
+            ("gradle.lockfile", Format::Gradle),
+            ("flake.lock", Format::Nix),
+            ("bun.lock", Format::Bun),
+            ("deno.lock", Format::Deno),
+            ("mix.lock", Format::Mix),
+        ];
+        for (path, format) in names {
+            assert_eq!(Format::of(path), Some(format), "{path}");
+        }
         assert_eq!(Format::of("package.json"), None);
         assert_eq!(Format::CocoaPods.command(""), "pod install");
         assert_eq!(Format::of("backend/uv.lock"), Some(Format::Uv));
@@ -631,16 +652,51 @@ mod tests {
         assert_eq!(Format::Poetry.command(""), "poetry lock");
         assert!(Format::Poetry.caveat().unwrap().contains("--no-update"));
         assert!(Format::Pipenv.caveat().is_some());
+        assert!(Format::Carthage.caveat().is_some());
         assert_eq!(Format::Npm.caveat(), None);
     }
 
+    /// Only go.sum, a list of checksums, merges by keeping both sides' lines: in any
+    /// other lockfile that would leave two versions of a package.
+    #[test]
+    fn only_go_sum_merges_by_lines() {
+        assert!(Format::GoSum.merges_by_lines());
+        assert!(!Format::Npm.merges_by_lines());
+        assert!(!Format::Cargo.merges_by_lines());
+    }
+
+    /// Composer lists packages and dev packages; an entry without a version is not a
+    /// package to compare.
+    #[test]
+    fn composer_lists_packages_and_dev_packages() {
+        let text = r#"{"packages":[{"name":"monolog/monolog","version":"3.5.0"},{"name":"vendor/unversioned","version":""}],
+            "packages-dev":[{"name":"phpunit/phpunit","version":"10.5.10"}]}"#;
+        let packages = packages(Format::Composer, text);
+        assert_eq!(packages["monolog/monolog"], "3.5.0");
+        assert_eq!(packages["phpunit/phpunit"], "10.5.10");
+        assert_eq!(packages.len(), 2);
+    }
+
+    /// A full commit hash is shortened as git shows it; a shorter hex string or a long
+    /// name that is not hex is a version or a branch, kept as it is.
+    #[test]
+    fn only_full_hashes_are_shortened() {
+        assert_eq!(short("0123456789abcdef0123456789abcdef01234567"), "0123456");
+        assert_eq!(short("abcdef12"), "abcdef12");
+        assert_eq!(
+            short("release/2024-05-offline-queue-and-forecast"),
+            "release/2024-05-offline-queue-and-forecast"
+        );
+    }
+
     /// Each side's upgrades are listed by package, and a package both
-    /// sides moved to different versions is flagged: the tool decides.
+    /// sides moved to different versions is flagged: the tool decides. The
+    /// requirements under DEPENDENCIES are not installed versions.
     #[test]
     fn package_changes_are_listed_by_name() {
         let lock = |alamofire: &str, kingfisher: &str| {
             format!(
-                "PODS:\n  - Alamofire ({alamofire})\n  - Kingfisher ({kingfisher})\n  - SnapKit (5.6.0):\n    - Alamofire (~> 5.0)\n\nDEPENDENCIES:\n  - Alamofire\n"
+                "PODS:\n  - Alamofire ({alamofire})\n  - Kingfisher ({kingfisher})\n  - SnapKit (5.6.0):\n    - Alamofire (~> 5.0)\n\nDEPENDENCIES:\n  - Alamofire (~> 5.8)\n  - Kingfisher\n"
             )
         };
         let changes = changes(
@@ -648,6 +704,10 @@ mod tests {
             &lock("5.8.0", "7.9.0"),
             &lock("5.8.1", "7.9.0"),
             &lock("5.9.0", "7.10.0"),
+        );
+        assert_eq!(
+            packages(Format::CocoaPods, &lock("5.8.0", "7.9.0"))["Alamofire"],
+            "5.8.0"
         );
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0].name, "Alamofire");
@@ -682,6 +742,11 @@ mod tests {
         let packages_found = packages(Format::Pnpm, pnpm);
         assert_eq!(packages_found["@babel/core"], "7.24.0");
         assert_eq!(packages_found["react-dom"], "18.2.0");
+        // Only the `packages:` section lists packages.
+        let pnpm = "lockfileVersion: '9.0'\n\nsettings:\n  other@1.0.0:\n\npackages:\n\n  lodash@4.17.21:\n    resolution: {integrity: z}\n";
+        let packages_found = packages(Format::Pnpm, pnpm);
+        assert_eq!(packages_found.len(), 1, "{packages_found:?}");
+        assert_eq!(packages_found["lodash"], "4.17.21");
     }
 
     /// Bundler's own version counts as a package, since both sides often

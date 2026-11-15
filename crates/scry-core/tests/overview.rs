@@ -946,6 +946,7 @@ fn a_name_with_glob_characters_stages_only_itself() {
         )
         .unwrap();
     let staged = Command::new("git")
+        .envs(Repo::environment(repo.root.path()))
         .args([
             "-C",
             path.to_str().unwrap(),
@@ -1052,6 +1053,7 @@ fn rebase_with(repo: &Repo, todo: &str) {
 
 fn subjects(repo: &Repo) -> Vec<String> {
     let log = Command::new("git")
+        .envs(Repo::environment(repo.root.path()))
         .arg("-C")
         .arg(repo.path())
         .args(["log", "--format=%s", "main..HEAD"])
@@ -1175,6 +1177,7 @@ fn a_reword_message_starting_with_a_hash_is_kept() {
         )
         .unwrap();
     let body = Command::new("git")
+        .envs(Repo::environment(repo.root.path()))
         .arg("-C")
         .arg(repo.path())
         .args(["log", "-1", "--format=%B"])

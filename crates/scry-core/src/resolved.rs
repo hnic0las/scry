@@ -388,6 +388,9 @@ mod tests {
         assert!(error.contains("format 2"), "{error}");
     }
 
+    /// Older projects keep version 1 of the format, with the pins under
+    /// `object` and named by `package`: they merge pin by pin like the
+    /// current versions, and the bump is written back.
     #[test]
     fn version_one_files_are_read() {
         let file = |version: &str| {
