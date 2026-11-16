@@ -7,10 +7,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use scry_core::command::Command as SessionCommand;
 use scry_core::git::GitCli;
+use scry_core::records::{Record, Store};
 use scry_core::resolution::CandidateKind;
 use scry_core::review::{self, Resolution};
-use scry_core::session;
+use scry_core::session::{self, Choice, MergeSession};
+use scry_core::theme::{Provenance, State};
 use tempfile::TempDir;
 
 /// A throwaway repository whose git ignores the user's configuration.
@@ -112,6 +115,13 @@ impl Repo {
         (0..session.conflict_count())
             .map(|index| session.analysis_so_far(index).id.clone())
             .collect()
+    }
+
+    /// The file opened for review, as the app will.
+    fn open(&self) -> MergeSession {
+        review::open(&self.cli(), &self.path(), "file.txt", "main", "feature")
+            .unwrap()
+            .expect("a review")
     }
 
     fn find(&self) -> review::FileReview {
@@ -360,4 +370,247 @@ fn own_text_before_a_last_conflict_without_a_break_is_its_own() {
             Resolution::Candidate(CandidateKind::Theirs),
         ]
     );
+}
+
+/// The store follows the operation's stop: what was kept during the merge
+/// is found again while it is in progress, kept in the git folder (nothing
+/// in `git status`), and no longer seen once the merge is committed.
+#[test]
+fn the_store_belongs_to_the_stop() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    let record = Record {
+        conflict: String::from("c1"),
+        by: String::from("agent"),
+        pick: None,
+        text: String::from("mine\n"),
+        reason: String::from("Both sides renamed the same value."),
+        dropped: Some(String::from("nothing")),
+        at: 0,
+    };
+    Store::open(&repo.cli())
+        .unwrap()
+        .add_record("file.txt", record.clone())
+        .unwrap();
+    assert_eq!(
+        Store::open(&repo.cli()).unwrap().records("file.txt")["c1"],
+        record
+    );
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .envs(Repo::environment(repo.root.path()))
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8(status.stdout).unwrap(), "UU file.txt\n");
+
+    repo.ok(&["add", "file.txt"]);
+    repo.ok(&["commit", "--quiet", "--no-edit"]);
+    assert!(
+        Store::open(&repo.cli())
+            .unwrap()
+            .records("file.txt")
+            .is_empty()
+    );
+}
+
+fn outside(session: &MergeSession, index: usize) -> &scry_core::session::Outside {
+    match session.choice(index) {
+        Some(Choice::Outside(outside)) => outside,
+        other => panic!("conflict {index}: {other:?}"),
+    }
+}
+
+/// A file resolved elsewhere opens for review: each resolved conflict's
+/// choice is what the file holds, not reviewed yet, and shown as needing
+/// review; an open conflict stays open; and the merged text is the file
+/// itself, so saving without a change writes it back unchanged.
+#[test]
+fn a_resolved_file_opens_for_review() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    let file = "start\none theirs\nm1\nm2\nm3\nm4\nm5\ntwo, mine\nend\n";
+    fs::write(repo.file(), file).unwrap();
+    let session = repo.open();
+    assert_eq!(outside(&session, 0).matches, Some(CandidateKind::Theirs));
+    assert_eq!(outside(&session, 1).matches, None);
+    assert_eq!(outside(&session, 1).text, "two, mine\n");
+    assert_eq!(session.status().unreviewed, 2);
+    assert_eq!(session.merged_text().as_deref(), Some(file));
+    assert_eq!(session.conflict(1).start_line, 8);
+
+    let view = session.conflict_view(0, "main", "feature");
+    assert_eq!(view.state, State::NeedsReview);
+    let chosen = view.chosen.unwrap();
+    assert_eq!(chosen.title, "Outside Scry · Theirs");
+    assert_eq!(chosen.provenance, Provenance::Human);
+    assert_eq!(view.outside.unwrap().by, None);
+}
+
+/// Marking a conflict reviewed is kept in the git folder: opening the file
+/// again finds it reviewed, while the other still needs review. Once the
+/// file holds something else for it, it needs review again.
+#[test]
+fn a_review_survives_opening_the_file_again() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    fs::write(
+        repo.file(),
+        "start\none theirs\nm1\nm2\nm3\nm4\nm5\ntwo ours\nend\n",
+    )
+    .unwrap();
+    let mut session = repo.open();
+    assert!(
+        !session
+            .apply(SessionCommand::MarkReviewed { conflict: 0 })
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(session.status().unreviewed, 1);
+    // Twice changes nothing.
+    assert!(
+        session
+            .apply(SessionCommand::MarkReviewed { conflict: 0 })
+            .unwrap()
+            .is_empty()
+    );
+
+    let session = repo.open();
+    assert!(outside(&session, 0).reviewed);
+    assert!(!outside(&session, 1).reviewed);
+    assert_eq!(
+        session.conflict_view(0, "main", "feature").state,
+        State::Resolved
+    );
+
+    fs::write(
+        repo.file(),
+        "start\none ours\nm1\nm2\nm3\nm4\nm5\ntwo ours\nend\n",
+    )
+    .unwrap();
+    assert!(!outside(&repo.open(), 0).reviewed);
+}
+
+/// A conflict the user resolves in Scry during the review is theirs, so
+/// reviewed: once saved, opening the file again does not ask about it.
+#[test]
+fn a_choice_made_in_scry_counts_as_reviewed() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    fs::write(
+        repo.file(),
+        "start\none theirs\nm1\nm2\nm3\nm4\nm5\ntwo theirs\nend\n",
+    )
+    .unwrap();
+    let mut session = repo.open();
+    session
+        .apply(SessionCommand::Choose {
+            conflict: 1,
+            candidate: CandidateKind::Ours,
+        })
+        .unwrap();
+    session
+        .apply(SessionCommand::Save { overwrite: false })
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(repo.file()).unwrap(),
+        "start\none theirs\nm1\nm2\nm3\nm4\nm5\ntwo ours\nend\n"
+    );
+    let session = repo.open();
+    assert!(outside(&session, 1).reviewed);
+    assert_eq!(session.status().unreviewed, 1);
+}
+
+/// What the agent recorded shows with its resolution, as long as the file
+/// still holds the text it wrote; changed since, the record is not shown,
+/// since it would explain text that is no longer there.
+#[test]
+fn an_agents_record_shows_while_the_file_holds_its_text() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    let ids = repo.ids();
+    fs::write(
+        repo.file(),
+        "start\none theirs\nm1\nm2\nm3\nm4\nm5\ntwo ours\nend\n",
+    )
+    .unwrap();
+    let record = |conflict: &str, text: &str| Record {
+        conflict: conflict.to_string(),
+        by: String::from("claude-code 2.1"),
+        pick: Some(CandidateKind::Theirs),
+        text: text.to_string(),
+        reason: String::from("The feature's wording is the newer one."),
+        dropped: None,
+        at: 0,
+    };
+    let store = Store::open(&repo.cli()).unwrap();
+    store
+        .add_record("file.txt", record(&ids[0], "one theirs\n"))
+        .unwrap();
+    store
+        .add_record("file.txt", record(&ids[1], "two theirs\n"))
+        .unwrap();
+
+    let session = repo.open();
+    let view = session.conflict_view(0, "main", "feature");
+    assert_eq!(view.chosen.as_ref().unwrap().title, "Agent · Theirs");
+    assert_eq!(view.chosen.unwrap().provenance, Provenance::Agent);
+    let told = view.outside.unwrap();
+    assert_eq!(told.by.as_deref(), Some("claude-code 2.1"));
+    assert_eq!(
+        told.reason.as_deref(),
+        Some("The feature's wording is the newer one.")
+    );
+    assert_eq!(outside(&session, 1).record, None);
+}
+
+/// Reopening a conflict takes its resolution away, as one step undo puts
+/// back.
+#[test]
+fn reopening_a_conflict_can_be_undone() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    fs::write(
+        repo.file(),
+        "start\none theirs\nm1\nm2\nm3\nm4\nm5\ntwo ours\nend\n",
+    )
+    .unwrap();
+    let mut session = repo.open();
+    session
+        .apply(SessionCommand::Reopen { conflict: 0 })
+        .unwrap();
+    assert_eq!(session.choice(0), None);
+    assert_eq!(session.merged_text(), None);
+    session.apply(SessionCommand::Undo).unwrap();
+    assert_eq!(outside(&session, 0).matches, Some(CandidateKind::Theirs));
+}
+
+/// A file changed outside its conflicts has no conflict by conflict
+/// review: it would hide the change.
+#[test]
+fn a_file_changed_outside_does_not_open_for_review() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    fs::write(
+        repo.file(),
+        "start\none theirs\nm1\nm2, edited\nm3\nm4\nm5\ntwo theirs\nend\n",
+    )
+    .unwrap();
+    assert!(
+        review::open(&repo.cli(), &repo.path(), "file.txt", "main", "feature")
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// In a file ending with a conflict whose sides have no final line break,
+/// a side picked in Scry during the review keeps that: the file is written
+/// as `git merge-file --ours` would, not with a line break git added.
+#[test]
+fn a_side_picked_in_review_keeps_its_final_break() {
+    let repo = Repo::merged("start\nend", "start\nend ours", "start\nend theirs", "");
+    fs::write(repo.file(), "start\nend theirs").unwrap();
+    let mut session = repo.open();
+    assert_eq!(session.merged_text().as_deref(), Some("start\nend theirs"));
+    session
+        .apply(SessionCommand::Choose {
+            conflict: 0,
+            candidate: CandidateKind::Ours,
+        })
+        .unwrap();
+    assert_eq!(session.merged_text().as_deref(), Some("start\nend ours"));
 }

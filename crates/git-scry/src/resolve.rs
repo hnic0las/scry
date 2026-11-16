@@ -106,7 +106,7 @@ fn run_with(options: &Options, git: &dyn Git, console: &mut Console) -> u8 {
                 console.say("(conflicts rebuilt from the three versions, to show the base)")
             }
             Origin::EditedFile => console.say("(the file was edited since git wrote it: its conflicts are used as they are, without the base)"),
-            Origin::File => {}
+            Origin::File | Origin::Resolved => {}
         }
         if !ask_each_conflict(console, &mut session, &ours, &theirs) {
             console.say(&format!("Nothing written; {name} stays conflicted."));

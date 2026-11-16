@@ -16,6 +16,10 @@ use crate::theme::{Badge, Provenance, Role, Severity, State};
 /// The ID of a conflict's text written by hand, beside the candidates'.
 pub const EDITED_ID: &str = "edited";
 
+/// The ID of text a conflict was resolved with outside Scry, when it is no
+/// candidate's.
+pub const OUTSIDE_ID: &str = "outside";
+
 /// How many lines of a candidate a preview shows.
 pub const PREVIEW_LINES: usize = 3;
 
@@ -104,6 +108,22 @@ pub struct ConflictView {
     /// Whether the candidates are checked by parsing (or the file cannot
     /// be): until then they have no parse result and no closed "both".
     pub checked: bool,
+    /// For a conflict resolved outside Scry: who, why, and whether the
+    /// user reviewed it.
+    pub outside: Option<OutsideView>,
+}
+
+/// A conflict resolved outside Scry, as the review shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OutsideView {
+    /// The agent's name and version as it gave them; `None` when it did
+    /// not resolve through Scry, so nobody is known.
+    pub by: Option<String>,
+    /// Why, in the agent's words.
+    pub reason: Option<String>,
+    /// What of either side the agent's own text leaves out, as it said.
+    pub dropped: Option<String>,
+    pub reviewed: bool,
 }
 
 /// The first lines of a text, and whether there are more. Any line ending
@@ -173,6 +193,36 @@ impl MergeSession {
                 .iter()
                 .find(|candidate| candidate.id == kind.id())
                 .cloned(),
+            Some(Choice::Outside(outside)) => {
+                let base = outside.matches.and_then(|kind| {
+                    candidates
+                        .iter()
+                        .find(|candidate| candidate.id == kind.id())
+                        .cloned()
+                });
+                let (preview, truncated) = preview(&outside.text);
+                let base = base.unwrap_or(CandidateView {
+                    id: OUTSIDE_ID.to_string(),
+                    title: String::from("Own text"),
+                    subtitle: String::from("Written outside Scry"),
+                    preview,
+                    truncated,
+                    parse: outside.parse,
+                    provenance: Provenance::Human,
+                    suggested: false,
+                    aliases: Vec::new(),
+                });
+                let (who, provenance) = match &outside.record {
+                    Some(_) => ("Agent", Provenance::Agent),
+                    None => ("Outside Scry", Provenance::Human),
+                };
+                Some(CandidateView {
+                    title: format!("{who} · {}", base.title),
+                    parse: outside.parse,
+                    provenance,
+                    ..base
+                })
+            }
             Some(Choice::Edited(edit)) => {
                 let (preview, truncated) = preview(&edit.text);
                 Some(CandidateView {
@@ -204,7 +254,13 @@ impl MergeSession {
                         Role::Severity(Severity::Error),
                     ));
                 }
-                (State::Resolved, badges)
+                match self.choice(index) {
+                    Some(Choice::Outside(outside)) if !outside.reviewed => {
+                        badges.push(Badge::new("Needs review", Role::State(State::NeedsReview)));
+                        (State::NeedsReview, badges)
+                    }
+                    _ => (State::Resolved, badges),
+                }
             }
         };
         ConflictView {
@@ -221,6 +277,18 @@ impl MergeSession {
                 .unwrap_or(&self.conflict(index).ours.text)
                 .to_string(),
             checked: self.is_checked(index),
+            outside: match self.choice(index) {
+                Some(Choice::Outside(outside)) => Some(OutsideView {
+                    by: outside.record.as_ref().map(|record| record.by.clone()),
+                    reason: outside.record.as_ref().map(|record| record.reason.clone()),
+                    dropped: outside
+                        .record
+                        .as_ref()
+                        .and_then(|record| record.dropped.clone()),
+                    reviewed: outside.reviewed,
+                }),
+                _ => None,
+            },
         }
     }
 }

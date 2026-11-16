@@ -23,6 +23,7 @@ pub mod overview;
 pub mod pbxproj;
 pub mod presentation;
 pub mod rebase_plan;
+pub mod records;
 pub mod resolution;
 pub mod resolved;
 pub mod review;

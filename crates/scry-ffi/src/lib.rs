@@ -5,6 +5,7 @@
 //! core's, so the core stays free of UniFFI.
 
 use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -20,6 +21,7 @@ use scry_core::overview;
 use scry_core::presentation;
 use scry_core::rebase_plan;
 use scry_core::resolution::CandidateKind;
+use scry_core::review;
 use scry_core::session::{self, MergeSession, MergetoolFiles};
 use scry_core::syntax::ParseCheck;
 use scry_core::theme;
@@ -329,6 +331,21 @@ pub struct ConflictInfo {
     /// `conflicts` leaves them unchecked until `conflict` asks for one:
     /// checking every conflict of a large file took seconds.
     pub checked: bool,
+    /// For a conflict resolved outside Scry (a document from
+    /// `open_review`): who, why, and whether the user reviewed it.
+    pub outside: Option<OutsideInfo>,
+}
+
+/// A conflict resolved outside Scry, as the review shows it.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct OutsideInfo {
+    /// The agent's name and version as it gave them; `None` when it did
+    /// not resolve through Scry, so nobody is known.
+    pub by: Option<String>,
+    pub reason: Option<String>,
+    /// What of either side the agent's own text leaves out.
+    pub dropped: Option<String>,
+    pub reviewed: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -352,6 +369,8 @@ pub struct Status {
     pub checks_off: bool,
     pub can_undo: bool,
     pub can_redo: bool,
+    /// Conflicts resolved outside Scry not reviewed yet.
+    pub unreviewed: u32,
 }
 
 /// Something the app asks the core to do; conflicts are counted from 0.
@@ -369,6 +388,14 @@ pub enum Command {
         text: String,
     },
     ApplySuggestions,
+    /// Marks a conflict resolved outside Scry as reviewed.
+    MarkReviewed {
+        conflict: u32,
+    },
+    /// Takes a conflict's choice away: it is open again.
+    Reopen {
+        conflict: u32,
+    },
     Undo,
     Redo,
     /// Writes the merged file; with `overwrite`, even over a file changed
@@ -408,6 +435,37 @@ pub struct MergeDocument {
     // UniFFI shares the object with Swift behind an `Arc`, so methods take
     // `&self`; the mutex lets commands change the session safely.
     session: Mutex<MergeSession>,
+}
+
+/// Opens a file resolved outside Scry (by an agent, another editor)
+/// and not staged, to review it conflict by conflict: each conflict's
+/// choice is what the file holds. `None` when it cannot be reviewed so:
+/// no text conflict in the index, or the text around the conflicts
+/// changed.
+#[uniffi::export]
+pub fn open_review(path: String) -> Result<Option<Arc<MergeDocument>>, ScryError> {
+    let path = PathBuf::from(path);
+    let beside = GitCli::beside(&path);
+    let root = overview::root(&beside).map_err(failed)?;
+    let relative = fs::canonicalize(&path)
+        .ok()
+        .and_then(|path| {
+            let root = fs::canonicalize(&root).ok()?;
+            path.strip_prefix(root).ok().map(Path::to_path_buf)
+        })
+        .ok_or_else(|| failed(format!("{} is not in its repository", path.display())))?;
+    let relative = relative
+        .to_str()
+        .ok_or_else(|| failed(format!("{} is not a name git can take", path.display())))?
+        .to_string();
+    let git = GitCli::discover(root.clone());
+    let operation = operation::current(&git).ok().flatten();
+    let (ours, theirs) = presentation::side_labels(operation.as_ref());
+    let Some(session) = review::open(&git, &root, &relative, &ours, &theirs).map_err(failed)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(MergeDocument::new(&path, session, &git, operation)))
 }
 
 #[uniffi::export]
@@ -534,6 +592,7 @@ impl MergeDocument {
             merged: parse_status(status.merged),
             language: status.language.map(|language| language.name().to_string()),
             checks_off: status.checks_off,
+            unreviewed: status.unreviewed as u32,
         }
     }
 }
@@ -589,6 +648,12 @@ impl MergeDocument {
             theirs_commit: self.lens_commit(index, false),
             has_base: session.conflict(index).base.is_some(),
             checked: view.checked,
+            outside: view.outside.map(|outside| OutsideInfo {
+                by: outside.by,
+                reason: outside.reason,
+                dropped: outside.dropped,
+                reviewed: outside.reviewed,
+            }),
         }
     }
 
@@ -1650,6 +1715,12 @@ fn core_command(command: Command) -> Result<core::Command, ScryError> {
             text,
         },
         Command::ApplySuggestions => core::Command::ApplySuggestions,
+        Command::MarkReviewed { conflict } => core::Command::MarkReviewed {
+            conflict: conflict as usize,
+        },
+        Command::Reopen { conflict } => core::Command::Reopen {
+            conflict: conflict as usize,
+        },
         Command::Undo => core::Command::Undo,
         Command::Redo => core::Command::Redo,
         Command::Save { overwrite } => core::Command::Save { overwrite },
@@ -1670,6 +1741,12 @@ fn command(command: core::Command) -> Command {
             text,
         },
         core::Command::ApplySuggestions => Command::ApplySuggestions,
+        core::Command::MarkReviewed { conflict } => Command::MarkReviewed {
+            conflict: conflict as u32,
+        },
+        core::Command::Reopen { conflict } => Command::Reopen {
+            conflict: conflict as u32,
+        },
         core::Command::Undo => Command::Undo,
         core::Command::Redo => Command::Redo,
         core::Command::Save { overwrite } => Command::Save { overwrite },
@@ -1815,6 +1892,65 @@ mod tests {
             error.to_string(),
             "No merge, rebase, cherry-pick or revert in progress"
         );
+    }
+
+    /// A file resolved outside Scry opens for review through the API the
+    /// app uses: its conflict is resolved with what the file holds, needs
+    /// review, and marking it reviewed is what the status counts. While
+    /// the file still has its markers, the conflict opens open. The conflict
+    /// is one line on each side, so the user's conflict style, which git
+    /// reads here, gives the same conflict.
+    #[test]
+    fn a_resolved_file_opens_for_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args([
+                    "-c",
+                    "user.name=Scry Test",
+                    "-c",
+                    "user.email=test@example.com",
+                ])
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .status;
+            status.success()
+        };
+        let path = dir.path().join("a.txt");
+        assert!(git(&["init", "--quiet", "--initial-branch=main"]));
+        std::fs::write(&path, "first\nbase\nlast\n").unwrap();
+        assert!(git(&["add", "a.txt"]));
+        assert!(git(&["commit", "--quiet", "-m", "base"]));
+        assert!(git(&["switch", "--quiet", "-c", "feature"]));
+        std::fs::write(&path, "first\nfeature\nlast\n").unwrap();
+        assert!(git(&["commit", "--quiet", "-am", "feature"]));
+        assert!(git(&["switch", "--quiet", "main"]));
+        std::fs::write(&path, "first\nmain\nlast\n").unwrap();
+        assert!(git(&["commit", "--quiet", "-am", "main"]));
+        assert!(!git(&["merge", "--quiet", "feature"]));
+
+        let shown = path.display().to_string();
+        assert!(
+            open_review(shown.clone())
+                .unwrap()
+                .is_some_and(|document| { document.conflicts()[0].chosen.is_none() })
+        );
+        std::fs::write(&path, "first\nfeature\nlast\n").unwrap();
+        let document = open_review(shown).unwrap().unwrap();
+        let conflict = document.conflict(0).unwrap();
+        assert!(matches!(conflict.state, ConflictState::NeedsReview));
+        assert_eq!(conflict.chosen.unwrap().id, "theirs");
+        assert!(!conflict.outside.unwrap().reviewed);
+        assert_eq!(document.status().unreviewed, 1);
+        document
+            .apply(Command::MarkReviewed { conflict: 0 })
+            .unwrap();
+        assert_eq!(document.status().unreviewed, 0);
+        assert!(document.conflict(0).unwrap().outside.unwrap().reviewed);
     }
 
     /// The Swift-facing API end to end: open a file, read its header and candidates, choose,

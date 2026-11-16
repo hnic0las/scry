@@ -8,7 +8,7 @@
 //! what lies between is each conflict's resolution, named by the candidate
 //! it equals when it equals one.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -16,8 +16,11 @@ use serde::Serialize;
 
 use crate::conflict::{self, ParseError, Segment};
 use crate::git::Git;
+use crate::records::{Record, Store};
 use crate::resolution::{self, Analysis, CandidateKind};
-use crate::session::{self, LoadError, MergetoolFiles};
+use crate::session::{self, LoadError, MergeSession, MergetoolFiles, Origin, Outside};
+use crate::syntax::Language;
+use crate::syntax::ParseCheck;
 
 /// How one conflict was resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -45,6 +48,11 @@ pub struct ConflictReview {
     /// when it is unknown or empty.
     pub line: Option<usize>,
     pub resolution: Resolution,
+    /// The resolution's text as git's would hold it, with the final line
+    /// break git adds, and the line where it starts, even when empty: what
+    /// a review session is built from.
+    #[serde(skip)]
+    pub(crate) region: Option<(String, usize)>,
 }
 
 /// What was done to a file.
@@ -54,6 +62,8 @@ pub struct FileReview {
     /// The text around the conflicts is no longer what git wrote: a review
     /// must show it, since nobody asked for it.
     pub changed_outside: bool,
+    /// Whether the file ends with a line break (or is empty).
+    pub ends_with_break: bool,
 }
 
 /// What was done to `path` (from the repository root), with `git` running
@@ -68,12 +78,128 @@ pub fn find(git: &dyn Git, root: &Path, path: &str) -> Result<Option<FileReview>
     };
     let current = String::from_utf8(bytes).map_err(|_| LoadError::NotText(file.clone()))?;
     let marker_size = conflict::marker_size(git, Path::new(path));
-    let Some(written) = as_git_wrote(git, path, &file, marker_size)? else {
+    let Some(written) = as_git_wrote(git, path, &file, marker_size, ("ours", "theirs"))? else {
         return Ok(None);
     };
-    resolutions(&written, &current, marker_size)
+    resolutions(&written.text, &current, marker_size)
         .map(Some)
         .map_err(LoadError::Parse)
+}
+
+/// `path` (from the repository root) opened for review: a session on its
+/// conflicts rebuilt from the index, with the sides named `ours` and
+/// `theirs`, each conflict's choice being what the file holds
+/// (`Choice::Outside`), with the agent's record and the review kept in
+/// the git folder. `None` when there is no text conflict to rebuild, or
+/// the text around the conflicts changed: there is then no conflict by
+/// conflict review.
+pub fn open(
+    git: &dyn Git,
+    root: &Path,
+    path: &str,
+    ours: &str,
+    theirs: &str,
+) -> Result<Option<MergeSession>, LoadError> {
+    let file = root.join(path);
+    let current = fs::read(&file).map_err(|error| LoadError::Io(file.clone(), error))?;
+    let current = String::from_utf8(current).map_err(|_| LoadError::NotText(file.clone()))?;
+    let marker_size = conflict::marker_size(git, Path::new(path));
+    let Some(written) = as_git_wrote(git, path, &file, marker_size, (ours, theirs))? else {
+        return Ok(None);
+    };
+    let store = Store::open(git).ok();
+    let (records, reviewed) = store
+        .as_ref()
+        .map(|store| (store.records(path), store.reviewed(path)))
+        .unwrap_or_default();
+    let found = session(
+        &written.text,
+        &current,
+        marker_size,
+        Language::from_path(&file),
+        written.breaks,
+        &records,
+        &reviewed,
+    )
+    .map_err(LoadError::Parse)?;
+    Ok(found.map(|session| {
+        let session = session.with_file(file);
+        match store {
+            Some(store) => session.keeping_reviews(store, path.to_string()),
+            None => session,
+        }
+    }))
+}
+
+/// A review session on `current`, resolved from `written` (git's text with
+/// markers): the conflicts of `written`, each with what `current` holds as
+/// its choice, its record when it still matches, and reviewed when the
+/// review kept that same text. `breaks` say whether ours and theirs end
+/// with a line break. `None` when the text around the conflicts changed.
+pub fn session(
+    written: &str,
+    current: &str,
+    marker_size: usize,
+    language: Option<Language>,
+    breaks: (bool, bool),
+    records: &BTreeMap<String, Record>,
+    reviewed: &BTreeMap<String, String>,
+) -> Result<Option<MergeSession>, ParseError> {
+    let found = resolutions(written, current, marker_size)?;
+    if found.changed_outside {
+        return Ok(None);
+    }
+    let mut segments = conflict::parse_with_marker_size(written, marker_size)?;
+    let mut places = found
+        .conflicts
+        .iter()
+        .map(|conflict| conflict.region.as_ref());
+    for segment in &mut segments {
+        if let Segment::Conflict(conflict) = segment
+            && let Some(Some((_, line))) = places.next()
+        {
+            conflict.start_line = *line;
+        }
+    }
+    let session =
+        MergeSession::from_segments(segments, Origin::Resolved, current.to_string(), language)
+            .with_final_breaks(breaks.0, breaks.1);
+    let outside = found
+        .conflicts
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, conflict)| {
+            let (text, _) = conflict.region?;
+            let matches = match conflict.resolution {
+                Resolution::Candidate(kind) => Some(kind),
+                Resolution::Text(_) => None,
+                Resolution::Open | Resolution::Unknown => return None,
+            };
+            let record = records
+                .get(&conflict.id)
+                .filter(|record| record.text == text)
+                .cloned();
+            let reviewed = reviewed.get(&conflict.id) == Some(&text);
+            let outside = Outside {
+                text,
+                matches,
+                record,
+                parse: ParseCheck::NotChecked,
+                reviewed,
+            };
+            Some((index, outside))
+        })
+        .collect();
+    Ok(Some(
+        session.resolved_outside(outside, found.ends_with_break),
+    ))
+}
+
+/// A file as git writes it, and whether ours and theirs end with a line
+/// break.
+struct Written {
+    text: String,
+    breaks: (bool, bool),
 }
 
 /// The file with its markers as git writes it from the index's versions,
@@ -84,7 +210,8 @@ fn as_git_wrote(
     path: &str,
     file: &Path,
     marker_size: usize,
-) -> Result<Option<String>, LoadError> {
+    (ours, theirs): (&str, &str),
+) -> Result<Option<Written>, LoadError> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |time| time.as_nanos());
@@ -106,7 +233,15 @@ fn as_git_wrote(
             };
             fs::write(version, bytes).map_err(|error| LoadError::Io(version.clone(), error))?;
         }
-        session::merge_file(git, &files, "ours", "theirs", marker_size, None).map(Some)
+        let ends_with_break = |path: &Path| {
+            fs::read(path).is_ok_and(|bytes| bytes.last().is_none_or(|byte| *byte == b'\n'))
+        };
+        let breaks = (
+            ends_with_break(&files.local),
+            ends_with_break(&files.remote),
+        );
+        session::merge_file(git, &files, ours, theirs, marker_size, None)
+            .map(|text| Some(Written { text, breaks }))
     })();
     let _ = fs::remove_dir_all(&folder);
     written
@@ -152,31 +287,38 @@ pub fn resolutions(
         .iter()
         .enumerate()
         .map(|(index, analysis)| {
-            let (line, resolution) = match &found {
+            let (line, resolution, region) = match &found {
                 Some(regions) => {
                     let (start, end) = regions[index];
-                    let region = &text[start..end];
-                    let region = if added_break && end == text.len() {
+                    let shown = if added_break && end == text.len() {
                         &current[start..]
                     } else {
-                        region
+                        &text[start..end]
                     };
-                    let line = (start < end).then(|| text[..start].matches('\n').count() + 1);
-                    (line, layout.name(index, &text[start..end], region))
+                    let at = text[..start].matches('\n').count() + 1;
+                    let line = (start < end).then_some(at);
+                    let region = (text[start..end].to_string(), at);
+                    (
+                        line,
+                        layout.name(index, &text[start..end], shown),
+                        Some(region),
+                    )
                 }
-                None => (None, Resolution::Unknown),
+                None => (None, Resolution::Unknown, None),
             };
             ConflictReview {
                 id: analysis.id.clone(),
                 number: analysis.number,
                 line,
                 resolution,
+                region,
             }
         })
         .collect();
     Ok(FileReview {
         conflicts: reviews,
         changed_outside: found.is_none(),
+        ends_with_break: current.is_empty() || current.ends_with('\n'),
     })
 }
 
@@ -308,6 +450,46 @@ mod tests {
                 Resolution::Text(String::from("c\n")),
             ]
         );
+    }
+
+    /// A resolution made outside Scry is checked like a candidate, and the
+    /// check shows even in the list, where candidates are not checked yet:
+    /// own text that breaks the file says so, and a side that parses says
+    /// so too.
+    #[test]
+    fn outside_resolutions_are_checked() {
+        let written = "func a() {\n<<<<<<< ours\n  let x = 1\n=======\n  let x = 2\n>>>>>>> theirs\n}\n\
+            func b() {\n  let m = 0\n  let n = 0\n  let o = 0\n}\n\
+            func c() {\n<<<<<<< ours\n  let y = 1\n=======\n  let y = 2\n>>>>>>> theirs\n}\n";
+        let current = "func a() {\n  let x = (\n}\n\
+            func b() {\n  let m = 0\n  let n = 0\n  let o = 0\n}\n\
+            func c() {\n  let y = 2\n}\n";
+        let none = BTreeMap::new();
+        let session = session(
+            written,
+            current,
+            7,
+            Some(Language::Swift),
+            (true, true),
+            &BTreeMap::new(),
+            &none,
+        )
+        .unwrap()
+        .unwrap();
+        let broken = session
+            .conflict_view_so_far(0, "ours", "theirs")
+            .chosen
+            .unwrap();
+        assert!(
+            matches!(broken.parse, ParseCheck::DoesNotParse { .. }),
+            "{broken:?}"
+        );
+        let theirs = session
+            .conflict_view_so_far(1, "ours", "theirs")
+            .chosen
+            .unwrap();
+        assert_eq!(theirs.id, "theirs");
+        assert_eq!(theirs.parse, ParseCheck::Parses);
     }
 
     /// A conflict left open whose side holds the line after it is still

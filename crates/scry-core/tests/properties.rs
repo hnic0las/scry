@@ -87,6 +87,8 @@ fn command() -> impl Strategy<Value = Command> {
         1 => Just(Command::ApplySuggestions),
         2 => Just(Command::Undo),
         2 => Just(Command::Redo),
+        1 => (0..5usize).prop_map(|conflict| Command::MarkReviewed { conflict }),
+        1 => (0..5usize).prop_map(|conflict| Command::Reopen { conflict }),
     ]
 }
 
@@ -117,6 +119,72 @@ fn reported(events: &[Event]) -> (Vec<usize>, Option<(bool, bool)>) {
     }
     conflicts.sort_unstable();
     (conflicts, history)
+}
+
+/// Runs `commands` on `session` against a model of its history (see
+/// `the_history_and_its_events_follow_every_change`).
+fn follows_history(mut session: MergeSession, commands: Vec<Command>) -> Result<(), TestCaseError> {
+    let initial = choices(&session);
+    // The model: the states undo and redo must give back.
+    let mut undo: Vec<Vec<Option<Choice>>> = Vec::new();
+    let mut redo: Vec<Vec<Option<Choice>>> = Vec::new();
+    for command in commands {
+        let before = choices(&session);
+        let result = session.apply(command.clone());
+        let after = choices(&session);
+        let Ok(events) = result else {
+            prop_assert_eq!(&after, &before, "refused {:?} changed the choices", command);
+            prop_assert_eq!(
+                (session.can_undo(), session.can_redo()),
+                (!undo.is_empty(), !redo.is_empty())
+            );
+            continue;
+        };
+        match command {
+            Command::Undo => {
+                if let Some(state) = undo.pop() {
+                    prop_assert_eq!(&after, &state, "undo");
+                    redo.push(before.clone());
+                }
+            }
+            Command::Redo => {
+                if let Some(state) = redo.pop() {
+                    prop_assert_eq!(&after, &state, "redo");
+                    undo.push(before.clone());
+                }
+            }
+            _ => {
+                if after != before {
+                    undo.push(before.clone());
+                    redo.clear();
+                }
+            }
+        }
+        let history = (!undo.is_empty(), !redo.is_empty());
+        prop_assert_eq!((session.can_undo(), session.can_redo()), history);
+        let (conflicts, told) = reported(&events);
+        if after == before {
+            prop_assert!(
+                events.is_empty(),
+                "{:?} changed nothing: {:?}",
+                command,
+                events
+            );
+        } else {
+            prop_assert_eq!(told, Some(history), "{:?}", command);
+        }
+        prop_assert_eq!(&conflicts, &changed(&before, &after), "{:?}", command);
+        // The status and the merged text follow the choices.
+        let resolved = after.iter().filter(|choice| choice.is_some()).count();
+        prop_assert_eq!(session.status().resolved, resolved);
+        prop_assert_eq!(session.merged_text().is_some(), resolved == after.len());
+    }
+    // Undoing everything gives the session back as it started.
+    while session.can_undo() {
+        session.apply(Command::Undo).unwrap();
+    }
+    prop_assert_eq!(choices(&session), initial);
+    Ok(())
 }
 
 proptest! {
@@ -157,61 +225,7 @@ proptest! {
         parts in prop::collection::vec(part(), 1..6),
         commands in prop::collection::vec(command(), 0..40),
     ) {
-        let mut session = MergeSession::from_text(&written(&parts), None).unwrap();
-        // The model: the states undo and redo must give back.
-        let mut undo: Vec<Vec<Option<Choice>>> = Vec::new();
-        let mut redo: Vec<Vec<Option<Choice>>> = Vec::new();
-        for command in commands {
-            let before = choices(&session);
-            let result = session.apply(command.clone());
-            let after = choices(&session);
-            let Ok(events) = result else {
-                prop_assert_eq!(&after, &before, "refused {:?} changed the choices", command);
-                prop_assert_eq!(
-                    (session.can_undo(), session.can_redo()),
-                    (!undo.is_empty(), !redo.is_empty())
-                );
-                continue;
-            };
-            match command {
-                Command::Undo => {
-                    if let Some(state) = undo.pop() {
-                        prop_assert_eq!(&after, &state, "undo");
-                        redo.push(before.clone());
-                    }
-                }
-                Command::Redo => {
-                    if let Some(state) = redo.pop() {
-                        prop_assert_eq!(&after, &state, "redo");
-                        undo.push(before.clone());
-                    }
-                }
-                _ => {
-                    if after != before {
-                        undo.push(before.clone());
-                        redo.clear();
-                    }
-                }
-            }
-            let history = (!undo.is_empty(), !redo.is_empty());
-            prop_assert_eq!((session.can_undo(), session.can_redo()), history);
-            let (conflicts, told) = reported(&events);
-            if after == before {
-                prop_assert!(events.is_empty(), "{:?} changed nothing: {:?}", command, events);
-            } else {
-                prop_assert_eq!(told, Some(history), "{:?}", command);
-            }
-            prop_assert_eq!(&conflicts, &changed(&before, &after), "{:?}", command);
-            // The status and the merged text follow the choices.
-            let resolved = after.iter().filter(|choice| choice.is_some()).count();
-            prop_assert_eq!(session.status().resolved, resolved);
-            prop_assert_eq!(session.merged_text().is_some(), resolved == after.len());
-        }
-        // Undoing everything gives the file back unresolved.
-        while session.can_undo() {
-            session.apply(Command::Undo).unwrap();
-        }
-        prop_assert!(choices(&session).iter().all(Option::is_none));
+        follows_history(MergeSession::from_text(&written(&parts), None).unwrap(), commands)?;
     }
 
     /// A CRLF file stays CRLF whatever is chosen and whatever is typed by
@@ -364,5 +378,54 @@ proptest! {
             }
         }
         prop_assert_eq!(rebuilt, current);
+    }
+
+    /// A file resolved outside Scry, opened for review: saved without a
+    /// change, it is written back byte for byte (each choice is what the
+    /// file holds); and its history follows the same model as any session,
+    /// marking reviewed and reopening included, undoing everything giving
+    /// back the choices it was opened with.
+    #[test]
+    fn a_review_session_keeps_the_file_and_its_history(
+        parts in prop::collection::vec(part(), 1..6),
+        fills in prop::collection::vec(prop::option::of(lines(3)), 6),
+        commands in prop::collection::vec(command(), 0..30),
+    ) {
+        let text = written(&parts);
+        let segments = conflict::parse(&text).unwrap();
+        let mut current = String::new();
+        let mut index = 0;
+        for segment in &segments {
+            match segment {
+                conflict::Segment::Common(common) => current.push_str(common),
+                conflict::Segment::Conflict(found) => {
+                    match &fills[index % fills.len()] {
+                        Some(fill) => current.push_str(fill),
+                        None => current.push_str(&written(&[Part::Conflict {
+                            ours: found.ours.text.clone(),
+                            base: found.base.as_ref().map(|base| base.text.clone()),
+                            theirs: found.theirs.text.clone(),
+                        }])),
+                    }
+                    index += 1;
+                }
+            }
+        }
+        let session = review::session(
+            &text,
+            &current,
+            7,
+            None,
+            (true, true),
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap()
+        .expect("nothing changed outside the conflicts");
+        if session.unresolved() == 0 {
+            prop_assert_eq!(session.merged_text(), Some(current.clone()));
+        }
+        prop_assert_eq!(session.status().unreviewed, session.conflict_count() - session.unresolved());
+        follows_history(session, commands)?;
     }
 }

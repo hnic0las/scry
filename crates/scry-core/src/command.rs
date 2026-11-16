@@ -33,6 +33,15 @@ pub enum Command {
     /// Chooses the rule's suggestion for every open conflict that has one,
     /// as one step of the history.
     ApplySuggestions,
+    /// Marks a conflict resolved outside Scry as reviewed: the user looked
+    /// at what the file holds and keeps it.
+    MarkReviewed {
+        conflict: usize,
+    },
+    /// Takes a conflict's choice away: it is open again.
+    Reopen {
+        conflict: usize,
+    },
     Undo,
     Redo,
     /// Writes the merged file where it was read from. Refuses a file

@@ -4,6 +4,7 @@
 //! Nothing is written while a conflict is left: `git mergetool` then keeps
 //! the file as conflicted, and the user's work in it is untouched.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File};
@@ -19,6 +20,7 @@ use crate::highlight::{Highlighter, Span};
 use crate::indent::{self, Newline};
 use crate::operation::{self, Operation};
 use crate::presentation;
+use crate::records::{Record, Store};
 use crate::resolution::{self, Analysis, Candidate, CandidateKind};
 use crate::syntax::{Language, ParseCheck, ParsedFile};
 use crate::words::{self, LineChange};
@@ -54,6 +56,8 @@ pub struct Status {
     pub checks_off: bool,
     pub can_undo: bool,
     pub can_redo: bool,
+    /// Conflicts resolved outside Scry the user has not reviewed yet.
+    pub unreviewed: usize,
 }
 
 /// How a conflict is resolved.
@@ -63,6 +67,25 @@ pub enum Choice {
     Candidate(CandidateKind),
     /// Text the user wrote by hand.
     Edited(Edit),
+    /// What the file held when it was opened for review, resolved outside
+    /// Scry: by the user's agent, another editor or a person.
+    Outside(Outside),
+}
+
+/// A conflict resolved outside Scry, as the file holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outside {
+    /// The text, with the final line break git adds when the file lacks it.
+    pub text: String,
+    /// The candidate the text is, when it is one.
+    pub matches: Option<CandidateKind>,
+    /// What the agent said about it, when it resolved it through Scry's
+    /// MCP server and the file still holds that text.
+    pub record: Option<Record>,
+    /// Checked like a candidate.
+    pub parse: ParseCheck,
+    /// The user looked at it and kept it.
+    pub reviewed: bool,
 }
 
 /// A conflict's text written by hand, with its check.
@@ -107,6 +130,9 @@ pub enum Origin {
     /// The file as it is on disk, without the base: it was edited since git
     /// wrote it, and rebuilding the conflicts would drop those edits.
     EditedFile,
+    /// Rebuilt from git's three versions for a file resolved outside Scry,
+    /// each conflict's choice being what the file holds, to review.
+    Resolved,
 }
 
 pub struct MergeSession {
@@ -165,6 +191,12 @@ pub struct MergeSession {
     /// with a conflict. git adds one to both sides inside the markers, so
     /// only its versions of the file tell; `None` when unknown.
     final_breaks: Option<(bool, bool)>,
+    /// Whether the file ends with a line break, for a file resolved outside
+    /// Scry whose last conflict keeps what the file holds.
+    outside_break: Option<bool>,
+    /// Where the review of a file resolved outside Scry is kept, and the
+    /// file's path from the repository root.
+    reviews: Option<(Store, String)>,
 }
 
 impl MergeSession {
@@ -239,7 +271,7 @@ impl MergeSession {
         self
     }
 
-    fn from_segments(
+    pub(crate) fn from_segments(
         mut segments: Vec<Segment>,
         origin: Origin,
         on_disk: String,
@@ -296,6 +328,8 @@ impl MergeSession {
             indent_unit: String::new(),
             line_break,
             final_breaks: None,
+            outside_break: None,
+            reviews: None,
         };
         session.indent_unit = indent::indent_unit(&session.side_text(Pane::Ours));
         let ours: Vec<&str> = session
@@ -526,6 +560,7 @@ impl MergeSession {
                 .find(|candidate| candidate.kind == *kind)
                 .map(|candidate| candidate.text.as_str()),
             Choice::Edited(edit) => Some(edit.text.as_str()),
+            Choice::Outside(outside) => Some(outside.text.as_str()),
         }
     }
 
@@ -574,13 +609,102 @@ impl MergeSession {
             } => self.choose(conflict, candidate)?,
             Command::Edit { conflict, text } => self.edit(conflict, &text)?,
             Command::ApplySuggestions => self.apply_suggestions(),
+            Command::MarkReviewed { conflict } => self.mark_reviewed(conflict)?,
+            Command::Reopen { conflict } => self.reopen(conflict)?,
             Command::Undo => self.undo(),
             Command::Redo => self.redo(),
             Command::Save { overwrite } => {
                 self.save(overwrite)?;
-                vec![Event::Saved]
+                return Ok(vec![Event::Saved]);
             }
         })
+        .inspect(|events: &Vec<Event>| {
+            if !events.is_empty() {
+                self.keep_reviews();
+            }
+        })
+    }
+
+    /// The choices of a file resolved outside Scry: each resolved
+    /// conflict's index and what it holds, checked here. `ends_with_break`
+    /// is the file's own final line break.
+    pub(crate) fn resolved_outside(
+        mut self,
+        outside: Vec<(usize, Outside)>,
+        ends_with_break: bool,
+    ) -> MergeSession {
+        for (index, outside) in outside {
+            let parse = self.check_in_place(index, &outside.text);
+            self.choices[index] = Some(Choice::Outside(Outside { parse, ..outside }));
+        }
+        self.outside_break = Some(ends_with_break);
+        self
+    }
+
+    /// Keeps the review in `store` after every change, for the file at
+    /// `path` from the repository root.
+    pub(crate) fn keeping_reviews(mut self, store: Store, path: String) -> MergeSession {
+        self.reviews = Some((store, path));
+        self
+    }
+
+    /// Writes what is reviewed. A failure leaves the review as it was last
+    /// kept: the user marks it again, nothing in the file is lost.
+    fn keep_reviews(&self) {
+        if let Some((store, path)) = &self.reviews {
+            let _ = store.set_reviewed(path, &self.reviewed());
+        }
+    }
+
+    /// The conflicts whose resolution the user reviewed, with its text:
+    /// those marked reviewed, and those the user resolved in Scry, so that
+    /// opening the file again does not ask to review them.
+    pub fn reviewed(&self) -> BTreeMap<String, String> {
+        (0..self.choices.len())
+            .filter(|&index| match &self.choices[index] {
+                Some(Choice::Outside(outside)) => outside.reviewed,
+                Some(_) => true,
+                None => false,
+            })
+            .filter_map(|index| {
+                let text = self.chosen_text(index)?;
+                Some((self.analyses[index].id.clone(), text.to_string()))
+            })
+            .collect()
+    }
+
+    /// Conflicts resolved outside Scry and not reviewed yet.
+    pub fn unreviewed(&self) -> usize {
+        self.choices
+            .iter()
+            .filter(|choice| matches!(choice, Some(Choice::Outside(outside)) if !outside.reviewed))
+            .count()
+    }
+
+    /// Marks a conflict resolved outside Scry as reviewed, as one step of
+    /// the history; nothing for any other conflict.
+    fn mark_reviewed(&mut self, index: usize) -> Result<Vec<Event>, ChooseError> {
+        let Some(choice) = self.choices.get(index) else {
+            return Err(ChooseError::NoSuchConflict(index.saturating_add(1)));
+        };
+        let Some(Choice::Outside(outside)) = choice else {
+            return Ok(Vec::new());
+        };
+        let reviewed = Outside {
+            reviewed: true,
+            ..outside.clone()
+        };
+        let command = Command::MarkReviewed { conflict: index };
+        Ok(self.record(command, vec![(index, Some(Choice::Outside(reviewed)))]))
+    }
+
+    /// Takes a conflict's choice away, whatever it is, as one step of the
+    /// history: the conflict is open again.
+    fn reopen(&mut self, index: usize) -> Result<Vec<Event>, ChooseError> {
+        if index >= self.choices.len() {
+            return Err(ChooseError::NoSuchConflict(index.saturating_add(1)));
+        }
+        Ok(self.record(Command::Reopen { conflict: index }, vec![(index, None)]))
     }
 
     /// Writes the merged text to the file the session was read from.
@@ -1007,6 +1131,7 @@ impl MergeSession {
             checks_off: self.language.is_some() && !self.checkable,
             can_undo: self.can_undo(),
             can_redo: self.can_redo(),
+            unreviewed: self.unreviewed(),
         }
     }
 
@@ -1061,6 +1186,9 @@ impl MergeSession {
         let last = self.choices.len() - 1;
         if self.chosen_text(last).is_some_and(str::is_empty) {
             return true;
+        }
+        if let Some(Some(Choice::Outside(_))) = self.choices.last() {
+            return self.outside_break.unwrap_or(ours);
         }
         match self.choices.last() {
             Some(Some(Choice::Candidate(
