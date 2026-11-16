@@ -118,8 +118,10 @@ fn a_failure_with_its_error_output_closed_is_not_a_success() {
     );
 }
 
-/// `session` says which operation is in progress, who is on each side, and which files
-/// still have conflicts: what the user needs before choosing a side.
+/// `session` says which operation is in progress, who is on each side, which files
+/// still have conflicts, and what was done to each conflict of a file resolved
+/// elsewhere and not staged: what the user needs before choosing a side, and what a
+/// review starts from.
 #[test]
 fn session_names_the_operation_its_sides_and_files() {
     let dir = tempfile::tempdir().unwrap();
@@ -175,8 +177,26 @@ fn session_names_the_operation_its_sides_and_files() {
         "{stdout}"
     );
     assert!(stdout.contains(" feature change\n"), "{stdout}");
+    let (_, files) = stdout
+        .split_once("\nFiles with conflicts (1):\n  a.txt\n")
+        .expect(&stdout);
+    let (id, rest) = files.trim_start().split_once("  ").expect(files);
+    assert!(id.starts_with('c') && id.len() == 9, "{files}");
+    assert_eq!(rest, "line 1  open\n");
+
+    // Resolved by taking theirs elsewhere, not staged: what was done shows.
+    fs::write(dir.path().join("a.txt"), "feature\n").unwrap();
+    let stdout = String::from_utf8(git_scry(dir.path(), &["session"]).stdout).unwrap();
     assert!(
-        stdout.ends_with("\nFiles with conflicts (1):\n  a.txt\n"),
+        stdout.ends_with(&format!("  a.txt\n    {id}  line 1  theirs\n")),
+        "{stdout}"
+    );
+
+    // Written by hand: its own text, with its size.
+    fs::write(dir.path().join("a.txt"), "feature\nmore\n").unwrap();
+    let stdout = String::from_utf8(git_scry(dir.path(), &["session"]).stdout).unwrap();
+    assert!(
+        stdout.ends_with(&format!("  a.txt\n    {id}  line 1  own text (2 lines)\n")),
         "{stdout}"
     );
 }

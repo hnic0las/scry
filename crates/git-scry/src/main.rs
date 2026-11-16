@@ -13,6 +13,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use scry_core::git::GitCli;
 use scry_core::operation;
+use scry_core::overview;
+use scry_core::review::{self, Resolution};
 use scry_core::session::{self, LoadError};
 use scry_core::syntax::ParseCheck;
 
@@ -282,11 +284,44 @@ fn show_session() -> ExitCode {
         println!("No file left with conflicts.");
     } else {
         println!("Files with conflicts ({}):", paths.len());
+        let root = overview::root(&git).ok();
         for path in paths {
-            println!("  {path}");
+            let found = root
+                .as_deref()
+                .and_then(|root| review::find(&git, root, &path).ok().flatten());
+            let Some(found) = found else {
+                println!("  {path}");
+                continue;
+            };
+            if found.changed_outside {
+                println!("  {path}  (changed outside the conflicts)");
+            } else {
+                println!("  {path}");
+            }
+            for conflict in found.conflicts {
+                let line = conflict
+                    .line
+                    .map(|line| format!("  line {line}"))
+                    .unwrap_or_default();
+                println!(
+                    "    {}{line}  {}",
+                    conflict.id,
+                    resolution(&conflict.resolution)
+                );
+            }
         }
     }
     ExitCode::SUCCESS
+}
+
+/// What was done to a conflict, in a few words.
+fn resolution(resolution: &Resolution) -> String {
+    match resolution {
+        Resolution::Open => String::from("open"),
+        Resolution::Candidate(kind) => kind.id().to_string(),
+        Resolution::Text(text) => format!("own text {}", line_count(text)),
+        Resolution::Unknown => String::from("unknown"),
+    }
 }
 
 /// The label git wrote on a marker, or a fallback when it wrote none.

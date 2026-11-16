@@ -12,7 +12,9 @@
 use proptest::prelude::*;
 
 use scry_core::command::{Command, Event};
-use scry_core::resolution::CandidateKind;
+use scry_core::conflict;
+use scry_core::resolution::{self, CandidateKind};
+use scry_core::review::{self, Resolution};
 use scry_core::session::{Choice, MergeSession};
 
 /// Lines from a small alphabet, so that sides share lines and the rules
@@ -243,5 +245,124 @@ proptest! {
         }
         let merged = session.merged_text().unwrap();
         prop_assert_eq!(merged.matches('\n').count(), merged.matches("\r\n").count(), "{:?}", merged);
+    }
+
+    /// A file resolved outside Scry, each conflict left open, given a
+    /// candidate or given other text, with the text around the conflicts
+    /// untouched: each resolution is found as it was made (other text
+    /// equal to a candidate is that candidate). The review names what was
+    /// done; a wrong name would tell the user "theirs" where it is not.
+    #[test]
+    fn every_resolution_made_outside_is_found(
+        conflicts in prop::collection::vec(
+            (lines(3), prop::option::of(lines(2)), lines(3), 0..3usize, any::<prop::sample::Index>(), lines(3)),
+            1..5,
+        ),
+    ) {
+        // Lines no side or resolution has, so each conflict's place is
+        // certain.
+        let mut parts = vec![Part::Common(String::from("first\n"))];
+        for (index, (ours, base, theirs, ..)) in conflicts.iter().enumerate() {
+            parts.push(Part::Conflict { ours: ours.clone(), base: base.clone(), theirs: theirs.clone() });
+            parts.push(Part::Common(format!("between {index}\n")));
+        }
+        let text = written(&parts);
+        let segments = conflict::parse(&text).unwrap();
+        let analyses = resolution::analyze(&segments);
+        let mut current = String::from("first\n");
+        let mut expected = Vec::new();
+        for (index, (ours, base, theirs, how, pick, own)) in conflicts.iter().enumerate() {
+            let candidates = &analyses[index].candidates;
+            let found = match how {
+                0 => {
+                    current.push_str(&written(&[Part::Conflict {
+                        ours: ours.clone(),
+                        base: base.clone(),
+                        theirs: theirs.clone(),
+                    }]));
+                    Resolution::Open
+                }
+                1 => {
+                    let candidate = pick.get(candidates);
+                    current.push_str(&candidate.text);
+                    Resolution::Candidate(candidate.kind)
+                }
+                _ => {
+                    current.push_str(own);
+                    candidates
+                        .iter()
+                        .find(|candidate| candidate.text == *own)
+                        .map_or(Resolution::Text(own.clone()), |candidate| Resolution::Candidate(candidate.kind))
+                }
+            };
+            expected.push(found);
+            current.push_str(&format!("between {index}\n"));
+        }
+        let review = review::resolutions(&text, &current, 7).unwrap();
+        prop_assert!(!review.changed_outside);
+        let found: Vec<Resolution> = review.conflicts.into_iter().map(|c| c.resolution).collect();
+        prop_assert_eq!(found, expected);
+    }
+
+    /// Whatever text fills the conflicts, from the same few lines the text
+    /// around them uses (so a resolution can repeat the lines after it),
+    /// the review places each one so the file is rebuilt exactly, and never
+    /// says the file changed outside the conflicts when it did not. A line
+    /// added outside them is either flagged, every conflict then unknown,
+    /// or absorbed into a resolution that still rebuilds the file.
+    #[test]
+    fn a_review_rebuilds_the_file_or_flags_it(
+        parts in prop::collection::vec(part(), 1..6),
+        fills in prop::collection::vec(lines(3), 6),
+        outside in prop::option::of((any::<prop::sample::Index>(), line())),
+    ) {
+        let text = written(&parts);
+        let segments = conflict::parse(&text).unwrap();
+        let analyses = resolution::analyze(&segments);
+        let mut current = String::new();
+        let mut index = 0;
+        for (at, segment) in segments.iter().enumerate() {
+            match segment {
+                conflict::Segment::Common(common) => current.push_str(common),
+                conflict::Segment::Conflict(_) => {
+                    current.push_str(&fills[index % fills.len()]);
+                    index += 1;
+                }
+            }
+            if let Some((place, line)) = &outside
+                && place.index(segments.len()) == at
+            {
+                current.push_str(line);
+            }
+        }
+        let review = review::resolutions(&text, &current, 7).unwrap();
+        if review.changed_outside {
+            prop_assert!(outside.is_some(), "flagged with nothing changed outside");
+            prop_assert!(review.conflicts.iter().all(|c| c.resolution == Resolution::Unknown));
+            return Ok(());
+        }
+        let mut rebuilt = String::new();
+        let mut index = 0;
+        for segment in &segments {
+            match segment {
+                conflict::Segment::Common(common) => rebuilt.push_str(common),
+                conflict::Segment::Conflict(found) => {
+                    match &review.conflicts[index].resolution {
+                        Resolution::Open => rebuilt.push_str(&written(&[Part::Conflict {
+                            ours: found.ours.text.clone(),
+                            base: found.base.as_ref().map(|base| base.text.clone()),
+                            theirs: found.theirs.text.clone(),
+                        }])),
+                        Resolution::Candidate(kind) => rebuilt.push_str(
+                            &analyses[index].candidates.iter().find(|c| c.kind == *kind).unwrap().text,
+                        ),
+                        Resolution::Text(own) => rebuilt.push_str(own),
+                        Resolution::Unknown => prop_assert!(false, "unknown without a change outside"),
+                    }
+                    index += 1;
+                }
+            }
+        }
+        prop_assert_eq!(rebuilt, current);
     }
 }
