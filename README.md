@@ -52,7 +52,7 @@ Each of these gets its own view:
 ### In your workflow
 
 - **`git mergetool`**, in the app or in the terminal with the same digits as the app's shortcuts. Scry › Settings sets git up for you.
-- **`git scry`** opens the app on the operation in progress, from any folder of the repository.
+- **`git scry`** opens the app on the operation in progress, from any folder of the repository. Scry › Settings › CLI links the app's `git-scry` into a folder of your terminal's `PATH`.
 - `git scry session`, `conflicts` and `highlight` print what the app shows, for scripts and terminals.
 - Scry never stages, commits or pushes on its own: each of those steps is a button you press.
 - Local first: no account and no server; nothing leaves your Mac.
@@ -174,6 +174,8 @@ scripts/install-app.sh      # builds in Release, installs /Applications/Scry.app
 ```
 
 Then, in a repository with a merge, rebase, cherry-pick or revert in progress, from any folder in it, `git scry` (or `git scry open [path]`) opens the app on its overview. When Scry is git's merge tool, the script points it at the installed app; otherwise Scry › Settings › Use Scry as git's Merge Tool sets it up, and `git mergetool` then opens each file in the app. Run the script again to update.
+
+With an app downloaded from a release, Scry › Settings › CLI › Install git scry makes the link instead: in the first of `~/.local/bin`, `/opt/homebrew/bin` or `/usr/local/bin` that your terminal's `PATH` lists and that can be written to. When none can, or another `git-scry` comes first, it shows the commands to run.
 
 To develop it:
 

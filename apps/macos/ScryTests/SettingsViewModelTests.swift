@@ -34,6 +34,19 @@ private final class FakeInstaller: MergetoolInstaller {
         state = previous.map { .other(tool: $0) } ?? .notSet
         previous = nil
     }
+
+    /// What `git scry` runs; installing makes it this app's.
+    var commandState: CliCommandState = .notInstalled(link: "/H/.local/bin/git-scry")
+    var commandFailure: ScryError?
+    private(set) var links: [String] = []
+
+    func cliCommandState() async -> CliCommandState { commandState }
+
+    func installCommand(link: String) throws {
+        if let commandFailure { throw commandFailure }
+        links.append(link)
+        commandState = .installed(path: link)
+    }
 }
 
 @MainActor
@@ -130,6 +143,76 @@ struct SettingsViewModelTests {
         #expect(installer.cli.hasSuffix("Scry.app/Contents/Helpers/git-scry"))
         #expect(installer.isAvailable)
         #expect(installer.command.contains("resolve --app="))
+    }
+
+    /// A user of the release has no `git scry` until the app links it: the
+    /// settings say so, and the button links it where the core found room,
+    /// after which `git scry` runs this app.
+    @Test func installsTheGitScryCommand() async {
+        let installer = FakeInstaller(.notSet)
+        let settings = SettingsViewModel(installer: installer, defaults: .isolated)
+        #expect(settings.commandStatus == "Looking for git-scry on your PATH…")
+        #expect(!settings.canInstallCommand)
+
+        await settings.refreshCommand()
+        #expect(settings.commandStatus == "git scry is not installed: git finds no git-scry on your PATH.")
+        #expect(settings.canInstallCommand)
+        #expect(settings.commandButtonTitle == "Install git scry")
+        #expect(settings.commandDetail == "Links /H/.local/bin/git-scry to the app's git-scry.")
+
+        await settings.installCommand()
+        #expect(installer.links == ["/H/.local/bin/git-scry"])
+        #expect(settings.isCommandInstalled)
+        #expect(!settings.canInstallCommand)
+        #expect(settings.commandStatus == "git scry runs this app's git-scry, linked at /H/.local/bin/git-scry.")
+    }
+
+    /// Another copy of Scry, or one moved since, is replaced by this app's;
+    /// a link made earlier on the PATH says so.
+    @Test func replacesAnotherGitScry() async {
+        let installer = FakeInstaller(.notSet)
+        installer.commandState = .other(other: "/H/.cargo/bin/git-scry", link: "/H/.local/bin/git-scry")
+        let settings = SettingsViewModel(installer: installer, defaults: .isolated)
+        await settings.refreshCommand()
+
+        #expect(settings.commandStatus == "git scry runs /H/.cargo/bin/git-scry, not this app's.")
+        #expect(settings.commandButtonTitle == "Use This App's git-scry")
+        #expect(settings.commandDetail == "Links /H/.local/bin/git-scry to the app's git-scry; it comes first on your PATH.")
+
+        await settings.installCommand()
+        #expect(installer.links == ["/H/.local/bin/git-scry"])
+    }
+
+    /// What the app cannot fix itself, it gives as commands to copy: another
+    /// git-scry to remove, or a folder to put on the PATH.
+    @Test func givesCommandsWhenItCannotLink() async {
+        let installer = FakeInstaller(.notSet)
+        installer.commandState = .blocked(other: "/H/.cargo/bin/git-scry", remove: "cargo uninstall git-scry")
+        let settings = SettingsViewModel(installer: installer, defaults: .isolated)
+        await settings.refreshCommand()
+        #expect(!settings.canInstallCommand)
+        #expect(settings.commandStatus == "git scry runs /H/.cargo/bin/git-scry, which Scry does not replace. Remove it in a terminal, then come back:")
+        #expect(settings.commandsToRun == ["cargo uninstall git-scry"])
+
+        installer.commandState = .noFolder
+        await settings.refreshCommand()
+        #expect(!settings.canInstallCommand)
+        #expect(settings.commandsToRun == [
+            "mkdir -p ~/.local/bin && ln -sf '/A/git-scry' ~/.local/bin/git-scry",
+            "echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.zshrc",
+        ])
+    }
+
+    /// A link that cannot be made says why, and leaves the state as it was.
+    @Test func showsWhyLinkingFailed() async {
+        let installer = FakeInstaller(.notSet)
+        installer.commandFailure = .Refused(message: "Move Scry to the Applications folder.")
+        let settings = SettingsViewModel(installer: installer, defaults: .isolated)
+        await settings.refreshCommand()
+
+        await settings.installCommand()
+        #expect(settings.commandError == "Move Scry to the Applications folder.")
+        #expect(!settings.isCommandInstalled)
     }
 
     /// Settings ▸ Appearance shows and changes the same layout choice as

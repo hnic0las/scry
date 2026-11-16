@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Scry › Settings. The CLI tab: the command-line tool inside the app,
-/// and making it git's merge tool.
+/// Scry › Settings. The CLI tab: the `git scry` command, linked to the
+/// command-line tool inside the app, and making it git's merge tool.
 struct SettingsView: View {
     @State private var viewModel: SettingsViewModel
     @State private var tab: SettingsTab
@@ -49,8 +49,49 @@ struct SettingsView: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
+    /// The `git scry` command: whether the terminal finds the app's
+    /// git-scry, and the button that links it.
+    private var command: some View {
+        Section {
+            Label {
+                Text(viewModel.commandStatus)
+            } icon: {
+                Image(systemName: viewModel.isCommandInstalled ? "checkmark.circle.fill" : "terminal")
+                    .foregroundStyle(viewModel.isCommandInstalled ? Theme.States.resolved : Theme.Surfaces.textSecondary)
+            }
+            ForEach(viewModel.commandsToRun, id: \.self) { line in
+                CodeLine(text: line)
+            }
+            if viewModel.canInstallCommand {
+                VStack(alignment: .leading, spacing: 4) {
+                    Button(viewModel.commandButtonTitle) {
+                        Task { await viewModel.installCommand() }
+                    }
+                    if let detail = viewModel.commandDetail {
+                        Text(detail)
+                            .font(Metrics.caption)
+                            .foregroundStyle(Theme.Surfaces.textSecondary)
+                    }
+                }
+            }
+            if let error = viewModel.commandError {
+                Text(error)
+                    .font(Metrics.callout)
+                    .foregroundStyle(Theme.Severity.error)
+            }
+            CodeLine(text: viewModel.cliPath)
+        } header: {
+            Text("git scry Command")
+        } footer: {
+            Text("git runs git scry by finding git-scry on your terminal's PATH. The link points at the git-scry inside the app, so it follows the app's updates.")
+                .font(Metrics.caption)
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+        }
+    }
+
     private var cli: some View {
         Form {
+            command
             Section {
                 Label {
                     Text(viewModel.status)
@@ -78,9 +119,6 @@ struct SettingsView: View {
                 Text("Sets merge.tool, mergetool.scry.cmd and mergetool.scry.trustExitCode in your global git configuration, and keeps the merge tool it replaces to put it back.")
                     .font(Metrics.caption)
                     .foregroundStyle(Theme.Surfaces.textSecondary)
-            }
-            Section("git-scry") {
-                CodeLine(text: viewModel.cliPath)
             }
             Section {
                 CodeLine(text: viewModel.command)
@@ -122,6 +160,9 @@ private struct PreviewInstaller: MergetoolInstaller {
     func install() throws {}
     func previousTool() throws -> String? { "opendiff" }
     func uninstall() throws {}
+    var commandState: CliCommandState = .notInstalled(link: "/Users/me/.local/bin/git-scry")
+    func cliCommandState() async -> CliCommandState { commandState }
+    func installCommand(link: String) throws {}
 }
 
 #Preview("Settings, no merge tool") {
@@ -139,6 +180,33 @@ private struct PreviewInstaller: MergetoolInstaller {
 
 #Preview("Settings, app moved") {
     SettingsView(viewModel: SettingsViewModel(installer: PreviewInstaller(state: .scry(current: false)), defaults: .preview))
+}
+
+#Preview("Settings, git scry installed") {
+    SettingsView(viewModel: SettingsViewModel(
+        installer: PreviewInstaller(
+            state: .scry(current: true),
+            commandState: .installed(path: "/opt/homebrew/bin/git-scry")
+        ),
+        defaults: .preview
+    ))
+}
+
+#Preview("Settings, another git-scry first") {
+    SettingsView(viewModel: SettingsViewModel(
+        installer: PreviewInstaller(
+            state: .notSet,
+            commandState: .blocked(other: "/Users/me/.cargo/bin/git-scry", remove: "cargo uninstall git-scry")
+        ),
+        defaults: .preview
+    ))
+}
+
+#Preview("Settings, no folder on the PATH") {
+    SettingsView(viewModel: SettingsViewModel(
+        installer: PreviewInstaller(state: .notSet, commandState: .noFolder),
+        defaults: .preview
+    ))
 }
 
 #Preview("Settings, appearance") {

@@ -6,6 +6,7 @@
 
 pub mod blame;
 pub mod catalog;
+pub mod cli_link;
 pub mod command;
 pub mod commit_changes;
 pub mod commit_message;

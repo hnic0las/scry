@@ -1,9 +1,10 @@
 import Foundation
 import Observation
 
-/// Reads and writes git's merge tool: the core, through the FFI, in the
-/// app; a fake in tests and previews, which must never touch the user's
-/// git configuration.
+/// Reads and writes git's merge tool and the `git scry` command: the core,
+/// through the FFI, in the app; a fake in tests and previews, which must
+/// never touch the user's git configuration or folders.
+@MainActor
 protocol MergetoolInstaller {
     /// Whether the app carries the `git-scry` the command runs.
     var isAvailable: Bool { get }
@@ -16,6 +17,11 @@ protocol MergetoolInstaller {
     /// The merge tool Scry replaced, put back by `uninstall`.
     func previousTool() throws -> String?
     func uninstall() throws
+    /// What `git scry` runs in the user's terminal. Reads their shell's
+    /// `PATH`, which can take a second.
+    func cliCommandState() async -> CliCommandState
+    /// Links `link` to the app's `git-scry`.
+    func installCommand(link: String) throws
 }
 
 /// The app's settings: making Scry git's merge tool, so `git mergetool`
@@ -29,6 +35,10 @@ final class SettingsViewModel {
     private(set) var previousTool: String?
     /// Why git's configuration could not be read or written.
     private(set) var error: String?
+    /// What `git scry` runs, once read.
+    private(set) var commandState: CliCommandState?
+    /// Why the `git scry` link could not be made.
+    private(set) var commandError: String?
 
     /// The merge editor's layout, the one ⌥⌘L and the toolbar switch:
     /// kept per user, read by every editor window.
@@ -40,6 +50,7 @@ final class SettingsViewModel {
     }
 
     @ObservationIgnored private let installer: MergetoolInstaller
+    @ObservationIgnored private var commandWork: Task<Void, Never>?
     @ObservationIgnored private let defaults: UserDefaults
 
     /// `defaults` keeps the layout choice; tests pass their own suite.
@@ -107,6 +118,95 @@ final class SettingsViewModel {
             setup = nil
             self.error = error.message
         }
+        commandWork?.cancel()
+        commandWork = Task { [weak self] in await self?.refreshCommand() }
+    }
+
+    // MARK: The git scry command
+
+    /// Reads what `git scry` runs again: the user may have changed their
+    /// `PATH` or removed another git-scry since.
+    func refreshCommand() async {
+        let state = await installer.cliCommandState()
+        guard !Task.isCancelled else { return }
+        commandState = state
+    }
+
+    var isCommandInstalled: Bool {
+        if case .installed = commandState { return true }
+        return false
+    }
+
+    /// Where the button links the app's git-scry; `nil` when it cannot.
+    private var commandLink: String? {
+        switch commandState {
+        case .notInstalled(let link), .other(_, let link): link
+        default: nil
+        }
+    }
+
+    var canInstallCommand: Bool { installer.isAvailable && commandLink != nil }
+
+    var commandStatus: String {
+        switch commandState {
+        case nil:
+            "Looking for git-scry on your PATH…"
+        case .installed(let path):
+            "git scry runs this app's git-scry, linked at \(path)."
+        case .notInstalled:
+            "git scry is not installed: git finds no git-scry on your PATH."
+        case .other(let other, _):
+            "git scry runs \(other), not this app's."
+        case .blocked(let other, _):
+            "git scry runs \(other), which Scry does not replace. Remove it in a terminal, then come back:"
+        case .noFolder:
+            "None of ~/.local/bin, /opt/homebrew/bin or /usr/local/bin is on your PATH and writable. In a terminal, link git-scry and add ~/.local/bin to your PATH, then open a new terminal:"
+        }
+    }
+
+    var commandButtonTitle: String {
+        if case .other = commandState { return "Use This App's git-scry" }
+        return "Install git scry"
+    }
+
+    /// What the button does, under it.
+    var commandDetail: String? {
+        switch commandState {
+        case .notInstalled(let link):
+            "Links \(link) to the app's git-scry."
+        case .other(let other, let link) where other != link:
+            "Links \(link) to the app's git-scry; it comes first on your PATH."
+        case .other(_, let link):
+            "Replaces the link \(link) with one to the app's git-scry."
+        default:
+            nil
+        }
+    }
+
+    /// Commands to copy into a terminal when the app cannot link itself.
+    var commandsToRun: [String] {
+        switch commandState {
+        case .blocked(_, let remove):
+            [remove]
+        case .noFolder:
+            [
+                "mkdir -p ~/.local/bin && ln -sf '\(installer.cli.replacingOccurrences(of: "'", with: "'\\''"))' ~/.local/bin/git-scry",
+                "echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.zshrc",
+            ]
+        default:
+            []
+        }
+    }
+
+    func installCommand() async {
+        guard canInstallCommand, let link = commandLink else { return }
+        do {
+            try installer.installCommand(link: link)
+            commandError = nil
+        } catch {
+            commandError = error.message
+        }
+        await refreshCommand()
     }
 
     /// Puts back the merge tool Scry replaced, or none.
@@ -159,5 +259,14 @@ struct AppMergetoolInstaller: MergetoolInstaller {
 
     func uninstall() throws {
         try uninstallMergetool()
+    }
+
+    func cliCommandState() async -> CliCommandState {
+        let cli = cli
+        return await Task.detached { Scry.cliCommandState(cli: cli) }.value
+    }
+
+    func installCommand(link: String) throws {
+        try installCliCommand(cli: cli, link: link)
     }
 }
