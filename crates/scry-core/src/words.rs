@@ -766,4 +766,100 @@ mod tests {
         let longer: Vec<&str> = longer.iter().map(String::as_str).collect();
         assert_eq!(pair_gap(&base, &longer), []);
     }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// A line built from pieces that make words, punctuation, spaces and
+        /// characters of several bytes, so ranges can fall inside one.
+        fn line() -> impl Strategy<Value = String> {
+            let pieces = vec![
+                "a", "b", "x1", "é", "日本", "_", "(", ")", ",", ".", " ", "  ", "\t", "→",
+            ];
+            prop::collection::vec(prop::sample::select(pieces), 0..12)
+                .prop_map(|pieces| pieces.concat())
+        }
+
+        /// Ranges of `line` as the editor marks them: in order, apart, on
+        /// character boundaries, neither empty nor starting or ending with
+        /// whitespace, each word wholly in or wholly out.
+        fn check_ranges(line: &str, ranges: &[Range<usize>]) -> Result<(), TestCaseError> {
+            for range in ranges {
+                prop_assert!(
+                    range.start < range.end && range.end <= line.len(),
+                    "{:?}",
+                    range
+                );
+                prop_assert!(
+                    line.is_char_boundary(range.start) && line.is_char_boundary(range.end)
+                );
+                let text = &line[range.clone()];
+                prop_assert_eq!(text.trim(), text);
+            }
+            for two in ranges.windows(2) {
+                prop_assert!(two[0].end < two[1].start, "{:?}", two);
+            }
+            for word in words_of(line) {
+                let inside = ranges
+                    .iter()
+                    .any(|range| range.start <= word.start && word.end <= range.end);
+                let outside = ranges
+                    .iter()
+                    .all(|range| word.end <= range.start || range.end <= word.start);
+                prop_assert!(inside || outside, "word {:?} cut by {:?}", word, ranges);
+            }
+            Ok(())
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(512))]
+
+            /// On any pair of lines, the marked ranges are ones the editor
+            /// can paint, and the words left unmarked are as many as the
+            /// lines have in common, in order: a word marked although it did
+            /// not change, or left unmarked although it did, would mislead
+            /// the reader of the diff.
+            #[test]
+            fn changed_words_mark_exactly_what_changed(base in line(), side in line()) {
+                let ranges = changed_words(&base, &side);
+                check_ranges(&side, &ranges)?;
+                let kept: Vec<&str> = words_of(&side)
+                    .into_iter()
+                    .filter(|word| ranges.iter().all(|range| word.end <= range.start || range.end <= word.start))
+                    .map(|word| &side[word])
+                    .collect();
+                let base_tokens = tokens(&base);
+                prop_assert_eq!(kept.len(), reference_lcs_length(&base_tokens, &tokens(&side)));
+                prop_assert_eq!(reference_lcs_length(&base_tokens, &kept), kept.len());
+                prop_assert!(changed_words(&side, &side).is_empty());
+            }
+
+            /// Any side against any base: one change per side line, as many
+            /// unchanged lines as the two have in common, and edited lines
+            /// marked with ranges the editor can paint.
+            #[test]
+            fn line_changes_keep_every_common_line(
+                base in prop::collection::vec(line(), 0..8),
+                side in prop::collection::vec(line(), 0..8),
+            ) {
+                let base_text: String = base.iter().map(|line| format!("{line}\n")).collect();
+                let side_text: String = side.iter().map(|line| format!("{line}\n")).collect();
+                let changes = line_changes(Some(&base_text), &side_text);
+                prop_assert_eq!(changes.len(), side.len());
+                let base_lines: Vec<&str> = base.iter().map(String::as_str).collect();
+                let side_lines: Vec<&str> = side.iter().map(String::as_str).collect();
+                let unchanged = changes
+                    .iter()
+                    .filter(|change| **change == LineChange::Unchanged)
+                    .count();
+                prop_assert_eq!(unchanged, reference_lcs_length(&base_lines, &side_lines));
+                for (change, line) in changes.iter().zip(&side) {
+                    if let LineChange::Edited { words } = change {
+                        check_ranges(line, words)?;
+                    }
+                }
+            }
+        }
+    }
 }
