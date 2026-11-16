@@ -9,10 +9,11 @@ use std::process::Command;
 
 use scry_core::command::Command as SessionCommand;
 use scry_core::git::GitCli;
+use scry_core::overview::Overview;
 use scry_core::records::{Record, Store};
 use scry_core::resolution::CandidateKind;
 use scry_core::review::{self, Resolution};
-use scry_core::session::{self, Choice, MergeSession};
+use scry_core::session::{self, Choice, MergeSession, Origin};
 use scry_core::theme::{Provenance, State};
 use tempfile::TempDir;
 
@@ -122,6 +123,29 @@ impl Repo {
         review::open(&self.cli(), &self.path(), "file.txt", "main", "feature")
             .unwrap()
             .expect("a review")
+    }
+
+    /// The file opened in the merge editor, as the app does.
+    fn opened(&self) -> MergeSession {
+        review::opened(
+            &self.cli(),
+            &self.cli(),
+            &self.path(),
+            "file.txt",
+            ("main", "feature"),
+        )
+        .unwrap()
+    }
+
+    /// The file's row in the overview: its state and review.
+    fn row(&self) -> (State, Option<review::Progress>) {
+        let snapshot = Overview::new(self.path()).refresh(&self.cli()).unwrap();
+        let file = snapshot
+            .files
+            .iter()
+            .find(|file| file.path == "file.txt")
+            .unwrap();
+        (file.state, file.review)
     }
 
     fn find(&self) -> review::FileReview {
@@ -613,4 +637,136 @@ fn a_side_picked_in_review_keeps_its_final_break() {
         })
         .unwrap();
     assert_eq!(session.merged_text().as_deref(), Some("start\nend ours"));
+}
+
+fn progress(reviewed: usize, total: usize, changed_outside: bool) -> Option<review::Progress> {
+    Some(review::Progress {
+        reviewed,
+        total,
+        changed_outside,
+    })
+}
+
+/// A file just stopped on opens from its markers in the editor, and what
+/// the user resolves there counts as reviewed: once saved, the overview
+/// has it resolved, not to review, and opening it again is not a review.
+#[test]
+fn a_file_resolved_in_scry_needs_no_review() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    let mut session = repo.opened();
+    assert_eq!(session.origin(), Origin::File);
+    for conflict in 0..2 {
+        session
+            .apply(SessionCommand::Choose {
+                conflict,
+                candidate: CandidateKind::Theirs,
+            })
+            .unwrap();
+    }
+    session
+        .apply(SessionCommand::Save { overwrite: false })
+        .unwrap();
+    assert_eq!(repo.row(), (State::Resolved, progress(2, 2, false)));
+    assert_eq!(repo.opened().unreviewed(), 0);
+}
+
+/// A file resolved elsewhere needs review in the overview, with how many
+/// conflicts are reviewed, until every one is: the overview reads the
+/// review the editor keeps.
+#[test]
+fn the_overview_counts_reviewed_conflicts() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    fs::write(
+        repo.file(),
+        "start\none theirs\nm1\nm2\nm3\nm4\nm5\ntwo, mine\nend\n",
+    )
+    .unwrap();
+    assert_eq!(repo.row(), (State::NeedsReview, progress(0, 2, false)));
+    let mut session = repo.opened();
+    assert_eq!(session.origin(), Origin::Resolved);
+    session
+        .apply(SessionCommand::MarkReviewed { conflict: 1 })
+        .unwrap();
+    assert_eq!(repo.row(), (State::NeedsReview, progress(1, 2, false)));
+    session
+        .apply(SessionCommand::MarkReviewed { conflict: 0 })
+        .unwrap();
+    assert_eq!(repo.row(), (State::Resolved, progress(2, 2, false)));
+}
+
+/// A file changed around its conflicts needs review as a whole: which
+/// conflict holds what cannot be told, so none counts as reviewed.
+#[test]
+fn a_file_changed_outside_needs_review() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    fs::write(
+        repo.file(),
+        "start\none theirs\nm1\nm2, edited\nm3\nm4\nm5\ntwo theirs\nend\n",
+    )
+    .unwrap();
+    assert_eq!(repo.row(), (State::NeedsReview, progress(0, 2, true)));
+}
+
+/// A file an agent resolved halfway opens as a review in the editor: the
+/// resolved conflict with what it holds, the other open, so neither is
+/// lost by opening from the markers left.
+#[test]
+fn a_file_resolved_halfway_opens_as_a_review() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    let open = fs::read_to_string(repo.file()).unwrap();
+    let second = &open[open.find("m5\n").unwrap() + 3..];
+    fs::write(
+        repo.file(),
+        format!("start\none theirs\nm1\nm2\nm3\nm4\nm5\n{second}"),
+    )
+    .unwrap();
+    let session = repo.opened();
+    assert_eq!(session.origin(), Origin::Resolved);
+    assert_eq!(outside(&session, 0).matches, Some(CandidateKind::Theirs));
+    assert!(session.choice(1).is_none());
+}
+
+/// Markers written in another style than git's now (`git checkout
+/// --conflict=diff3` with no style configured) are not mistaken for text
+/// of the user's: the file opens from its markers, with its base.
+#[test]
+fn markers_in_another_style_open_from_the_markers() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    repo.ok(&["checkout", "--conflict=diff3", "--", "file.txt"]);
+    let session = repo.opened();
+    assert_eq!(session.origin(), Origin::File);
+    assert_eq!(session.conflict_count(), 2);
+    assert!(session.unresolved() == 2);
+}
+
+/// Something is left to write only when the result is not what the file
+/// holds: marking a resolution reviewed leaves the file as it is (the
+/// review is kept already), choosing another candidate does not, until it
+/// is saved; a file with a conflict open always has something left.
+#[test]
+fn only_a_changed_result_is_left_to_write() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    assert!(repo.opened().status().unwritten);
+    fs::write(
+        repo.file(),
+        "start\none theirs\nm1\nm2\nm3\nm4\nm5\ntwo theirs\nend\n",
+    )
+    .unwrap();
+    let mut session = repo.opened();
+    assert!(!session.status().unwritten);
+    session
+        .apply(SessionCommand::MarkReviewed { conflict: 0 })
+        .unwrap();
+    assert!(!session.status().unwritten);
+    session
+        .apply(SessionCommand::Choose {
+            conflict: 1,
+            candidate: CandidateKind::Ours,
+        })
+        .unwrap();
+    assert!(session.status().unwritten);
+    session
+        .apply(SessionCommand::Save { overwrite: false })
+        .unwrap();
+    assert!(!session.status().unwritten);
 }

@@ -165,16 +165,26 @@ fn files_go_from_unresolved_to_staged_then_the_rebase_continues() {
     assert!(!snapshot.can_continue());
     assert!(snapshot.can_skip());
 
+    // Resolved by hand, outside Scry: it needs review before staging.
     fs::write(repo.path().join("a.txt"), "a both\n").unwrap();
-    assert_eq!(state(&mut overview, &git, "a.txt"), State::Resolved);
+    assert_eq!(state(&mut overview, &git, "a.txt"), State::NeedsReview);
     assert_eq!(
         actions(&file(&mut overview, &git, "a.txt")),
         (true, true, false)
     );
-    assert_eq!(
+    // Stage resolved leaves it out: it is staged by name, once reviewed or
+    // after the app asked.
+    assert!(
         overview
             .apply(&git, OverviewCommand::StageResolved)
-            .unwrap(),
+            .unwrap()
+            .is_empty()
+    );
+    let stage = |path: &str| OverviewCommand::Stage {
+        paths: vec![path.to_string()],
+    };
+    assert_eq!(
+        overview.apply(&git, stage("a.txt")).unwrap(),
         [OverviewEvent::Staged {
             paths: vec![String::from("a.txt")]
         }]
@@ -193,9 +203,7 @@ fn files_go_from_unresolved_to_staged_then_the_rebase_continues() {
     ));
 
     fs::write(repo.path().join("Sources/b.swift"), "let b = 3\n").unwrap();
-    overview
-        .apply(&git, OverviewCommand::StageResolved)
-        .unwrap();
+    overview.apply(&git, stage("Sources/b.swift")).unwrap();
     assert!(overview.refresh(&git).unwrap().can_continue());
     assert_eq!(
         overview
@@ -339,7 +347,12 @@ fn an_interactive_rebase_shows_its_plan_and_what_git_applied() {
 
     fs::write(repo.path().join("a.txt"), "a both\n").unwrap();
     overview
-        .apply(&git, OverviewCommand::StageResolved)
+        .apply(
+            &git,
+            OverviewCommand::Stage {
+                paths: vec![String::from("a.txt")],
+            },
+        )
         .unwrap();
     overview
         .apply(&git, OverviewCommand::Continue { message: None })
@@ -446,7 +459,12 @@ fn a_conflicted_reword_commits_with_the_message_written() {
     fs::write(repo.path().join("a.txt"), "a both\n").unwrap();
     fs::write(repo.path().join("Sources/b.swift"), "let b = 3\n").unwrap();
     overview
-        .apply(&git, OverviewCommand::StageResolved)
+        .apply(
+            &git,
+            OverviewCommand::Stage {
+                paths: vec![String::from("a.txt"), String::from("Sources/b.swift")],
+            },
+        )
         .unwrap();
     overview
         .apply(
@@ -500,7 +518,7 @@ fn one_file_is_staged_then_unstaged() {
             paths: vec![String::from("a.txt")]
         }]
     );
-    assert_eq!(state(&mut overview, &git, "a.txt"), State::Resolved);
+    assert_eq!(state(&mut overview, &git, "a.txt"), State::NeedsReview);
     assert_eq!(
         fs::read_to_string(repo.path().join("a.txt")).unwrap(),
         "a both\n"
@@ -522,7 +540,12 @@ fn a_message_outside_a_reword_is_refused() {
     fs::write(repo.path().join("a.txt"), "a both\n").unwrap();
     fs::write(repo.path().join("Sources/b.swift"), "let b = 3\n").unwrap();
     overview
-        .apply(&git, OverviewCommand::StageResolved)
+        .apply(
+            &git,
+            OverviewCommand::Stage {
+                paths: vec![String::from("a.txt"), String::from("Sources/b.swift")],
+            },
+        )
         .unwrap();
     assert!(matches!(
         overview.apply(
@@ -1496,7 +1519,7 @@ fn files_staged_before_opening_are_listed_as_staged() {
             },
         )
         .unwrap();
-    assert_eq!(state(&mut overview, &git, "a.txt"), State::Resolved);
+    assert_eq!(state(&mut overview, &git, "a.txt"), State::NeedsReview);
 }
 
 /// Several rows are staged, or unstaged, in one command and one git run.
@@ -1519,7 +1542,7 @@ fn several_files_are_staged_and_unstaged_in_one_command() {
         )
         .unwrap_err();
     assert!(matches!(error, OverviewError::NotThatKind(path) if path == "Sources/b.swift"));
-    assert_eq!(state(&mut overview, &git, "a.txt"), State::Resolved);
+    assert_eq!(state(&mut overview, &git, "a.txt"), State::NeedsReview);
 
     fs::write(repo.path().join("Sources/b.swift"), "let b = 3\n").unwrap();
     overview
@@ -1535,10 +1558,10 @@ fn several_files_are_staged_and_unstaged_in_one_command() {
     overview
         .apply(&git, OverviewCommand::Unstage { paths: both })
         .unwrap();
-    assert_eq!(state(&mut overview, &git, "a.txt"), State::Resolved);
+    assert_eq!(state(&mut overview, &git, "a.txt"), State::NeedsReview);
     assert_eq!(
         state(&mut overview, &git, "Sources/b.swift"),
-        State::Resolved
+        State::NeedsReview
     );
 }
 

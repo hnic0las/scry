@@ -58,7 +58,7 @@ struct RowView: View {
             CellView(
                 cell: code.result, pane: .result, invalid: code.resultInvalid,
                 scroll: scroll, codeWidth: widths.code(widths.result),
-                provenance: code.resultProvenance.color, twin: twin
+                provenance: code.resultProvenance.color, unreviewed: code.resultUnreviewed, twin: twin
             )
             .frame(width: widths.result)
         case .all:
@@ -75,7 +75,7 @@ struct RowView: View {
                 CellView(
                     cell: code.result, pane: .result, invalid: code.resultInvalid,
                     scroll: scroll, codeWidth: widths.code(widths.result),
-                    provenance: code.resultProvenance.color
+                    provenance: code.resultProvenance.color, unreviewed: code.resultUnreviewed
                 )
                     .frame(width: widths.result)
                 Connector(color: Theme.Sides.theirs, active: code.conflict != nil)
@@ -134,6 +134,9 @@ struct CellView: View {
     let codeWidth: CGFloat
     /// The colour of the chosen resolution's provenance, for the result.
     var provenance: Color = Theme.Provenance.git
+    /// A resolution made outside Scry, not reviewed yet: its strip is
+    /// dashed, solid once reviewed.
+    var unreviewed = false
     /// Tinted as the twin line; a pane with no line here stays hatched.
     var twin = false
 
@@ -270,8 +273,9 @@ struct CellView: View {
         }
     }
 
-    /// The result's left strip: solid for a choice, dotted red when
-    /// unresolved or invalid.
+    /// The result's left strip: solid for a choice, dashed in its colour
+    /// while a resolution made outside Scry is not reviewed, dotted red
+    /// when unresolved or invalid.
     @ViewBuilder
     private var strip: some View {
         switch cell.kind {
@@ -279,6 +283,8 @@ struct CellView: View {
             DottedStrip(color: Theme.Severity.error)
         case .chosen where invalid:
             DottedStrip(color: Theme.Severity.error)
+        case .chosen where unreviewed:
+            DottedStrip(color: provenance, dash: [4, 3])
         case .chosen:
             Rectangle().fill(provenance).frame(width: Metrics.provenanceStrip)
         case .removed:
@@ -308,10 +314,11 @@ struct Hatch: View {
 
 struct DottedStrip: View {
     let color: Color
+    var dash: [CGFloat] = [2, 2]
 
     var body: some View {
         Rectangle()
-            .stroke(color, style: StrokeStyle(lineWidth: Metrics.provenanceStrip, dash: [2, 2]))
+            .stroke(color, style: StrokeStyle(lineWidth: Metrics.provenanceStrip, dash: dash))
             .frame(width: Metrics.provenanceStrip)
     }
 }

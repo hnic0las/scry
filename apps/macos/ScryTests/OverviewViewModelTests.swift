@@ -143,7 +143,8 @@ func projectConflict(_ ours: [String], _ theirs: [String], reason: String?) -> P
 }
 
 func file(
-    _ path: String, _ state: ConflictState, absolutePath: String? = nil, openable: Bool = true, special: SpecialKind? = nil
+    _ path: String, _ state: ConflictState, absolutePath: String? = nil, openable: Bool = true, special: SpecialKind? = nil,
+    review: ReviewProgress? = nil
 ) -> OverviewFile {
     let name = path.split(separator: "/").last.map(String.init) ?? path
     let directory = path.contains("/") ? String(path[..<path.lastIndex(of: "/")!]) : ""
@@ -160,7 +161,8 @@ func file(
         // The core's rules (`FileView::can_open` and its siblings).
         canOpen: (openable || special != nil) && state != .staged,
         canStage: state == .resolved || state == .needsReview,
-        canUnstage: state == .staged
+        canUnstage: state == .staged,
+        review: review
     )
 }
 
@@ -244,6 +246,45 @@ struct OverviewViewModelTests {
         await overview.idle()
         #expect(source.actions == [.stage(paths: ["A.swift"]), .unstage(paths: ["B.swift"])])
         #expect(overview.rows.map(\.state) == [.staged, .resolved, .unresolved])
+    }
+
+    /// A file resolved outside Scry shows how far its review is (nothing
+    /// once done, as for a file resolved in Scry), and
+    /// staging it before every conflict is reviewed asks first, without
+    /// blocking (decision 4): cancelling stages nothing, confirming stages
+    /// it. A reviewed file stages at once.
+    @Test func stagingAFileNotReviewedAsksFirst() async throws {
+        let source = FakeOverview(files: [
+            file("A.swift", .needsReview, review: ReviewProgress(reviewed: 1, total: 3, changedOutside: false)),
+            file("B.swift", .resolved, review: ReviewProgress(reviewed: 2, total: 2, changedOutside: false)),
+            file("C.swift", .needsReview, review: ReviewProgress(reviewed: 0, total: 1, changedOutside: true)),
+        ])
+        let overview = OverviewViewModel(source: source) { _ in }
+        #expect(overview.rows.map(\.review) == ["1 of 3 reviewed", nil, "Changed outside its conflicts"])
+        #expect(overview.unresolvedSummary == "2 to review")
+        let menu = try #require(overview.menu(for: ["A.swift"]))
+        #expect(menu.open.title == "Review in Merge Editor")
+        #expect(menu.stage == .init(title: "Stage…", detail: "2 conflicts not reviewed", enabled: true))
+
+        overview.stage("A.swift")
+        let asked = try #require(overview.stageConfirmation)
+        #expect(asked.title == "Stage A.swift without reviewing?")
+        #expect(asked.message == "A.swift: 2 conflicts not reviewed. Staging takes the file as it is.")
+        overview.confirmingStage = false
+        await overview.idle()
+        #expect(source.actions.isEmpty)
+
+        overview.stageOrUnstage(["B.swift", "C.swift"])
+        #expect(overview.stageConfirmation?.message == "C.swift: changed outside its conflicts, not reviewed. Staging takes the file as it is.")
+        overview.confirmStage()
+        await overview.idle()
+        #expect(overview.stageConfirmation == nil)
+        #expect(source.actions == [.stage(paths: ["B.swift", "C.swift"])])
+
+        overview.stage("A.swift")
+        overview.confirmStage()
+        await overview.idle()
+        #expect(source.actions.last == .stage(paths: ["A.swift"]))
     }
 
     /// The row menu keeps the same items in every state: those that do not

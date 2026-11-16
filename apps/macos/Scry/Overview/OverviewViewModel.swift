@@ -115,6 +115,12 @@ final class OverviewViewModel {
         let stateLabel: String
         /// "2", or "—" when the file cannot be read.
         let conflicts: String
+        /// "1 of 2 reviewed", under the state of a file resolved outside
+        /// Scry and not fully reviewed; `nil` for any other.
+        let review: String?
+        /// What staging it leaves unreviewed: "1 conflict not reviewed",
+        /// "changed outside its conflicts"; `nil` when nothing.
+        let notReviewed: String?
         /// Whether it opens from here, not staged yet: in the merge editor,
         /// or in its own view when `special` says which.
         let canOpen: Bool
@@ -189,6 +195,20 @@ final class OverviewViewModel {
     var confirmingAbort = false
     /// Asking before leaving the current commit out.
     var confirmingSkip = false
+
+    /// Asking before staging files whose review is not done.
+    struct StageConfirmation: Equatable {
+        let title: String
+        let message: String
+        let paths: [String]
+    }
+
+    /// The files waiting for the user's word before they are staged.
+    private(set) var stageConfirmation: StageConfirmation?
+    var confirmingStage: Bool {
+        get { stageConfirmation != nil }
+        set { if !newValue { stageConfirmation = nil } }
+    }
     /// The view settling a special file, while it is shown.
     private(set) var special: SpecialFileViewModel?
     /// The message being written at a `reword` step; Continue gives it to
@@ -514,6 +534,13 @@ final class OverviewViewModel {
                     state: file.state,
                     stateLabel: Self.label(file.state),
                     conflicts: file.conflicts.map(String.init) ?? "—",
+                    // Only while there is something to review: a file resolved
+                    // in Scry, or fully reviewed, reads Resolved alone.
+                    review: file.state == .needsReview ? file.review.map { review in
+                        review.changedOutside ? "Changed outside its conflicts"
+                            : "\(review.reviewed) of \(review.total) reviewed"
+                    } : nil,
+                    notReviewed: Self.notReviewed(file),
                     canOpen: file.canOpen,
                     special: file.state == .staged ? nil : file.special,
                     canStage: file.canStage,
@@ -548,7 +575,11 @@ final class OverviewViewModel {
         let rows = rows.filter { paths.contains($0.path) }
         guard !rows.isEmpty, Self.stageItem(rows).enabled else { return }
         let paths = rows.map(\.path)
-        run(rows.allSatisfy(\.canUnstage) ? .unstage(paths: paths) : .stage(paths: paths))
+        if rows.allSatisfy(\.canUnstage) {
+            run(.unstage(paths: paths))
+        } else {
+            stageAsking(rows)
+        }
     }
 
     private static func openItem(_ row: FileRow) -> MenuItem {
@@ -559,7 +590,7 @@ final class OverviewViewModel {
                 enabled: false
             )
         }
-        let title = row.state == .needsReview ? "Review Auto-resolution"
+        let title = row.state == .needsReview ? (row.review != nil ? "Review in Merge Editor" : "Review Auto-resolution")
             : row.special != nil ? "Open…" : "Open in Merge Editor"
         return MenuItem(title: title, detail: row.canOpen ? nil : "Scry cannot read this file", enabled: row.canOpen)
     }
@@ -591,10 +622,21 @@ final class OverviewViewModel {
                     enabled: true
                 )
         }
-        let title = many ? "Stage \(files)" : first.state == .needsReview ? "Accept and Stage" : "Stage"
+        let unreviewed = rows.filter { $0.notReviewed != nil }
+        let title = many ? "Stage \(files)"
+            : first.notReviewed != nil ? "Stage…"
+            : first.state == .needsReview ? "Accept and Stage" : "Stage"
         if rows.allSatisfy(\.canStage) {
-            let review = !many && first.state == .needsReview
-            return MenuItem(title: title, detail: review ? "Keeps the rule’s result as it is" : nil, enabled: true)
+            let detail: String? = if let reason = first.notReviewed, !many {
+                reason.prefix(1).uppercased() + reason.dropFirst()
+            } else if !unreviewed.isEmpty {
+                "\(unreviewed.count) of them not fully reviewed"
+            } else if !many && first.state == .needsReview {
+                "Keeps the rule’s result as it is"
+            } else {
+                nil
+            }
+            return MenuItem(title: title, detail: detail, enabled: true)
         }
         if rows.contains(where: \.canUnstage) {
             return MenuItem(title: title, detail: "Some of these files are staged already", enabled: false)
@@ -616,10 +658,14 @@ final class OverviewViewModel {
         "Leaves the commit being applied out of the \(verb): its changes and the choices made in its files are lost. Git keeps the original commit in its reflog."
     }
 
-    /// "3 files still unresolved".
+    /// "3 files still unresolved · 1 to review".
     var unresolvedSummary: String {
-        let left = count(.unresolved) + count(.needsReview)
-        return left == 0 ? "" : "\(left) \(left == 1 ? "file" : "files") still unresolved"
+        let unresolved = count(.unresolved)
+        let review = count(.needsReview)
+        var parts: [String] = []
+        if unresolved > 0 { parts.append("\(unresolved) \(unresolved == 1 ? "file" : "files") still unresolved") }
+        if review > 0 { parts.append("\(review) to review") }
+        return parts.joined(separator: " · ")
     }
 
     /// The footer's sentence: git at work, why Continue waits for the
@@ -761,10 +807,18 @@ final class OverviewViewModel {
         run(.stageResolved)
     }
 
-    /// Stages one resolved file.
+    /// Stages one resolved file, after asking when its review is not
+    /// done.
     func stage(_ path: String) {
-        guard rows.first(where: { $0.path == path })?.canStage == true else { return }
-        run(.stage(paths: [path]))
+        guard let row = rows.first(where: { $0.path == path }), row.canStage else { return }
+        stageAsking([row])
+    }
+
+    /// Stages the files the user was asked about, once they agreed.
+    func confirmStage() {
+        guard let confirmation = stageConfirmation else { return }
+        stageConfirmation = nil
+        run(.stage(paths: confirmation.paths))
     }
 
     /// Gives a staged file its conflict back, keeping what was resolved.
@@ -808,6 +862,36 @@ final class OverviewViewModel {
         var message = message
         while message.last?.isWhitespace == true { message.removeLast() }
         return message
+    }
+
+    /// Stages `rows`, or asks first when some were resolved outside Scry
+    /// and not fully reviewed (decision 4: it asks, it does not block).
+    private func stageAsking(_ rows: [FileRow]) {
+        let paths = rows.map(\.path)
+        let unreviewed = rows.filter { $0.notReviewed != nil }
+        guard let first = unreviewed.first, let reason = first.notReviewed else {
+            run(.stage(paths: paths))
+            return
+        }
+        let message = unreviewed.count == 1
+            ? "\(first.name): \(reason). Staging takes the file as it is."
+            : "\(unreviewed.count) files are not fully reviewed. Staging takes them as they are."
+        stageConfirmation = StageConfirmation(
+            title: unreviewed.count == 1 ? "Stage \(first.name) without reviewing?" : "Stage without reviewing?",
+            message: message,
+            paths: paths
+        )
+    }
+
+    /// What a file's review leaves: "2 conflicts not reviewed", "changed
+    /// outside its conflicts"; `nil` once reviewed, or for a file not
+    /// resolved outside Scry.
+    private static func notReviewed(_ file: OverviewFile) -> String? {
+        guard file.state == .needsReview, let review = file.review else { return nil }
+        if review.changedOutside { return "changed outside its conflicts, not reviewed" }
+        let left = Int(review.total) - Int(review.reviewed)
+        guard left > 0 else { return nil }
+        return "\(left) \(left == 1 ? "conflict" : "conflicts") not reviewed"
     }
 
     private func count(_ state: ConflictState) -> Int {

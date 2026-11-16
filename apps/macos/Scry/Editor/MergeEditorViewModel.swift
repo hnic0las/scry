@@ -203,6 +203,9 @@ final class MergeEditorViewModel {
         /// The chosen resolution does not parse.
         let resultInvalid: Bool
         let resultProvenance: Provenance
+        /// Resolved outside Scry and not reviewed yet: its strip is dashed
+        /// until the user marks it reviewed.
+        var resultUnreviewed = false
         /// The first line of a conflict's block (after any base lines): the
         /// connectors hold their › ‹ take buttons here.
         var startsBlock = false
@@ -258,6 +261,7 @@ final class MergeEditorViewModel {
     private func buildRows() -> [RowState] {
         // Once per conflict, not once per line.
         let chosen = model.conflicts.map(\.chosen)
+        let unreviewed = model.conflicts.map { $0.outside.map { !$0.reviewed } ?? false }
         let canTake = model.editing == nil
         var lastBlock: Int?
         return model.rows.map { row in
@@ -276,6 +280,7 @@ final class MergeEditorViewModel {
                     conflict: index,
                     resultInvalid: candidate?.doesNotParse ?? false,
                     resultProvenance: candidate?.provenance ?? .git,
+                    resultUnreviewed: index.map { unreviewed[$0] } ?? false,
                     startsBlock: startsBlock,
                     canTake: canTake
                 ))
@@ -469,9 +474,10 @@ final class MergeEditorViewModel {
     var everWritten: Bool { model.everWritten }
 
     /// Choices made since the file was opened or last written, or an edit
-    /// still open: closing the window would lose them.
+    /// still open: closing the window would lose them. Marks of review
+    /// alone are kept already, the file unchanged.
     var hasUnwrittenWork: Bool {
-        isEditing || (!model.written && model.status.canUndo)
+        isEditing || (!model.written && model.status.canUndo && model.status.unwritten)
     }
 
     // MARK: Alerts

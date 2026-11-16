@@ -22,7 +22,9 @@ use crate::merge_graph::{self, MergeGraph};
 use crate::operation::{self, Operation, OperationKind};
 use crate::pbxproj::{self, ProjectReview};
 use crate::rebase_plan::{self, Action, Plan};
+use crate::records::Store;
 use crate::resolved::{self, ResolvedMerge};
+use crate::review;
 use crate::session::{self, MergetoolFiles, write_atomically};
 use crate::syntax::Language;
 use crate::theme::State;
@@ -67,6 +69,9 @@ pub struct FileView {
     /// one side, binary) or one a view settles better (Xcode project,
     /// string catalog); `None` once staged.
     pub special: Option<Special>,
+    /// For a text file resolved and not staged: how far the review of its
+    /// resolutions is. Not fully reviewed, the file needs review.
+    pub review: Option<review::Progress>,
 }
 
 /// A conflicted file the overview settles with its own view.
@@ -441,6 +446,10 @@ impl Overview {
         let unmerged = operation::conflicted_paths(git)?;
         if step != self.step {
             self.step = step;
+            // What was reviewed at another stop will never be asked again.
+            if let Ok(store) = Store::open(git) {
+                let _ = store.prune();
+            }
             // Files staged at this step before Scry opened: git keeps
             // their conflict until the step ends (resolve-undo).
             self.paths = unmerged.clone();
@@ -475,6 +484,7 @@ impl Overview {
             Facts {
                 stages: Stages::all(git)?,
                 attributes: attributes(git, &unmerged)?,
+                store: Store::open(git).ok(),
             }
         };
         let mut files = Vec::new();
@@ -1011,6 +1021,7 @@ impl Overview {
             conflicts: None,
             openable: false,
             special: None,
+            review: None,
         };
         if !unmerged {
             return Ok(view);
@@ -1060,10 +1071,27 @@ impl Overview {
                     view.openable = false;
                 } else {
                     view.state = State::Resolved;
+                    if view.special.is_none() && matches!(merge, "unspecified" | "set" | "text") {
+                        view.review = self.review(git, path, facts);
+                        if view.review.is_some_and(|progress| !progress.is_done()) {
+                            view.state = State::NeedsReview;
+                        }
+                    }
                 }
             }
         }
         Ok(view)
+    }
+}
+
+impl Overview {
+    /// How far the review of `path`, resolved outside the merge editor or
+    /// in it, is; `None` when it cannot be told (no store, a side missing,
+    /// git failing), the file then reading as resolved, as before reviews.
+    fn review(&self, git: &dyn Git, path: &str, facts: &Facts) -> Option<review::Progress> {
+        let store = facts.store.as_ref()?;
+        let found = review::find(git, &self.root, path).ok()??;
+        Some(review::progress(&found, &store.reviewed(path)))
     }
 }
 
@@ -1082,6 +1110,8 @@ fn left_as_ours(git: &dyn Git, path: &str, merge: &str, content: &[u8]) -> Resul
 struct Facts {
     stages: HashMap<String, Stages>,
     attributes: HashMap<String, Attributes>,
+    /// Where the reviews of this stop are kept.
+    store: Option<Store>,
 }
 
 /// A file's attributes that change how its conflict is read.

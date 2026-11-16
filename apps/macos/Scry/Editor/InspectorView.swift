@@ -48,6 +48,16 @@ struct InspectorView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(card)
 
+        if let review = viewModel.review {
+            ReviewCard(
+                review: review,
+                canMarkReviewed: viewModel.canMarkReviewed,
+                canReopen: viewModel.canReopen,
+                markReviewed: { viewModel.markReviewed() },
+                reopen: { viewModel.reopen() }
+            )
+        }
+
         Text("Candidates")
             .font(Metrics.captionBold)
             .foregroundStyle(Theme.Surfaces.textSecondary)
@@ -98,6 +108,67 @@ struct InspectorView: View {
         RoundedRectangle(cornerRadius: Metrics.cardCornerRadius)
             .fill(Theme.Surfaces.pane)
             .stroke(Theme.Surfaces.hairline)
+    }
+}
+
+/// A conflict resolved outside Scry: who resolved it, why, and the
+/// review's actions. Dashed until reviewed, as the result's strip.
+struct ReviewCard: View {
+    let review: InspectorViewModel.Review
+    let canMarkReviewed: Bool
+    let canReopen: Bool
+    let markReviewed: () -> Void
+    let reopen: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Label(review.by, systemImage: review.provenance.symbol)
+                    .font(Metrics.headline)
+                    .foregroundStyle(review.provenance.color)
+                Spacer(minLength: 4)
+                Badge(
+                    text: review.status,
+                    symbol: review.reviewed ? "checkmark" : "eye",
+                    color: review.reviewed ? Theme.States.resolved : Theme.States.needsReview
+                )
+            }
+            Text(review.reason)
+                .font(Metrics.callout)
+                .italic(!review.hasReason)
+                .foregroundStyle(review.hasReason ? Theme.Surfaces.text : Theme.Surfaces.textSecondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            if let dropped = review.dropped {
+                Text(dropped)
+                    .font(Metrics.caption)
+                    .foregroundStyle(Theme.Surfaces.textSecondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Button(action: markReviewed) {
+                    Label("Mark Reviewed", systemImage: "checkmark")
+                }
+                .help("Keep this resolution: the file stages without asking once every conflict is reviewed")
+                .disabled(!canMarkReviewed)
+                Button(action: reopen) {
+                    Label("Reopen", systemImage: "arrow.uturn.backward")
+                }
+                .help("Put the conflict's markers back, to resolve it here")
+                .disabled(!canReopen)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Metrics.cardCornerRadius)
+                .fill(Theme.Surfaces.pane)
+                .stroke(
+                    review.provenance.color,
+                    style: StrokeStyle(lineWidth: 1, dash: review.reviewed ? [] : [4, 3])
+                )
+        )
     }
 }
 
@@ -262,6 +333,28 @@ extension Provenance {
 
 #Preview("Inspector, dark", traits: .fixedLayout(width: 320, height: 760)) {
     if let editor = PreviewSample.editor({ $0.take("ours") }) {
+        InspectorView(viewModel: editor.inspector)
+            .preferredColorScheme(.dark)
+    }
+}
+
+#Preview("Inspector, review · agent's own text", traits: .fixedLayout(width: 320, height: 900)) {
+    if let editor = ReviewSample.editor({ $0.focus(1) }) {
+        InspectorView(viewModel: editor.inspector)
+    }
+}
+
+#Preview("Inspector, review · resolved outside Scry", traits: .fixedLayout(width: 320, height: 900)) {
+    if let editor = ReviewSample.editor() {
+        InspectorView(viewModel: editor.inspector)
+    }
+}
+
+#Preview("Inspector, review · reviewed, dark", traits: .fixedLayout(width: 320, height: 900)) {
+    if let editor = ReviewSample.editor({ editor in
+        editor.focus(1)
+        editor.inspector.markReviewed()
+    }) {
         InspectorView(viewModel: editor.inspector)
             .preferredColorScheme(.dark)
     }

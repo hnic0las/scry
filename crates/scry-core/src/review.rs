@@ -66,6 +66,70 @@ pub struct FileReview {
     pub ends_with_break: bool,
 }
 
+/// How far the review of a file resolved outside Scry is, for the
+/// overview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Progress {
+    /// Conflicts whose resolution the user reviewed, or made in Scry.
+    pub reviewed: usize,
+    pub total: usize,
+    /// The text around the conflicts changed: which conflict holds what
+    /// cannot be told, so the file is reviewed as a whole.
+    pub changed_outside: bool,
+}
+
+impl Progress {
+    /// Nothing left to review: the file can be staged without asking.
+    pub fn is_done(&self) -> bool {
+        !self.changed_outside && self.reviewed == self.total
+    }
+}
+
+/// How far the review of `found` is, given the conflicts `reviewed` (from
+/// `Store::reviewed`) with the text each held then.
+pub fn progress(found: &FileReview, reviewed: &BTreeMap<String, String>) -> Progress {
+    let done = found
+        .conflicts
+        .iter()
+        .filter(|conflict| match (&conflict.resolution, &conflict.region) {
+            (Resolution::Candidate(_) | Resolution::Text(_), Some((text, _))) => {
+                reviewed.get(&conflict.id) == Some(text)
+            }
+            _ => false,
+        })
+        .count();
+    Progress {
+        reviewed: done,
+        total: found.conflicts.len(),
+        changed_outside: found.changed_outside,
+    }
+}
+
+/// Opens a conflicted file for the editor: as a review when at least one
+/// of its conflicts was resolved outside Scry, else from its markers as
+/// `session::open_file` reads them. The review is kept either way, so a
+/// conflict the user resolves in Scry is not asked again. `git` runs at
+/// `root`, `beside` in the file's folder (what `open_file` needs); `path`
+/// is from the root.
+pub fn opened(
+    git: &dyn Git,
+    beside: &dyn Git,
+    root: &Path,
+    path: &str,
+    (ours, theirs): (&str, &str),
+) -> Result<MergeSession, LoadError> {
+    if let Ok(Some(session)) = open(git, root, path, ours, theirs)
+        && session.unreviewed() + session.reviewed().len() > 0
+    {
+        return Ok(session);
+    }
+    let session = session::open_file(beside, &root.join(path))?;
+    Ok(match Store::open(git) {
+        Ok(store) => session.keeping_reviews(store, path.to_string()),
+        Err(_) => session,
+    })
+}
+
 /// What was done to `path` (from the repository root), with `git` running
 /// at the root. `None` when the index lacks one of the sides (deleted on
 /// one side, already staged): there is no text conflict to rebuild.
@@ -146,7 +210,20 @@ pub fn session(
     reviewed: &BTreeMap<String, String>,
 ) -> Result<Option<MergeSession>, ParseError> {
     let found = resolutions(written, current, marker_size)?;
-    if found.changed_outside {
+    // Markers in a resolution: the file was written in another conflict
+    // style than git's now (`git checkout --conflict=diff3`), and those
+    // conflicts are open, which only the markers themselves can show.
+    let holds_markers = |text: &str| {
+        conflict::parse_with_marker_size(text, marker_size).map_or(true, |segments| {
+            conflict::conflicts(&segments).next().is_some()
+        })
+    };
+    if found.changed_outside
+        || found
+            .conflicts
+            .iter()
+            .any(|conflict| matches!(&conflict.resolution, Resolution::Text(text) if holds_markers(text)))
+    {
         return Ok(None);
     }
     let mut segments = conflict::parse_with_marker_size(written, marker_size)?;
@@ -358,8 +435,18 @@ impl Layout<'_> {
                 }
                 let mut ends: Vec<usize> = self.preferred_ends(k, start);
                 ends.extend(line_starts(self.text, start));
+                // Markers belong to a conflict left open: a region holds
+                // them only when it is its own conflict, with them.
+                let opening = "<".repeat(self.marker_size);
+                let markers = line_starts(self.text, start)
+                    .find(|line| self.text[*line..].starts_with(&opening))
+                    .unwrap_or(usize::MAX);
+                let open = (markers == start)
+                    .then(|| self.open_end(k, start))
+                    .flatten();
                 let mut tried = HashSet::new();
                 ends.into_iter()
+                    .filter(|end| *end <= markers || Some(*end) == open)
                     .filter(|end| tried.insert(*end))
                     .find_map(|end| {
                         let mut rest = self.place(k + 1, end, failed)?;
@@ -383,15 +470,36 @@ impl Layout<'_> {
             .filter(|candidate| rest.starts_with(candidate.text.as_str()))
             .map(|candidate| start + candidate.text.len())
             .collect();
+        if let Some(end) = self.open_end(k, start) {
+            // Markers opening right here: the conflict is still open, even
+            // where an empty candidate would fit too.
+            if rest.starts_with(&"<".repeat(self.marker_size)) {
+                ends.insert(0, end);
+            } else {
+                ends.push(end);
+            }
+        }
+        ends
+    }
+
+    /// Where conflict `k` ends when it is left open at `start`: after the
+    /// first closing marker, when what lies before is that conflict.
+    fn open_end(&self, k: usize, start: usize) -> Option<usize> {
         let closing = ">".repeat(self.marker_size);
-        if let Some(end) = line_starts(self.text, start)
+        line_starts(self.text, start)
             .zip(line_starts(self.text, start).skip(1))
             .find(|(line, _)| self.text[*line..].starts_with(&closing))
             .map(|(_, next)| next)
-        {
-            ends.push(end);
-        }
-        ends
+            .filter(|end| self.is_open(k, &self.text[start..*end]))
+    }
+
+    /// `region` is conflict `k` with its markers.
+    fn is_open(&self, k: usize, region: &str) -> bool {
+        conflict::parse_with_marker_size(region, self.marker_size).is_ok_and(|segments| {
+            let conflict = &self.conflicts[k];
+            matches!(segments.as_slice(), [Segment::Conflict(found)]
+                if found.ours.text == conflict.ours.text && found.theirs.text == conflict.theirs.text)
+        })
     }
 
     /// How `region` (with the final line break git adds, when the file
@@ -405,12 +513,7 @@ impl Layout<'_> {
         {
             return Resolution::Candidate(candidate.kind);
         }
-        let open = conflict::parse_with_marker_size(region, self.marker_size).is_ok_and(|segments| {
-            let conflict = &self.conflicts[k];
-            matches!(segments.as_slice(), [Segment::Conflict(found)]
-                if found.ours.text == conflict.ours.text && found.theirs.text == conflict.theirs.text)
-        });
-        if open {
+        if self.is_open(k, region) {
             Resolution::Open
         } else {
             Resolution::Text(shown.to_string())
@@ -499,5 +602,48 @@ mod tests {
         let written = "<<<<<<< ours\nm\n=======\nx\n>>>>>>> theirs\nm\nend\n";
         let review = resolutions(written, written, 7).unwrap();
         assert_eq!(review.conflicts[0].resolution, Resolution::Open);
+    }
+
+    /// Markers belong to the conflict they enclose: where conflicts have
+    /// empty sides, an empty candidate fits anywhere, yet a conflict left
+    /// open is never read as another's text, markers included, nor as an
+    /// earlier conflict's resolution. Such a reading would show an open
+    /// conflict as "own text".
+    #[test]
+    fn markers_are_never_part_of_another_conflicts_resolution() {
+        let open = |theirs: &str| format!("<<<<<<< ours\n=======\n{theirs}>>>>>>> theirs\n");
+        let written = [open(""), open(""), open("a\n"), open("")].concat();
+        let current = format!("a\n{}{}{}", open(""), open("a\n"), open(""));
+        let found: Vec<Resolution> = resolutions(&written, &current, 7)
+            .unwrap()
+            .conflicts
+            .into_iter()
+            .map(|conflict| conflict.resolution)
+            .collect();
+        assert_eq!(
+            found,
+            [
+                Resolution::Text(String::from("a\n")),
+                Resolution::Open,
+                Resolution::Open,
+                Resolution::Open,
+            ]
+        );
+        let current = [open(""), String::new(), open("a\n"), String::new()].concat();
+        let found: Vec<Resolution> = resolutions(&written, &current, 7)
+            .unwrap()
+            .conflicts
+            .into_iter()
+            .map(|conflict| conflict.resolution)
+            .collect();
+        assert_eq!(
+            found,
+            [
+                Resolution::Open,
+                Resolution::Candidate(CandidateKind::Ours),
+                Resolution::Open,
+                Resolution::Candidate(CandidateKind::Ours),
+            ]
+        );
     }
 }

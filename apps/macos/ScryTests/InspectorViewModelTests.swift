@@ -87,4 +87,46 @@ struct InspectorViewModelTests {
         inspector.chooseAdjacent(-1)
         #expect(editor.chosen(0) == ids.last)
     }
+
+    /// A file resolved outside Scry opens for review: a conflict with no
+    /// record says nobody gave a reason; the agent's own text shows who
+    /// resolved it, why and what it left out, as a card of its own.
+    /// Marking it reviewed keeps the file as it is, so leaving asks
+    /// nothing; reopening brings the markers back, and undo the resolution.
+    @Test func reviewsAResolutionMadeOutsideScry() throws {
+        let editor = try #require(ReviewSample.editor())
+        let inspector = editor.inspector
+
+        let first = try #require(inspector.review)
+        #expect(first.by == "Resolved outside Scry")
+        #expect(first.reason == "No reason given (resolved outside Scry).")
+        #expect(!first.hasReason && !first.reviewed)
+        #expect(inspector.cards.filter(\.selected).map(\.id) == ["theirs"])
+        #expect(inspector.editedCard == nil)
+
+        editor.next()
+        let agent = try #require(inspector.review)
+        #expect(agent.by == "Resolved by claude-code 2.1")
+        #expect(agent.provenance == .agent)
+        #expect(agent.reason == ReviewSample.reason)
+        #expect(agent.dropped == "Left out: nothing")
+        #expect(inspector.editedCard?.id == "outside")
+        #expect(editor.rows.contains { row in
+            if case .code(let code) = row { return code.conflict == 1 && code.resultUnreviewed }
+            return false
+        })
+
+        inspector.markReviewed()
+        #expect(inspector.review?.reviewed == true)
+        #expect(inspector.review?.status == "Reviewed")
+        #expect(!inspector.canMarkReviewed)
+        #expect(!editor.hasUnwrittenWork)
+
+        inspector.reopen()
+        #expect(inspector.review == nil)
+        #expect(inspector.conflict?.chosen == nil)
+        #expect(editor.hasUnwrittenWork)
+        editor.undo()
+        #expect(inspector.review?.reviewed == true)
+    }
 }

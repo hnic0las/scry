@@ -332,7 +332,7 @@ pub struct ConflictInfo {
     /// checking every conflict of a large file took seconds.
     pub checked: bool,
     /// For a conflict resolved outside Scry (a document from
-    /// `open_review`): who, why, and whether the user reviewed it.
+    /// `MergeDocument::open`): who, why, and whether the user reviewed it.
     pub outside: Option<OutsideInfo>,
 }
 
@@ -371,6 +371,8 @@ pub struct Status {
     pub can_redo: bool,
     /// Conflicts resolved outside Scry not reviewed yet.
     pub unreviewed: u32,
+    /// The result is not what the file holds: something to write.
+    pub unwritten: bool,
 }
 
 /// Something the app asks the core to do; conflicts are counted from 0.
@@ -437,47 +439,43 @@ pub struct MergeDocument {
     session: Mutex<MergeSession>,
 }
 
-/// Opens a file resolved outside Scry (by an agent, another editor)
-/// and not staged, to review it conflict by conflict: each conflict's
-/// choice is what the file holds. `None` when it cannot be reviewed so:
-/// no text conflict in the index, or the text around the conflicts
-/// changed.
-#[uniffi::export]
-pub fn open_review(path: String) -> Result<Option<Arc<MergeDocument>>, ScryError> {
-    let path = PathBuf::from(path);
-    let beside = GitCli::beside(&path);
-    let root = overview::root(&beside).map_err(failed)?;
-    let relative = fs::canonicalize(&path)
-        .ok()
-        .and_then(|path| {
-            let root = fs::canonicalize(&root).ok()?;
-            path.strip_prefix(root).ok().map(Path::to_path_buf)
-        })
-        .ok_or_else(|| failed(format!("{} is not in its repository", path.display())))?;
-    let relative = relative
-        .to_str()
-        .ok_or_else(|| failed(format!("{} is not a name git can take", path.display())))?
-        .to_string();
-    let git = GitCli::discover(root.clone());
-    let operation = operation::current(&git).ok().flatten();
-    let (ours, theirs) = presentation::side_labels(operation.as_ref());
-    let Some(session) = review::open(&git, &root, &relative, &ours, &theirs).map_err(failed)?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(MergeDocument::new(&path, session, &git, operation)))
+/// `path` in its repository: the root, and the path from it as git names
+/// it; `None` outside a repository.
+fn in_repository(path: &Path) -> Option<(PathBuf, String)> {
+    let root = overview::root(&GitCli::beside(path)).ok()?;
+    let relative = fs::canonicalize(path).ok().and_then(|path| {
+        let root = fs::canonicalize(&root).ok()?;
+        path.strip_prefix(root).ok().map(Path::to_path_buf)
+    })?;
+    Some((root, relative.to_str()?.to_string()))
 }
 
 #[uniffi::export]
 impl MergeDocument {
-    /// Opens a file that contains conflict markers. Side labels come from
-    /// the operation git has in progress in the file's repository.
+    /// Opens a conflicted file: from its markers, or, when some of its
+    /// conflicts were resolved outside Scry (by an agent, another editor),
+    /// to review them, each conflict's choice being what the file holds.
+    /// In a repository, the review is kept in its git folder. Side labels
+    /// come from the operation git has in progress.
     #[uniffi::constructor]
     pub fn open(path: String) -> Result<Arc<MergeDocument>, ScryError> {
         let path = PathBuf::from(path);
         let git = GitCli::beside(&path);
-        let session = session::open_file(&git, &path).map_err(failed)?;
         let operation = operation::current(&git).ok().flatten();
+        let session = match in_repository(&path) {
+            Some((root, relative)) => {
+                let (ours, theirs) = presentation::side_labels(operation.as_ref());
+                review::opened(
+                    &GitCli::discover(root.clone()),
+                    &git,
+                    &root,
+                    &relative,
+                    (&ours, &theirs),
+                )
+            }
+            None => session::open_file(&git, &path),
+        }
+        .map_err(failed)?;
         Ok(MergeDocument::new(&path, session, &git, operation))
     }
 
@@ -593,6 +591,7 @@ impl MergeDocument {
             language: status.language.map(|language| language.name().to_string()),
             checks_off: status.checks_off,
             unreviewed: status.unreviewed as u32,
+            unwritten: status.unwritten,
         }
     }
 }
@@ -766,6 +765,18 @@ pub struct OverviewFile {
     pub can_stage: bool,
     /// Its conflict can come back.
     pub can_unstage: bool,
+    /// Resolved and not staged: how far the review of its resolutions is.
+    pub review: Option<ReviewProgress>,
+}
+
+/// How far the review of a resolved file is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct ReviewProgress {
+    /// Conflicts reviewed, or resolved in Scry.
+    pub reviewed: u32,
+    pub total: u32,
+    /// The text around the conflicts changed.
+    pub changed_outside: bool,
 }
 
 /// A conflicted file the overview settles with its own view.
@@ -1388,6 +1399,11 @@ impl RepositoryOverview {
                     state: conflict_state(file.state),
                     conflicts: file.conflicts.map(|count| count as u32),
                     openable: file.openable,
+                    review: file.review.map(|progress| ReviewProgress {
+                        reviewed: progress.reviewed as u32,
+                        total: progress.total as u32,
+                        changed_outside: progress.changed_outside,
+                    }),
                     special: file.special.map(|special| match special {
                         overview::Special::DeletedOnOneSide => SpecialKind::DeletedOnOneSide,
                         overview::Special::Binary => SpecialKind::Binary,
@@ -1934,13 +1950,10 @@ mod tests {
         assert!(!git(&["merge", "--quiet", "feature"]));
 
         let shown = path.display().to_string();
-        assert!(
-            open_review(shown.clone())
-                .unwrap()
-                .is_some_and(|document| { document.conflicts()[0].chosen.is_none() })
-        );
+        let open = MergeDocument::open(shown.clone()).unwrap();
+        assert!(open.conflicts()[0].chosen.is_none());
         std::fs::write(&path, "first\nfeature\nlast\n").unwrap();
-        let document = open_review(shown).unwrap().unwrap();
+        let document = MergeDocument::open(shown).unwrap();
         let conflict = document.conflict(0).unwrap();
         assert!(matches!(conflict.state, ConflictState::NeedsReview));
         assert_eq!(conflict.chosen.unwrap().id, "theirs");

@@ -789,7 +789,8 @@ struct SpecialSamples: OverviewSource {
             special: kind,
             canOpen: true,
             canStage: false,
-            canUnstage: false
+            canUnstage: false,
+            review: nil
         )
     }
 

@@ -58,6 +58,10 @@ pub struct Status {
     pub can_redo: bool,
     /// Conflicts resolved outside Scry the user has not reviewed yet.
     pub unreviewed: usize,
+    /// The result is not what the file holds (or a conflict is open):
+    /// there is something to write. Marking a resolution reviewed leaves
+    /// the file as it is.
+    pub unwritten: bool,
 }
 
 /// How a conflict is resolved.
@@ -1132,6 +1136,7 @@ impl MergeSession {
             can_undo: self.can_undo(),
             can_redo: self.can_redo(),
             unreviewed: self.unreviewed(),
+            unwritten: self.merged_text().is_none_or(|text| text != self.on_disk),
         }
     }
 

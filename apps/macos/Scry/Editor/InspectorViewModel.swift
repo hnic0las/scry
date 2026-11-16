@@ -39,11 +39,69 @@ final class InspectorViewModel {
         return conflict.candidates.map { Card(candidate: $0, selected: conflict.chosen?.id == $0.id) }
     }
 
-    /// The text written by hand, when it resolves the conflict.
+    /// A conflict resolved outside Scry, as the review shows it.
+    struct Review: Equatable {
+        /// "Resolved by claude-code 2.1", or "Resolved outside Scry".
+        let by: String
+        let provenance: Provenance
+        /// The reason the agent gave, or that none was.
+        let reason: String
+        let hasReason: Bool
+        /// For text of the agent's own: what of either side it left out.
+        let dropped: String?
+        let reviewed: Bool
+        /// "Not reviewed yet", or "Reviewed".
+        let status: String
+    }
+
+    /// What the review of this conflict shows; `nil` unless it was
+    /// resolved outside Scry and the user has not changed it since.
+    var review: Review? {
+        guard let outside = conflict?.outside else { return nil }
+        let reason = outside.reason.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+        return Review(
+            by: outside.by.map { "Resolved by \($0)" } ?? "Resolved outside Scry",
+            provenance: outside.by == nil ? .human : .agent,
+            reason: reason ?? (outside.by == nil
+                ? "No reason given (resolved outside Scry)."
+                : "No reason given."),
+            hasReason: reason != nil,
+            dropped: outside.dropped.flatMap { $0.isEmpty ? nil : "Left out: \($0)" },
+            reviewed: outside.reviewed,
+            status: outside.reviewed ? "Reviewed" : "Not reviewed yet"
+        )
+    }
+
+    /// The text the conflict holds when it is no candidate's: written by
+    /// hand in Scry, or outside it.
     var editedCard: Card? {
-        guard let chosen = conflict?.chosen, chosen.provenance == .human else { return nil }
+        guard let chosen = conflict?.chosen,
+              conflict?.outside != nil ? chosen.id == Self.outsideId : chosen.provenance == .human
+        else { return nil }
         return Card(candidate: chosen, selected: true)
     }
+
+    /// Marks the resolution reviewed: the file can be staged without
+    /// asking. Not while a conflict is edited by hand.
+    var canMarkReviewed: Bool { review?.reviewed == false && model.editing == nil }
+
+    func markReviewed() {
+        guard let conflict, canMarkReviewed else { return }
+        model.markReviewed(conflict.index)
+    }
+
+    /// Puts the markers back on a conflict resolved outside Scry, to
+    /// resolve it here instead.
+    var canReopen: Bool { review != nil && model.editing == nil }
+
+    func reopen() {
+        guard let conflict, canReopen else { return }
+        model.reopen(conflict.index)
+    }
+
+    /// The core's id for text resolved outside Scry (`OUTSIDE_ID`).
+    private static let outsideId = "outside"
 
     /// One conflict is edited at a time.
     var canEditByHand: Bool { conflict != nil && model.editing == nil }

@@ -108,6 +108,16 @@ struct OverviewView: View {
         } message: {
             Text(viewModel.abortMessage)
         }
+        .alert(
+            viewModel.stageConfirmation?.title ?? "",
+            isPresented: $viewModel.confirmingStage,
+            presenting: viewModel.stageConfirmation
+        ) { _ in
+            Button("Stage") { viewModel.confirmStage() }
+            Button("Cancel", role: .cancel) {}
+        } message: { confirmation in
+            Text(confirmation.message)
+        }
         .alert(viewModel.skipTitle, isPresented: $viewModel.confirmingSkip) {
             Button("Skip Commit", role: .destructive) { viewModel.skip() }
             Button("Cancel", role: .cancel) {}
@@ -138,9 +148,16 @@ struct OverviewView: View {
             }
             .width(28)
             TableColumn("State") { row in
-                Label(row.stateLabel, systemImage: row.state.symbol)
-                    .rowForeground(row.state.color)
-                    .font(Metrics.callout)
+                VStack(alignment: .leading, spacing: 1) {
+                    Label(row.stateLabel, systemImage: row.state.symbol)
+                        .rowForeground(row.state.color)
+                        .font(Metrics.callout)
+                    if let review = row.review {
+                        Text(review)
+                            .font(Metrics.caption)
+                            .rowForeground(Theme.Surfaces.textSecondary, secondary: true)
+                    }
+                }
             }
             .width(min: 110, ideal: 130)
             TableColumn("File") { row in
@@ -453,7 +470,8 @@ private struct PreviewOverview: OverviewSource {
                 : kind == "Binary" ? .binary : nil,
             canOpen: state != .staged,
             canStage: state == .resolved || state == .needsReview,
-            canUnstage: state == .staged
+            canUnstage: state == .staged,
+            review: state == .needsReview && kind == "Swift" ? ReviewProgress(reviewed: 1, total: 3, changedOutside: false) : nil
         )
     }
 

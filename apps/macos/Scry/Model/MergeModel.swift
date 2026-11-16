@@ -106,6 +106,17 @@ final class MergeModel {
         send(.choose(conflict: UInt32(index), candidate: candidate))
     }
 
+    /// Marks a conflict resolved outside Scry as reviewed; the core keeps
+    /// the review in the repository at once.
+    func markReviewed(_ index: Int) {
+        send(.markReviewed(conflict: UInt32(index)))
+    }
+
+    /// Takes a conflict's resolution away: its markers are back.
+    func reopen(_ index: Int) {
+        send(.reopen(conflict: UInt32(index)))
+    }
+
     func undo() {
         send(.undo)
     }
