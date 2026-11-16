@@ -15,18 +15,16 @@ struct StackedPanes: View {
     @State private var dragStart: CGFloat?
     @State private var top = ScrollPosition(idType: Int.self)
     @State private var bottom = ScrollPosition(idType: Int.self)
-    /// The area the user scrolls: only it moves the other, so the other's
-    /// clamping never cuts the first one's momentum or bounce.
-    @State private var driver: Area?
+    /// Which area moves the other: the one the user scrolls, or the
+    /// result during a jump to a conflict.
+    @State private var sync = StackedScrollSync()
     /// The edit block's height, matched by a blank in the top area.
     @State private var editHeight: CGFloat = 0
     /// The row under the pointer, in either area: the twin line, tinted in
     /// both so the eye can jump between them.
     @State private var hovered: Int?
 
-    private enum Area {
-        case top, bottom
-    }
+    private typealias Area = StackedScrollSync.Area
 
     static let barHeight: CGFloat = 9
 
@@ -69,10 +67,14 @@ struct StackedPanes: View {
         }
         .onChange(of: viewModel.currentConflict) { _, conflict in
             guard let row = viewModel.scrollTarget(for: conflict) else { return }
-            driver = nil
+            // One area scrolls; the other follows it frame by frame. Both
+            // scrolling at once pulled each other back short of the row.
+            sync.jump()
             withAnimation {
-                top.scrollTo(id: row, anchor: .top)
-                bottom.scrollTo(id: row, anchor: .top)
+                switch sync.jumpArea {
+                case .top: top.scrollTo(id: row, anchor: .top)
+                case .bottom: bottom.scrollTo(id: row, anchor: .top)
+                }
             }
         }
     }
@@ -116,12 +118,10 @@ struct StackedPanes: View {
         }
         .scrollPosition(area == .top ? $top : $bottom)
         .onScrollPhaseChange { _, phase in
-            // The user's own scrolling; a programmatic scroll animates
-            // both areas at once and needs no driver.
             if phase == .interacting || phase == .tracking || phase == .decelerating {
-                driver = area
-            } else if phase == .idle, driver == area {
-                driver = nil
+                sync.userScrolls(area)
+            } else if phase == .idle {
+                sync.stopped(area)
             }
         }
         .onScrollGeometryChange(for: CGFloat.self) { geometry in
@@ -138,7 +138,7 @@ struct StackedPanes: View {
 
     /// Moves the other area to the same offset.
     private func follow(from area: Area, y: CGFloat) {
-        guard driver == area || driver == nil else { return }
+        guard sync.follows(from: area) else { return }
         let y = max(y, 0)
         switch area {
         case .top: bottom.scrollTo(y: y)
@@ -175,3 +175,41 @@ struct StackedPanes: View {
         .accessibilityLabel("Resize the sides and the result")
     }
 }
+
+/// Which of the stacked layout's two areas moves the other. They share one
+/// offset; letting both move the other at once makes each pull the other
+/// back to where it is, and neither reaches where it was going.
+struct StackedScrollSync: Equatable {
+    enum Area {
+        case top, bottom
+    }
+
+    /// The area whose offset the other copies; `nil` when neither moves.
+    private(set) var driver: Area?
+
+    /// The user started scrolling `area`.
+    mutating func userScrolls(_ area: Area) {
+        driver = area
+    }
+
+    /// `area` came to rest.
+    mutating func stopped(_ area: Area) {
+        if driver == area { driver = nil }
+    }
+
+    /// A jump to a conflict: `jumpArea` scrolls to it and leads until it
+    /// comes to rest, the other following it as it does the user.
+    mutating func jump() {
+        driver = jumpArea
+    }
+
+    /// The area that scrolls to a conflict: the result, where the user
+    /// works on it.
+    var jumpArea: Area { .bottom }
+
+    /// Whether a move of `area` moves the other.
+    func follows(from area: Area) -> Bool {
+        driver == area || driver == nil
+    }
+}
+
