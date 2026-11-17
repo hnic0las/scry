@@ -263,6 +263,32 @@ impl MergeSession {
         analysis.candidates.insert(at, theirs);
     }
 
+    /// The common text right before and right after conflict `index`, at
+    /// most `lines` lines each: what an agent reads around it. It stops at
+    /// the conflicts on either side.
+    pub fn context(&self, index: usize, lines: usize) -> (String, String) {
+        let Some(position) = self
+            .segments
+            .iter()
+            .enumerate()
+            .filter(|(_, segment)| matches!(segment, Segment::Conflict(_)))
+            .nth(index)
+            .map(|(position, _)| position)
+        else {
+            return (String::new(), String::new());
+        };
+        let common = |at: Option<usize>| match at.and_then(|at| self.segments.get(at)) {
+            Some(Segment::Common(text)) => text.split_inclusive('\n').collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        let before = common(position.checked_sub(1));
+        let after = common(Some(position + 1));
+        (
+            before[before.len().saturating_sub(lines)..].concat(),
+            after.into_iter().take(lines).collect(),
+        )
+    }
+
     /// Whether the file ends with a conflict, where git adds a line break
     /// the sides may not have had.
     pub fn ends_with_conflict(&self) -> bool {
@@ -2330,6 +2356,27 @@ mod tests {
         assert_eq!(session.side_lines(0, Pane::Theirs), Some((2, 3)));
         assert_eq!(session.side_lines(1, Pane::Ours), Some((3, 3)));
         assert_eq!(session.side_lines(1, Pane::Theirs), Some((5, 5)));
+    }
+
+    /// The lines around a conflict are the common text next to it, cut to the number asked
+    /// and never reaching into another conflict: an agent reads them as they are in the file.
+    #[test]
+    fn context_is_the_common_text_next_to_a_conflict() {
+        let text = "one\ntwo\nthree\n<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\nfour\n\
+            <<<<<<< ours\nc\n=======\nd\n>>>>>>> theirs\n<<<<<<< ours\ne\n=======\nf\n>>>>>>> theirs\n";
+        let session = MergeSession::from_text(text, None).unwrap();
+        assert_eq!(
+            session.context(0, 2),
+            (String::from("two\nthree\n"), String::from("four\n"))
+        );
+        assert_eq!(session.context(0, 0), (String::new(), String::new()));
+        assert_eq!(
+            session.context(1, 5),
+            (String::from("four\n"), String::new())
+        );
+        // Two conflicts in a row: nothing between them, nothing after the last.
+        assert_eq!(session.context(2, 3), (String::new(), String::new()));
+        assert_eq!(session.context(3, 3), (String::new(), String::new()));
     }
 
     /// A kind whose text another candidate already gives chooses that candidate: with the

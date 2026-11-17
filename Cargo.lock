@@ -329,6 +329,7 @@ version = "0.1.1"
 dependencies = [
  "clap",
  "scry-core",
+ "scry-mcp",
  "tempfile",
 ]
 
@@ -628,6 +629,15 @@ dependencies = [
  "scry-core",
  "tempfile",
  "uniffi",
+]
+
+[[package]]
+name = "scry-mcp"
+version = "0.1.1"
+dependencies = [
+ "scry-core",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

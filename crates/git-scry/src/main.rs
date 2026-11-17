@@ -61,6 +61,15 @@ enum Command {
     /// Exits with 0, or 2 when git cannot answer (for example outside a
     /// repository).
     Session,
+    /// Serve the operation in progress and its conflicts to an agent, over
+    /// the Model Context Protocol on standard input and output. Register it
+    /// in the agent rather than running it:
+    ///
+    ///   claude mcp add scry -- git-scry mcp
+    ///
+    /// Answers about the repository of the folder the agent starts it in.
+    /// Reads only: it stages, continues and commits nothing.
+    Mcp,
     /// Print a file with the syntax highlighting the app shows.
     ///
     /// Exits with 0, or 2 when the file cannot be read or Scry has no
@@ -124,6 +133,7 @@ fn main() -> ExitCode {
         Command::Open { path, app } => open::run(path, app),
         Command::Conflicts { file } => list_conflicts(&file),
         Command::Session => show_session(),
+        Command::Mcp => serve_mcp(),
         Command::Highlight { file, spans } => highlight::run(&file, spans),
         Command::Resolve {
             base,
@@ -174,6 +184,17 @@ fn quiet_on_closed_pipe() {
         }
         default(info);
     }));
+}
+
+fn serve_mcp() -> ExitCode {
+    let git = GitCli::discover(PathBuf::from("."));
+    match scry_mcp::serve(std::io::stdin().lock(), std::io::stdout().lock(), git) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("git-scry: {error}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 fn list_conflicts(file: &Path) -> ExitCode {

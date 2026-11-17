@@ -1,0 +1,17 @@
+[package]
+name = "scry-mcp"
+description = "Scry's MCP server: the operation in progress and its conflicts, for the user's agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+scry-core = { path = "../scry-core" }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

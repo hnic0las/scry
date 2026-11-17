@@ -200,3 +200,55 @@ fn session_names_the_operation_its_sides_and_files() {
         "{stdout}"
     );
 }
+
+/// `git-scry mcp` speaks the Model Context Protocol on standard input and output, one
+/// message per line, as the agent that registered it starts it: a notification gets no
+/// answer, and the server stops with 0 once the agent closes its input.
+#[test]
+fn mcp_answers_one_message_per_line_until_input_ends() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("gitconfig"), "").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_git-scry"))
+        .current_dir(dir.path())
+        .arg("mcp")
+        .env("GIT_CONFIG_GLOBAL", dir.path().join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            concat!(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+                "\n",
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                "\n\n",
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+                "\n",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{stdout}");
+    assert!(
+        lines[0].starts_with(r#"{"id":1,"#) || lines[0].contains(r#""id":1"#),
+        "{stdout}"
+    );
+    assert!(
+        lines[0].contains(r#""protocolVersion":"2025-06-18""#),
+        "{stdout}"
+    );
+    assert!(
+        lines[1].contains(r#""id":2"#) && lines[1].contains(r#""name":"overview""#),
+        "{stdout}"
+    );
+}

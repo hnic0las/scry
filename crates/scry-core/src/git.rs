@@ -58,6 +58,7 @@ pub trait Git {
 
 /// Runs the `git` executable, the one found on the `PATH` unless another is
 /// given.
+#[derive(Clone)]
 pub struct GitCli {
     program: PathBuf,
     dir: PathBuf,
@@ -100,6 +101,15 @@ impl GitCli {
     pub fn with_env(mut self, key: &str, value: &str) -> GitCli {
         self.environment.push((key.to_string(), value.to_string()));
         self
+    }
+
+    /// The same git, with the same environment, started in `dir`: a front
+    /// end at the repository root that reads a file from its folder.
+    pub fn in_dir(&self, dir: PathBuf) -> GitCli {
+        GitCli {
+            dir,
+            ..self.clone()
+        }
     }
 }
 

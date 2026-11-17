@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 scry-core = { path = "../scry-core" }
+scry-mcp = { path = "../scry-mcp" }
 
 [lints]
 workspace = true
