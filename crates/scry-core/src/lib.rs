@@ -4,6 +4,7 @@
 //! later TUI) builds on this crate. It owns all state and logic and must stay
 //! free of platform-specific code (vault decision 0003).
 
+pub mod agent_setup;
 pub mod blame;
 pub mod catalog;
 pub mod cli_link;

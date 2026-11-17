@@ -1,20 +1,24 @@
 import SwiftUI
 
 /// Scry › Settings. The CLI tab: the `git scry` command, linked to the
-/// command-line tool inside the app, and making it git's merge tool.
+/// command-line tool inside the app, and making it git's merge tool. The
+/// Agent tab: Scry's MCP server in Claude Code.
 struct SettingsView: View {
     @State private var viewModel: SettingsViewModel
+    @State private var agent: AgentSettingsViewModel
     @State private var tab: SettingsTab
 
     enum SettingsTab: Hashable {
-        case cli, appearance
+        case cli, agent, appearance
     }
 
     init(
         viewModel: SettingsViewModel = SettingsViewModel(installer: AppMergetoolInstaller()),
+        agent: AgentSettingsViewModel = AgentSettingsViewModel(registrar: AppAgentRegistrar()),
         tab: SettingsTab = .cli
     ) {
         _viewModel = State(initialValue: viewModel)
+        _agent = State(initialValue: agent)
         _tab = State(initialValue: tab)
     }
 
@@ -22,6 +26,9 @@ struct SettingsView: View {
         TabView(selection: $tab) {
             Tab("CLI", systemImage: "terminal", value: .cli) {
                 cli
+            }
+            Tab("Agent", systemImage: "sparkles", value: .agent) {
+                AgentSettingsView(viewModel: agent)
             }
             Tab("Appearance", systemImage: "rectangle.split.3x1", value: .appearance) {
                 appearance

@@ -66,7 +66,7 @@ fn shown(path: &Path) -> String {
     path.display().to_string()
 }
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
 }
 
@@ -83,20 +83,29 @@ const SHELL_TIMEOUT: Duration = Duration::from_secs(5);
 /// or `~/.zshrc` add (Homebrew, `~/.local/bin`), so the login shell is run,
 /// interactive to read both. `printenv` prints it the same way whatever the
 /// shell (fish keeps it as a list). `None` when the shell fails or is slow.
-fn shell_path() -> Option<Vec<PathBuf>> {
+pub(crate) fn shell_path() -> Option<Vec<PathBuf>> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| String::from("/bin/zsh"));
     let script = format!("echo {MARKER}; /usr/bin/printenv PATH");
-    let mut child = Command::new(shell)
-        .args(["-i", "-l", "-c", &script])
+    let mut command = Command::new(shell);
+    command.args(["-i", "-l", "-c", &script]);
+    let (output, _) = run(command, SHELL_TIMEOUT)?;
+    path_in_output(&output)
+}
+
+/// Runs `command` without input, for at most `timeout`: its standard output
+/// and error, `None` when it cannot start or is killed for being slow, and
+/// whether it succeeded. Its output must be small: it is read once it ends.
+pub(crate) fn run(mut command: Command, timeout: Duration) -> Option<(String, ProcessResult)> {
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .ok()?;
-    let deadline = Instant::now() + SHELL_TIMEOUT;
-    loop {
+    let deadline = Instant::now() + timeout;
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -106,10 +115,25 @@ fn shell_path() -> Option<Vec<PathBuf>> {
                 return None;
             }
         }
-    }
+    };
     let mut output = String::new();
     child.stdout.take()?.read_to_string(&mut output).ok()?;
-    path_in_output(&output)
+    let mut error = String::new();
+    child.stderr.take()?.read_to_string(&mut error).ok()?;
+    Some((
+        output,
+        ProcessResult {
+            succeeded: status.success(),
+            error,
+        },
+    ))
+}
+
+/// How a command run with `run` ended.
+pub(crate) struct ProcessResult {
+    pub succeeded: bool,
+    /// What it wrote on its standard error.
+    pub error: String,
 }
 
 /// The `PATH` printed after the marker line, as folders.
@@ -127,7 +151,7 @@ fn path_in_output(output: &str) -> Option<Vec<PathBuf>> {
 
 /// When the shell cannot tell: the app's own `PATH`, then the folders
 /// Homebrew and most installers put on it.
-fn fallback_path() -> Vec<PathBuf> {
+pub(crate) fn fallback_path() -> Vec<PathBuf> {
     let mut path: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect())
         .unwrap_or_default();

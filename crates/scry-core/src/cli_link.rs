@@ -130,7 +130,7 @@ fn remove_command(other: &Path, home: &Path) -> String {
 
 /// Whether `path` is a file that can run, following links: a link to an app
 /// moved or deleted since runs nothing, and git skips it.
-fn is_executable(path: &Path) -> bool {
+pub(crate) fn is_executable(path: &Path) -> bool {
     let Ok(meta) = fs::metadata(path) else {
         return false;
     };
