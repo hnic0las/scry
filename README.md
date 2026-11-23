@@ -54,7 +54,14 @@ Each of these gets its own view:
 - **`git mergetool`**, in the app or in the terminal with the same digits as the app's shortcuts. Scry › Settings sets git up for you.
 - **`git scry`** opens the app on the operation in progress, from any folder of the repository. Scry › Settings › CLI links the app's `git-scry` into a folder of your terminal's `PATH`.
 - `git scry session`, `conflicts` and `highlight` print what the app shows, for scripts and terminals.
-- **Your agent reads the conflicts through Scry**: `claude mcp add scry -- git-scry mcp` registers Scry's MCP server in Claude Code (or any MCP client). Its tools `overview`, `conflicts` and `conflict` give the operation, each conflict's sides, base, candidates checked by parsing and the commits behind each side, instead of whole files and `git log`. They only read.
+- **Your agent resolves, you review**: Scry's MCP server gives your agent the operation, each conflict's sides, base, candidates checked by parsing and the commits behind each side (`overview`, `conflicts`, `conflict`), instead of whole files and `git log`. Its `resolve` writes one conflict's lines with the agent's reason, never a resolution someone else made, and stages nothing: you review each one in Scry, then stage. In Claude Code, install the plugin and type `/git-scry:resolve`:
+
+  ```
+  /plugin marketplace add hnic0las/scry
+  /plugin install git-scry@scry
+  ```
+
+  The plugin runs the Scry app's `git-scry`: install the app first.
 - Scry never stages, commits or pushes on its own: each of those steps is a button you press.
 - Local first: no account and no server; nothing leaves your Mac.
 
@@ -64,7 +71,6 @@ Scry's merges are checked against `git merge-file` on generated conflicts, line 
 
 ## Roadmap
 
-- **Resolving through the MCP server**: a `resolve` tool and a `/scry:resolve` prompt, so your agent, for example Claude Code, resolves conflict by conflict with a reason for each, and you review what it did in Scry before staging.
 - **Explain**, **Suggest** and **Ask** on a conflict, with your own Claude API key, or handed to your agent when there is none. Every proposal keeps its source, is checked by code and is accepted by you; no agent stages, commits, pushes or posts.
 - **More files merged well**: storyboards and `.xib` files; migrations both sides added (Django, Alembic, Rails `schema.rb`), which leave two heads without any text conflict; Jupyter notebooks, `.strings` in UTF-16, Android `strings.xml`, `.po`, `.resx`; `CHANGELOG.md`, where both sides add at the top; running `npm install` or `yarn install` directly to repair their lockfiles.
 - **A diff tool**: `git difftool` and `git scry diff [ref..ref]`, with a side-by-side view and the list of changed files.
@@ -199,5 +205,6 @@ The CI's `app` job does the same on GitHub's `xcode-27` image, after `scripts/bu
 - `crates/scry-core`: all state and logic, shared by every front end. No platform-specific code.
 - `crates/git-scry`: the `git-scry` command-line binary.
 - `crates/scry-mcp`: the MCP server `git-scry mcp` runs, its protocol written by hand.
+- `.claude-plugin/marketplace.json` and `plugins/git-scry`: the Claude Code plugin (the server through `bin/git-scry-mcp`, which finds the app's `git-scry`, and the `resolve` skill).
 - `crates/scry-ffi`: the core exposed to Swift through UniFFI.
 - `apps/macos`: the SwiftUI app (standard Xcode project).

@@ -1,0 +1,12 @@
+{
+  "name": "scry",
+  "description": "Scry, a merge and review tool for git: its plugin for Claude Code.",
+  "owner": { "name": "hnic0las" },
+  "plugins": [
+    {
+      "name": "git-scry",
+      "source": "./plugins/git-scry",
+      "description": "Resolve merge conflicts with Scry's facts and record why, for the user to review in Scry."
+    }
+  ]
+}

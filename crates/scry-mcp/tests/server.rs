@@ -169,7 +169,8 @@ fn ids(listed: &str) -> Vec<String> {
 /// client's when the server speaks it, else the newest it speaks, for the client to
 /// decide), the `initialized` notification gets no answer, and `tools/list` gives the
 /// three read-only tools then `resolve`, in a stable order with their required
-/// arguments, and `prompts/list` the `resolve` prompt.
+/// arguments. There is no prompt: Claude Code users get `/git-scry:resolve` from
+/// the plugin.
 #[test]
 fn an_agent_connects_and_lists_the_tools() {
     let mut server = Server::new(GitCli::new(PathBuf::from(".")));
@@ -182,7 +183,7 @@ fn an_agent_connects_and_lists_the_tools() {
     assert_eq!(result["protocolVersion"], "2025-06-18");
     assert_eq!(result["serverInfo"]["name"], "git-scry");
     assert!(result["capabilities"]["tools"].is_object());
-    assert!(result["capabilities"]["prompts"].is_object());
+    assert!(result["capabilities"].get("prompts").is_none());
     assert!(
         result["instructions"]
             .as_str()
@@ -227,41 +228,8 @@ fn an_agent_connects_and_lists_the_tools() {
         json!(PICKS)
     );
 
-    let prompts = ask(&mut server, "prompts/list", json!({}))["result"]["prompts"].clone();
-    assert_eq!(prompts[0]["name"], "resolve");
-    assert_eq!(prompts[0]["arguments"][0]["required"], false);
-}
-
-/// The `resolve` prompt asks for the tools, a reason, no staging and a review in
-/// Scry, for one file when given one.
-#[test]
-fn the_resolve_prompt_says_how_to_resolve() {
-    let mut server = Server::new(GitCli::new(PathBuf::from(".")));
-    let answer = ask(
-        &mut server,
-        "prompts/get",
-        json!({ "name": "resolve", "arguments": { "path": "Sources/a.swift" } }),
-    );
-    let message = &answer["result"]["messages"][0];
-    assert_eq!(message["role"], "user");
-    let prompt = message["content"]["text"].as_str().unwrap();
-    for expected in [
-        "the conflicts of Sources/a.swift",
-        "Prefer pick",
-        "dropped",
-        "reason",
-        "do not stage, commit, continue",
-        "`git scry`",
-    ] {
-        assert!(prompt.contains(expected), "{expected:?} in {prompt}");
-    }
-    let all = ask(&mut server, "prompts/get", json!({ "name": "resolve" }));
-    let prompt = all["result"]["messages"][0]["content"]["text"]
-        .as_str()
-        .unwrap();
-    assert!(prompt.contains("the conflicts of the operation in progress"));
-    let unknown = ask(&mut server, "prompts/get", json!({ "name": "explain" }));
-    assert_eq!(unknown["error"]["code"], -32602);
+    let prompts = ask(&mut server, "prompts/list", json!({}));
+    assert_eq!(prompts["error"]["code"], -32601);
 }
 
 /// Connects as Claude Code does, so `resolve` records its name.

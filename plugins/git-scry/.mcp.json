@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "scry": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/git-scry-mcp"
+    }
+  }
+}

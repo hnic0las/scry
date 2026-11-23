@@ -1,0 +1,8 @@
+{
+  "name": "git-scry",
+  "version": "0.2.0",
+  "description": "Resolve merge conflicts with Scry's facts and record why, for the user to review in Scry. Needs the Scry app (0.2 or later).",
+  "author": { "name": "hnic0las" },
+  "homepage": "https://github.com/hnic0las/scry",
+  "license": "GPL-3.0-or-later"
+}

@@ -1,5 +1,5 @@
-//! Scry's MCP server, run as `git-scry mcp` by the user's agent
-//! (`claude mcp add scry -- git-scry mcp`): the operation in progress and
+//! Scry's MCP server, run as `git-scry mcp` by the user's agent (Claude
+//! Code, through the `git-scry` plugin): the operation in progress and
 //! its conflicts as Scry computes them, so the agent reads facts instead of
 //! whole files and `git log`.
 //!
