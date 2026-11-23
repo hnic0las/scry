@@ -13,6 +13,7 @@ use proptest::prelude::*;
 
 use scry_core::command::{Command, Event};
 use scry_core::conflict;
+use scry_core::records::Record;
 use scry_core::resolution::{self, CandidateKind};
 use scry_core::review::{self, Resolution};
 use scry_core::session::{Choice, MergeSession};
@@ -312,7 +313,7 @@ proptest! {
             expected.push(found);
             current.push_str(&format!("between {index}\n"));
         }
-        let review = review::resolutions(&text, &current, 7).unwrap();
+        let review = review::resolutions(&text, &current, 7, &review::Known::new()).unwrap();
         prop_assert!(!review.changed_outside);
         let found: Vec<Resolution> = review.conflicts.into_iter().map(|c| c.resolution).collect();
         prop_assert_eq!(found, expected);
@@ -388,7 +389,106 @@ proptest! {
             current = file;
         }
         prop_assert_eq!(&current, &by_hand);
-        let review = review::resolutions(&text, &current, 7).unwrap();
+        let review = review::resolutions(&text, &current, 7, &review::Known::new()).unwrap();
+        prop_assert!(!review.changed_outside);
+        let found: Vec<Resolution> = review.conflicts.into_iter().map(|c| c.resolution).collect();
+        prop_assert_eq!(found, expected);
+    }
+
+    /// The same, as the MCP server does it, each write recorded as the
+    /// agent's, with the lines between the conflicts drawn from the same few
+    /// lines as the resolutions (so a resolution can repeat them) and the
+    /// file maybe without a final line break: the records place each
+    /// resolution where it was written, so the file is the one written by
+    /// hand and the choices are found back (review P1#2 and P1#3).
+    #[test]
+    fn recorded_resolutions_are_found_where_they_were_written(
+        conflicts in prop::collection::vec(
+            (lines(2), lines(3), prop::option::of(lines(2)), lines(3), 0..3usize, any::<prop::sample::Index>(), lines(3)),
+            1..4,
+        ),
+        last in lines(2),
+        order in any::<prop::sample::Index>(),
+        unbroken in any::<bool>(),
+    ) {
+        let mut parts = Vec::new();
+        for (before, ours, base, theirs, ..) in &conflicts {
+            parts.push(Part::Common(before.clone()));
+            parts.push(Part::Conflict { ours: ours.clone(), base: base.clone(), theirs: theirs.clone() });
+        }
+        parts.push(Part::Common(last.clone()));
+        let text = written(&parts);
+        let segments = conflict::parse(&text).unwrap();
+        let analyses = resolution::analyze(&segments);
+        prop_assume!(analyses.len() == conflicts.len());
+        let mut by_hand = String::new();
+        let mut expected = Vec::new();
+        let mut writes = Vec::new();
+        for (index, (before, ours, base, theirs, how, pick, own)) in conflicts.iter().enumerate() {
+            by_hand.push_str(before);
+            let candidates = &analyses[index].candidates;
+            let found = match how {
+                0 => {
+                    by_hand.push_str(&written(&[Part::Conflict {
+                        ours: ours.clone(),
+                        base: base.clone(),
+                        theirs: theirs.clone(),
+                    }]));
+                    Resolution::Open
+                }
+                1 => {
+                    let candidate = pick.get(candidates);
+                    by_hand.push_str(&candidate.text);
+                    writes.push((
+                        analyses[index].id.clone(),
+                        review::Fill::Pick { kind: candidate.kind, text: candidate.text.clone() },
+                        candidate.text.clone(),
+                    ));
+                    Resolution::Candidate(candidate.kind)
+                }
+                _ => {
+                    by_hand.push_str(own);
+                    writes.push((analyses[index].id.clone(), review::Fill::Text(own.clone()), own.clone()));
+                    candidates
+                        .iter()
+                        .find(|candidate| candidate.text == *own)
+                        .map_or(Resolution::Text(own.clone()), |candidate| Resolution::Candidate(candidate.kind))
+                }
+            };
+            expected.push(found);
+        }
+        by_hand.push_str(&last);
+        // A file without a final break: only where it ends with a line of
+        // common text, as git leaves it (an empty last line would be removed,
+        // not its break).
+        let unbroken = unbroken && last.lines().last().is_some_and(|line| !line.is_empty());
+        let mut current = text.clone();
+        if unbroken {
+            current.pop();
+            by_hand.pop();
+        }
+        if !writes.is_empty() {
+            let shift = order.index(writes.len());
+            writes.rotate_left(shift);
+        }
+        let mut guard = review::Guard::default();
+        for (id, fill, written) in &writes {
+            let (file, region) = review::rewrite(&text, (true, true), &current, 7, id, fill, &guard).unwrap();
+            prop_assert_eq!(&region, written);
+            current = file;
+            guard.records.insert(id.clone(), Record {
+                conflict: id.clone(),
+                by: String::from("agent"),
+                pick: None,
+                text: region,
+                reason: String::new(),
+                dropped: None,
+                at: 0,
+            });
+        }
+        prop_assert_eq!(&current, &by_hand);
+        let known = review::known(&guard.records, &guard.reviewed);
+        let review = review::resolutions(&text, &current, 7, &known).unwrap();
         prop_assert!(!review.changed_outside);
         let found: Vec<Resolution> = review.conflicts.into_iter().map(|c| c.resolution).collect();
         prop_assert_eq!(found, expected);
@@ -425,7 +525,7 @@ proptest! {
                 current.push_str(line);
             }
         }
-        let review = review::resolutions(&text, &current, 7).unwrap();
+        let review = review::resolutions(&text, &current, 7, &review::Known::new()).unwrap();
         if review.changed_outside {
             prop_assert!(outside.is_some(), "flagged with nothing changed outside");
             prop_assert!(review.conflicts.iter().all(|c| c.resolution == Resolution::Unknown));

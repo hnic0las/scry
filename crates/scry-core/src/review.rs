@@ -145,7 +145,10 @@ pub fn find(git: &dyn Git, root: &Path, path: &str) -> Result<Option<FileReview>
     let Some(written) = as_git_wrote(git, path, &file, marker_size, ("ours", "theirs"))? else {
         return Ok(None);
     };
-    resolutions(&written.text, &current, marker_size)
+    let known = Store::open(git)
+        .map(|store| known(&store.records(path), &store.reviewed(path)))
+        .unwrap_or_default();
+    resolutions(&written.text, &current, marker_size, &known)
         .map(Some)
         .map_err(LoadError::Parse)
 }
@@ -209,7 +212,7 @@ pub fn session(
     records: &BTreeMap<String, Record>,
     reviewed: &BTreeMap<String, String>,
 ) -> Result<Option<MergeSession>, ParseError> {
-    let found = resolutions(written, current, marker_size)?;
+    let found = resolutions(written, current, marker_size, &known(records, reviewed))?;
     // Markers in a resolution: the file was written in another conflict
     // style than git's now (`git checkout --conflict=diff3`), and those
     // conflicts are open, which only the markers themselves can show.
@@ -415,7 +418,8 @@ pub fn rewrite(
     fill: &Fill,
     guard: &Guard,
 ) -> Result<(String, String), WriteError> {
-    let laid = Laid::new(written, current, marker_size).map_err(LoadError::Parse)?;
+    let known = known(&guard.records, &guard.reviewed);
+    let laid = Laid::new(written, current, marker_size, &known).map_err(LoadError::Parse)?;
     let Some(index) = laid.analyses.iter().position(|analysis| analysis.id == id) else {
         return Err(WriteError::NoSuchConflict(
             laid.analyses
@@ -547,14 +551,36 @@ fn as_git_wrote(
     written
 }
 
+/// Texts the file is known to have held for each conflict, by id: what an
+/// agent recorded writing, what the user reviewed. Where a resolution could
+/// end in several places, these are tried first.
+pub type Known = BTreeMap<String, Vec<String>>;
+
+/// What the records and the review of a file say it held.
+pub fn known(records: &BTreeMap<String, Record>, reviewed: &BTreeMap<String, String>) -> Known {
+    let mut known = Known::new();
+    for (id, record) in records {
+        known
+            .entry(id.clone())
+            .or_default()
+            .push(record.text.clone());
+    }
+    for (id, text) in reviewed {
+        known.entry(id.clone()).or_default().push(text.clone());
+    }
+    known
+}
+
 /// What was done to each conflict of `written` (the file as git wrote it,
-/// with markers of `marker_size`) to give `current`.
+/// with markers of `marker_size`) to give `current`, the texts in `known`
+/// tried first where a resolution could end in several places.
 pub fn resolutions(
     written: &str,
     current: &str,
     marker_size: usize,
+    known: &Known,
 ) -> Result<FileReview, ParseError> {
-    let laid = Laid::new(written, current, marker_size)?;
+    let laid = Laid::new(written, current, marker_size, known)?;
     let layout = laid.layout();
     let found = laid.regions();
     let text = &laid.text;
@@ -609,10 +635,17 @@ struct Laid {
     text: String,
     added_break: bool,
     marker_size: usize,
+    /// Each conflict's known texts, in the order of `analyses`.
+    known: Vec<Vec<String>>,
 }
 
 impl Laid {
-    fn new(written: &str, current: &str, marker_size: usize) -> Result<Laid, ParseError> {
+    fn new(
+        written: &str,
+        current: &str,
+        marker_size: usize,
+        known: &Known,
+    ) -> Result<Laid, ParseError> {
         let segments = conflict::parse_with_marker_size(written, marker_size)?;
         let analyses = resolution::analyze(&segments);
         let mut commons = vec![String::new()];
@@ -633,7 +666,12 @@ impl Laid {
             current.to_string()
         };
         let conflicts = conflict::conflicts(&segments).cloned().collect();
+        let known = analyses
+            .iter()
+            .map(|analysis| known.get(&analysis.id).cloned().unwrap_or_default())
+            .collect();
         Ok(Laid {
+            known,
             analyses,
             conflicts,
             commons,
@@ -650,6 +688,7 @@ impl Laid {
             analyses: &self.analyses,
             conflicts: &self.conflicts,
             marker_size: self.marker_size,
+            known: &self.known,
         }
     }
 
@@ -668,14 +707,16 @@ struct Layout<'a> {
     analyses: &'a [Analysis],
     conflicts: &'a [conflict::Conflict],
     marker_size: usize,
+    known: &'a [Vec<String>],
 }
 
 impl Layout<'_> {
     /// Each conflict's region in the text, as byte ranges, with
     /// `commons[k]` at `at`; `None` when the text around the conflicts does
     /// not fit. Where a resolution could end in several places (it repeats
-    /// the lines after it), a candidate's text or the conflict left open is
-    /// tried first, then the shortest region that lets the rest fit.
+    /// the lines after it), a text the file is known to hold, a candidate's
+    /// text or the conflict left open is tried first, then the shortest
+    /// region that lets the rest fit.
     fn place(
         &self,
         k: usize,
@@ -725,20 +766,37 @@ impl Layout<'_> {
     /// the conflict with its markers.
     fn preferred_ends(&self, k: usize, start: usize) -> Vec<usize> {
         let rest = &self.text[start..];
-        let mut ends: Vec<usize> = self.analyses[k]
+        let fits = |text: &&str| rest.starts_with(text);
+        let end = |text: &str| start + text.len();
+        // What the file is known to hold first: an agent's own text can
+        // repeat the lines between two conflicts, where the shortest region
+        // would cut it short, and two conflicts alike can only be told apart
+        // by it. A record no longer true leaves the rest unplaced, and the
+        // next end is tried.
+        let mut ends: Vec<usize> = self.known[k]
+            .iter()
+            .map(String::as_str)
+            .filter(fits)
+            .map(end)
+            .collect();
+        let candidates = self.analyses[k]
             .candidates
             .iter()
-            .filter(|candidate| rest.starts_with(candidate.text.as_str()))
-            .map(|candidate| start + candidate.text.len())
-            .collect();
-        if let Some(end) = self.open_end(k, start) {
+            .map(|candidate| candidate.text.as_str())
+            .filter(fits)
+            .map(end);
+        if let Some(open) = self.open_end(k, start) {
             // Markers opening right here: the conflict is still open, even
             // where an empty candidate would fit too.
             if rest.starts_with(&"<".repeat(self.marker_size)) {
-                ends.insert(0, end);
+                ends.push(open);
+                ends.extend(candidates);
             } else {
-                ends.push(end);
+                ends.extend(candidates);
+                ends.push(open);
             }
+        } else {
+            ends.extend(candidates);
         }
         ends
     }
@@ -834,7 +892,7 @@ mod tests {
     fn a_candidate_is_preferred_where_the_text_could_split_two_ways() {
         let written = "<<<<<<< ours\no\n=======\na\nm\nb\n>>>>>>> theirs\nm\n\
             <<<<<<< ours\np\n=======\nq\n>>>>>>> theirs\n";
-        let review = resolutions(written, "a\nm\nb\nm\nc\n", 7).unwrap();
+        let review = resolutions(written, "a\nm\nb\nm\nc\n", 7, &Known::new()).unwrap();
         let found: Vec<Resolution> = review.conflicts.into_iter().map(|c| c.resolution).collect();
         assert_eq!(
             found,
@@ -890,7 +948,7 @@ mod tests {
     #[test]
     fn an_open_conflict_holding_the_next_line_is_found_open() {
         let written = "<<<<<<< ours\nm\n=======\nx\n>>>>>>> theirs\nm\nend\n";
-        let review = resolutions(written, written, 7).unwrap();
+        let review = resolutions(written, written, 7, &Known::new()).unwrap();
         assert_eq!(review.conflicts[0].resolution, Resolution::Open);
     }
 
@@ -904,7 +962,7 @@ mod tests {
         let open = |theirs: &str| format!("<<<<<<< ours\n=======\n{theirs}>>>>>>> theirs\n");
         let written = [open(""), open(""), open("a\n"), open("")].concat();
         let current = format!("a\n{}{}{}", open(""), open("a\n"), open(""));
-        let found: Vec<Resolution> = resolutions(&written, &current, 7)
+        let found: Vec<Resolution> = resolutions(&written, &current, 7, &Known::new())
             .unwrap()
             .conflicts
             .into_iter()
@@ -920,7 +978,7 @@ mod tests {
             ]
         );
         let current = [open(""), String::new(), open("a\n"), String::new()].concat();
-        let found: Vec<Resolution> = resolutions(&written, &current, 7)
+        let found: Vec<Resolution> = resolutions(&written, &current, 7, &Known::new())
             .unwrap()
             .conflicts
             .into_iter()

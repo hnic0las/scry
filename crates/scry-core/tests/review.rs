@@ -982,3 +982,46 @@ fn write_refuses_what_it_cannot_place() {
     ));
     assert_eq!(fs::read_to_string(repo.file()).unwrap(), changed);
 }
+
+/// Own text repeating the lines between two conflicts is placed where its
+/// record says it ends, not cut at the shortest region: both resolutions
+/// read with their records, and writing the first again replaces all of
+/// it, leaving no stray lines (review P1#2).
+#[test]
+fn own_text_holding_the_lines_between_conflicts_is_placed_by_its_record() {
+    let repo = Repo::merged(
+        "A\nx1\ns\ns\ns\ns\ny1\nB\n",
+        "A\nx2\ns\ns\ns\ns\ny2\nB\n",
+        "A\nx3\ns\ns\ns\ns\ny3\nB\n",
+        "",
+    );
+    let ids = repo.ids();
+    assert_eq!(ids.len(), 2);
+    let first = repo
+        .write(&ids[0], &own("x4\ns\ns\ns\ns\nx5\n"), false)
+        .unwrap();
+    repo.store()
+        .add_record("file.txt", record(&ids[0], &first))
+        .unwrap();
+    let theirs = review::Fill::Pick {
+        kind: CandidateKind::Theirs,
+        text: String::from("y3\n"),
+    };
+    let second = repo.write(&ids[1], &theirs, false).unwrap();
+    repo.store()
+        .add_record("file.txt", record(&ids[1], &second))
+        .unwrap();
+    assert_eq!(
+        resolutions(&repo.find()),
+        [
+            Resolution::Text(String::from("x4\ns\ns\ns\ns\nx5\n")),
+            Resolution::Candidate(CandidateKind::Theirs),
+        ]
+    );
+
+    repo.write(&ids[0], &own("x6\n"), false).unwrap();
+    assert_eq!(
+        fs::read_to_string(repo.file()).unwrap(),
+        "A\nx6\ns\ns\ns\ns\ny3\nB\n"
+    );
+}
