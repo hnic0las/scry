@@ -80,12 +80,11 @@ struct InspectorView: View {
         .focusable(viewModel.canChoose)
         .focused($candidatesFocused)
         .focusEffectDisabled()
-        .onKeyPress(.upArrow) {
-            viewModel.chooseAdjacent(-1)
-            return .handled
-        }
-        .onKeyPress(.downArrow) {
-            viewModel.chooseAdjacent(1)
+        // Plain arrows only: ⌥⌘↓ past the last conflict (its command then
+        // disabled) must not fall through here and change the choice.
+        .onKeyPress(keys: [.upArrow, .downArrow], phases: [.down, .repeat]) { press in
+            guard press.modifiers.isDisjoint(with: Self.chordModifiers) else { return .ignored }
+            viewModel.chooseAdjacent(press.key == .upArrow ? -1 : 1)
             return .handled
         }
         .accessibilityElement(children: .contain)
@@ -103,6 +102,10 @@ struct InspectorView: View {
         .help("Write this conflict's result yourself (↩)")
         .disabled(!viewModel.canEditByHand)
     }
+
+    /// Arrow keys typed with one of these belong to a shortcut, not to the candidates.
+    /// `.numericPad` and `.function`, which AppKit sets on every arrow key, are left out.
+    private static let chordModifiers: EventModifiers = [.command, .option, .control, .shift]
 
     private var card: some View {
         RoundedRectangle(cornerRadius: Metrics.cardCornerRadius)
