@@ -770,3 +770,215 @@ fn only_a_changed_result_is_left_to_write() {
         .unwrap();
     assert!(!session.status().unwritten);
 }
+
+// Writing a conflict's resolution, as the MCP server's `resolve` does.
+
+impl Repo {
+    fn write(
+        &self,
+        id: &str,
+        fill: &review::Fill,
+        replace: bool,
+    ) -> Result<String, review::WriteError> {
+        review::write(&self.cli(), &self.path(), "file.txt", id, fill, replace)
+    }
+
+    fn store(&self) -> Store {
+        Store::open(&self.cli()).unwrap()
+    }
+}
+
+fn own(text: &str) -> review::Fill {
+    review::Fill::Text(String::from(text))
+}
+
+fn record(id: &str, text: &str) -> Record {
+    Record {
+        conflict: id.to_string(),
+        by: String::from("claude-code 2.1"),
+        pick: None,
+        text: text.to_string(),
+        reason: String::from("A reason long enough to be kept."),
+        dropped: Some(String::from("nothing")),
+        at: 0,
+    }
+}
+
+/// A resolution written by hand is not the agent's to replace: `write`
+/// refuses it, saying it was made outside Scry, and leaves the file as it
+/// is; with `replace` it is replaced.
+#[test]
+fn write_keeps_a_resolution_made_by_hand() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    let ids = repo.ids();
+    let by_hand = "start\none, mine, carefully written\nm1\nm2\nm3\nm4\nm5\n<<<<<<< ours\ntwo ours\n=======\ntwo theirs\n>>>>>>> theirs\nend\n";
+    fs::write(repo.file(), by_hand).unwrap();
+    assert!(matches!(
+        repo.write(&ids[0], &own("one, agent\n"), false),
+        Err(review::WriteError::Resolved(review::Resolver::Outside))
+    ));
+    assert_eq!(fs::read_to_string(repo.file()).unwrap(), by_hand);
+    // The open conflict is the agent's to write.
+    repo.write(&ids[1], &own("two, agent\n"), false).unwrap();
+    repo.write(&ids[0], &own("one, agent\n"), true).unwrap();
+    assert_eq!(
+        fs::read_to_string(repo.file()).unwrap(),
+        "start\none, agent\nm1\nm2\nm3\nm4\nm5\ntwo, agent\nend\n"
+    );
+}
+
+/// An agent may write its own resolution again while the file holds what
+/// it recorded; once someone changed it, or the user reviewed it, it is
+/// refused and says who.
+#[test]
+fn write_replaces_only_the_agents_own_untouched_resolution() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    let ids = repo.ids();
+    let written = repo.write(&ids[0], &own("one, agent"), false).unwrap();
+    assert_eq!(written, "one, agent\n");
+    repo.store()
+        .add_record("file.txt", record(&ids[0], &written))
+        .unwrap();
+    let again = repo
+        .write(&ids[0], &own("one, agent again\n"), false)
+        .unwrap();
+    repo.store()
+        .add_record("file.txt", record(&ids[0], &again))
+        .unwrap();
+
+    let changed = fs::read_to_string(repo.file())
+        .unwrap()
+        .replace("one, agent again", "one, edited");
+    fs::write(repo.file(), &changed).unwrap();
+    match repo.write(&ids[0], &own("one, third\n"), false) {
+        Err(review::WriteError::Resolved(review::Resolver::ChangedSince(by))) => {
+            assert_eq!(by, "claude-code 2.1")
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let reviewed = [(ids[0].clone(), String::from("one, edited\n"))]
+        .into_iter()
+        .collect();
+    repo.store().set_reviewed("file.txt", &reviewed).unwrap();
+    repo.store()
+        .add_record("file.txt", record(&ids[0], "one, edited\n"))
+        .unwrap();
+    assert!(matches!(
+        repo.write(&ids[0], &own("one, third\n"), false),
+        Err(review::WriteError::Resolved(review::Resolver::Reviewed))
+    ));
+    assert_eq!(fs::read_to_string(repo.file()).unwrap(), changed);
+}
+
+/// A pick on the last conflict of a file without a final line break ends
+/// the file as that side does: without one, so the file is that candidate.
+#[test]
+fn a_pick_on_the_last_conflict_keeps_the_side_s_missing_break() {
+    let repo = Repo::merged("head\nbase", "head\nours", "head\ntheirs", "");
+    let ids = repo.ids();
+    let theirs = review::Fill::Pick {
+        kind: CandidateKind::Theirs,
+        text: String::from("theirs\n"),
+    };
+    assert_eq!(repo.write(&ids[0], &theirs, false).unwrap(), "theirs\n");
+    assert_eq!(fs::read_to_string(repo.file()).unwrap(), "head\ntheirs");
+    assert_eq!(
+        resolutions(&repo.find()),
+        [Resolution::Candidate(CandidateKind::Theirs)]
+    );
+}
+
+/// The file ends as the side the pick ends with: theirs without a final
+/// break, ours with one; removing the last conflict keeps the break of the
+/// line before it.
+#[test]
+fn a_pick_on_the_last_conflict_ends_as_its_side() {
+    let theirs_unbroken = ("head\nours\n", "head\ntheirs");
+    let ours_unbroken = ("head\nours", "head\ntheirs\n");
+    for ((ours, theirs), kind, text, expected) in [
+        (
+            theirs_unbroken,
+            CandidateKind::Theirs,
+            "theirs\n",
+            "head\ntheirs",
+        ),
+        (
+            theirs_unbroken,
+            CandidateKind::Ours,
+            "ours\n",
+            "head\nours\n",
+        ),
+        (theirs_unbroken, CandidateKind::Neither, "", "head\n"),
+        (ours_unbroken, CandidateKind::Neither, "", "head\n"),
+    ] {
+        let repo = Repo::merged("head\nbase\n", ours, theirs, "");
+        let ids = repo.ids();
+        let fill = review::Fill::Pick {
+            kind,
+            text: String::from(text),
+        };
+        repo.write(&ids[0], &fill, false).unwrap();
+        assert_eq!(
+            fs::read_to_string(repo.file()).unwrap(),
+            expected,
+            "{kind:?}"
+        );
+    }
+}
+
+/// A pick is written byte for byte, whatever line breaks the rest of the
+/// file uses, so it still reads as that candidate; own text takes the
+/// file's.
+#[test]
+fn a_pick_keeps_its_own_line_breaks() {
+    let repo = Repo::merged(
+        "h1\nh2\nh3\nbase\nt1\nt2\n",
+        "h1\nh2\nh3\nours\nt1\nt2\n",
+        "h1\nh2\nh3\ntheirs\r\nt1\nt2\n",
+        "",
+    );
+    let ids = repo.ids();
+    let theirs = review::Fill::Pick {
+        kind: CandidateKind::Theirs,
+        text: String::from("theirs\r\n"),
+    };
+    repo.write(&ids[0], &theirs, false).unwrap();
+    assert_eq!(
+        fs::read_to_string(repo.file()).unwrap(),
+        "h1\nh2\nh3\ntheirs\r\nt1\nt2\n"
+    );
+    assert_eq!(
+        resolutions(&repo.find()),
+        [Resolution::Candidate(CandidateKind::Theirs)]
+    );
+}
+
+/// What cannot be written is refused with nothing written: a stale id (with
+/// the ids now), text holding markers, a file changed outside its conflicts.
+#[test]
+fn write_refuses_what_it_cannot_place() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    let ids = repo.ids();
+    match repo.write("c0000000", &own("x\n"), false) {
+        Err(review::WriteError::NoSuchConflict(now)) => assert_eq!(now, ids),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        repo.write(
+            &ids[0],
+            &own("<<<<<<< a\nx\n=======\ny\n>>>>>>> b\n"),
+            false
+        ),
+        Err(review::WriteError::Markers)
+    ));
+    let changed = fs::read_to_string(repo.file())
+        .unwrap()
+        .replace("start\n", "begin\n");
+    fs::write(repo.file(), &changed).unwrap();
+    assert!(matches!(
+        repo.write(&ids[0], &own("x\n"), false),
+        Err(review::WriteError::ChangedOutside)
+    ));
+    assert_eq!(fs::read_to_string(repo.file()).unwrap(), changed);
+}

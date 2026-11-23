@@ -17,7 +17,7 @@ use scry_core::presentation;
 use scry_core::records::{Record, Store};
 use scry_core::resolution::CandidateKind;
 use scry_core::resolution::{Analysis, Candidate};
-use scry_core::review::{self, WriteError};
+use scry_core::review::{self, Fill, Resolver, WriteError};
 use scry_core::session::{Choice, MergeSession};
 use scry_core::syntax::ParseCheck;
 use scry_core::theme::State;
@@ -45,6 +45,8 @@ pub enum Resolve {
 /// A conflict's resolution, as the agent asks for it.
 pub struct Resolution {
     pub resolve: Resolve,
+    /// Replace a resolution that is not the agent's own.
+    pub replace: bool,
     pub reason: String,
     /// What own text leaves out of either side.
     pub dropped: Option<String>,
@@ -357,8 +359,8 @@ impl Tools {
     ) -> Result<String, String> {
         let repo = self.repo()?;
         let path = repo.text_file(path)?;
-        let (pick, text) = match resolution.resolve {
-            Resolve::Text(text) => (None, text),
+        let fill = match resolution.resolve {
+            Resolve::Text(text) => Fill::Text(text),
             // The candidates the agent saw: the file opened as `conflicts`
             // opens it, its candidates checked.
             Resolve::Pick(kind) => {
@@ -382,11 +384,41 @@ impl Tools {
                                 .join(", ")
                         )
                     })?;
-                (Some(kind), candidate.text.clone())
+                Fill::Pick {
+                    kind,
+                    text: candidate.text.clone(),
+                }
             }
         };
-        let text = review::write(&repo.git, &repo.root, &path, id, &text).map_err(
-            |error| match error {
+        let pick = match &fill {
+            Fill::Pick { kind, .. } => Some(*kind),
+            Fill::Text(_) => None,
+        };
+        let text = review::write(
+            &repo.git,
+            &repo.root,
+            &path,
+            id,
+            &fill,
+            resolution.replace,
+        )
+        .map_err(|error| match error {
+                WriteError::Resolved(resolver) => {
+                    let who = match resolver {
+                        Resolver::Outside => String::from(
+                            "outside Scry without an agent's record: by hand, or with another tool",
+                        ),
+                        Resolver::ChangedSince(by) => {
+                            format!("by {by}, then changed by someone else")
+                        }
+                        Resolver::Reviewed => {
+                            String::from("and the user reviewed that resolution in Scry")
+                        }
+                    };
+                    format!(
+                        "Nothing written: conflict {id} is already resolved {who}. Keep it, or ask the user before replacing it with replace: true."
+                    )
+                }
                 WriteError::NoSuchConflict(ids) => stale_ids(&repo, &path, id, &ids),
                 WriteError::Markers => String::from(
                     "Nothing written: the text holds conflict markers. Write the conflict's resolved lines only.",

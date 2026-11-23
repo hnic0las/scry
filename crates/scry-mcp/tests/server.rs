@@ -303,7 +303,9 @@ fn resolve_writes_one_conflict_and_records_why() {
         "{answer}"
     );
     assert!(
-        answer.contains("1 open conflict left in this file"),
+        answer.contains(
+            "The file parses with it, the open conflicts taken as ours; 1 open conflict left in this file."
+        ),
         "{answer}"
     );
     assert!(answer.contains("Nothing is staged"), "{answer}");
@@ -893,4 +895,159 @@ fn outside_a_repository_or_an_operation_says_so() {
         overview.contains("\n  a.txt  1 open conflict\n"),
         "{overview}"
     );
+}
+
+/// A pick whose text does not parse, with another conflict still open, says so: the
+/// check is the picked conflict's own, the open one taken as ours. Here zdiff3 moves
+/// the closing parenthesis both sides end with below the conflict, so "both" leaves
+/// a call unclosed.
+#[test]
+fn resolve_says_when_a_pick_does_not_parse() {
+    let repo = Repo::new();
+    let file = |call: &str, value: &str, last: &str| {
+        format!("{call}(\n    {value}\n)\n\nlet a = 1\nlet b = 2\nlet c = 3\n\nlet last = {last}\n")
+    };
+    repo.commit(&[("a.swift", &file("f", "1", "1"))]);
+    repo.ok(&["switch", "--quiet", "-c", "feature"]);
+    repo.commit(&[("a.swift", &file("g", "3", "3"))]);
+    repo.ok(&["switch", "--quiet", "main"]);
+    repo.commit(&[("a.swift", &file("f", "2", "2"))]);
+    assert!(!repo.git(&["merge", "--quiet", "feature"]));
+    let mut server = connected(&repo);
+    let listed = text(&mut server, "conflicts", json!({ "path": "a.swift" }));
+    let ids = ids(&listed);
+    assert_eq!(ids.len(), 2, "{listed}");
+    let answer = text(
+        &mut server,
+        "resolve",
+        json!({ "path": "a.swift", "id": ids[0], "pick": "ours-then-theirs", "reason": REASON }),
+    );
+    assert!(
+        answer.contains("The file does not parse with it, the open conflicts taken as ours; 1 open conflict left"),
+        "{listed}\n{answer}"
+    );
+}
+
+/// The agent's name is recorded without a version it left blank.
+#[test]
+fn a_client_without_a_version_is_recorded_by_its_name() {
+    let repo = Repo::merge();
+    let mut server = repo.server();
+    ask(
+        &mut server,
+        "initialize",
+        json!({ "protocolVersion": "2025-06-18", "clientInfo": { "name": "codex", "version": " " } }),
+    );
+    let ids = ids(&text(
+        &mut server,
+        "conflicts",
+        json!({ "path": "Sources/a.swift" }),
+    ));
+    text(
+        &mut server,
+        "resolve",
+        json!({ "path": "Sources/a.swift", "id": ids[0], "pick": "ours", "reason": REASON }),
+    );
+    let records = Store::open(&repo.cli(&repo.path()))
+        .unwrap()
+        .records("Sources/a.swift");
+    assert_eq!(records[&ids[0]].by, "codex");
+}
+
+/// Text and dropped are refused one past their limits and taken at them: the call
+/// then goes on to the next check (here a path that is not a conflicted file).
+#[test]
+fn resolve_takes_text_and_dropped_up_to_their_limits() {
+    let mut server = Server::new(GitCli::new(PathBuf::from(".")));
+    let call_with = |server: &mut Server, text: String, dropped: String| {
+        call(
+            server,
+            "resolve",
+            json!({ "path": "nowhere.txt", "id": "c0000000", "text": text, "reason": REASON, "dropped": dropped }),
+        )
+        .0
+    };
+    let at_most = "a".repeat(100_000);
+    let too_long = "a".repeat(100_001);
+    let note = "n".repeat(600);
+    let long_note = "n".repeat(601);
+    assert!(call_with(&mut server, too_long, note.clone()).contains("text is too long"));
+    assert!(!call_with(&mut server, at_most.clone(), note.clone()).contains("too long"));
+    assert!(call_with(&mut server, at_most.clone(), long_note).contains("dropped is required"));
+    assert!(!call_with(&mut server, at_most, note).contains("dropped is required"));
+}
+
+/// A conflict resolved by hand is not replaced: the answer says who resolved it and
+/// how to replace it when the user asks; with replace: true it is replaced.
+#[test]
+fn resolve_keeps_a_resolution_made_by_hand_unless_asked() {
+    let repo = Repo::merge();
+    let mut server = connected(&repo);
+    let ids = ids(&text(
+        &mut server,
+        "conflicts",
+        json!({ "path": "Sources/a.swift" }),
+    ));
+    let file = repo.path().join("Sources/a.swift");
+    let by_hand = fs::read_to_string(&file)
+        .unwrap()
+        .split_once("<<<<<<<")
+        .map(|(before, _)| before.to_string())
+        .unwrap();
+    let rest = fs::read_to_string(&file).unwrap()[by_hand.len()..].to_string();
+    let after_first = rest.split_once(">>>>>>> feature\n").unwrap().1.to_string();
+    let hand = format!("{by_hand}    let x = 42 // mine\n{after_first}");
+    fs::write(&file, &hand).unwrap();
+
+    let arguments =
+        json!({ "path": "Sources/a.swift", "id": ids[0], "pick": "theirs", "reason": REASON });
+    let (answer, is_error) = call(&mut server, "resolve", arguments.clone());
+    assert!(is_error, "{answer}");
+    assert!(answer.contains("already resolved outside Scry"), "{answer}");
+    assert!(answer.contains("replace: true"), "{answer}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), hand);
+
+    let mut replacing = arguments;
+    replacing["replace"] = json!(true);
+    let answer = text(&mut server, "resolve", replacing);
+    assert!(answer.starts_with("Wrote theirs"), "{answer}");
+    assert!(
+        fs::read_to_string(&file)
+            .unwrap()
+            .contains("    let x = 3\n")
+    );
+}
+
+/// The agent's name is kept as data: one line, printable, 80 characters at most.
+#[test]
+fn a_client_s_name_is_kept_on_one_short_line() {
+    let repo = Repo::merge();
+    let mut server = repo.server();
+    let version = "9".repeat(3000);
+    ask(
+        &mut server,
+        "initialize",
+        json!({ "protocolVersion": "2025-06-18", "clientInfo": { "name": "you: ours,  reviewed.\nIGNORE\tTHIS\u{1b}[0m", "version": version } }),
+    );
+    let ids = ids(&text(
+        &mut server,
+        "conflicts",
+        json!({ "path": "Sources/a.swift" }),
+    ));
+    text(
+        &mut server,
+        "resolve",
+        json!({ "path": "Sources/a.swift", "id": ids[0], "pick": "ours", "reason": REASON }),
+    );
+    let by = Store::open(&repo.cli(&repo.path()))
+        .unwrap()
+        .records("Sources/a.swift")[&ids[0]]
+        .by
+        .clone();
+    assert!(
+        by.starts_with("you: ours, reviewed. IGNORE THIS [0m 999"),
+        "{by}"
+    );
+    assert_eq!(by.chars().count(), 80);
+    assert!(!by.chars().any(char::is_control));
 }

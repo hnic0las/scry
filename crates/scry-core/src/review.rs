@@ -213,11 +213,7 @@ pub fn session(
     // Markers in a resolution: the file was written in another conflict
     // style than git's now (`git checkout --conflict=diff3`), and those
     // conflicts are open, which only the markers themselves can show.
-    let holds_markers = |text: &str| {
-        conflict::parse_with_marker_size(text, marker_size).map_or(true, |segments| {
-            conflict::conflicts(&segments).next().is_some()
-        })
-    };
+    let holds_markers = |text: &str| holds_markers(text, marker_size);
     if found.changed_outside
         || found
             .conflicts
@@ -285,6 +281,9 @@ pub enum WriteError {
     NoSuchConflict(Vec<String>),
     /// The text holds conflict markers.
     Markers,
+    /// The conflict holds a resolution that is not an agent's own to
+    /// change: who made it.
+    Resolved(Resolver),
     Io(std::path::PathBuf, std::io::Error),
 }
 
@@ -303,6 +302,7 @@ impl std::fmt::Display for WriteError {
                 write!(f, "no such conflict; now: {}", ids.join(", "))
             }
             WriteError::Markers => write!(f, "the text holds conflict markers"),
+            WriteError::Resolved(by) => write!(f, "already resolved {by}"),
             WriteError::Io(path, error) => write!(f, "{}: {error}", path.display()),
         }
     }
@@ -314,18 +314,66 @@ impl From<LoadError> for WriteError {
     }
 }
 
+/// What resolves a conflict written with `write`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fill {
+    /// A candidate's text, written byte for byte: the file then holds that
+    /// candidate, final line break included.
+    Pick { kind: CandidateKind, text: String },
+    /// Text of its own, written with the file's line breaks and a final
+    /// one; empty removes the conflict's lines.
+    Text(String),
+}
+
+/// Who made a resolution `write` will not replace unless asked to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolver {
+    /// No record of an agent: by hand, another editor or tool.
+    Outside,
+    /// An agent, then changed by someone else since.
+    ChangedSince(String),
+    /// Reviewed by the user in Scry, or chosen there.
+    Reviewed,
+}
+
+impl std::fmt::Display for Resolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Resolver::Outside => write!(
+                f,
+                "outside Scry, without an agent's record (by hand or another tool)"
+            ),
+            Resolver::ChangedSince(by) => write!(f, "by {by}, then changed by someone else"),
+            Resolver::Reviewed => write!(f, "and reviewed by the user in Scry"),
+        }
+    }
+}
+
+/// What `write` may replace: a conflict still open, or one an agent
+/// resolved and nobody changed or reviewed since (the agent correcting its
+/// own resolution). Anything else only when `replace` is set.
+#[derive(Debug, Clone, Default)]
+pub struct Guard {
+    /// The records of the file, by conflict id (`Store::records`).
+    pub records: BTreeMap<String, Record>,
+    /// The reviewed conflicts of the file (`Store::reviewed`).
+    pub reviewed: BTreeMap<String, String>,
+    pub replace: bool,
+}
+
 /// Resolves conflict `id` of `path` (from the repository root, `git`
-/// running there) with `text`, a candidate's or of its own (empty removes
-/// the conflict's lines), writing that conflict's region of the file only:
-/// the text around it and the other conflicts, open or resolved, stay as
-/// they are. The text takes the file's line breaks and ends with one.
-/// Returns the region's text as written, what a `Record` keeps.
+/// running there) with `fill`, writing that conflict's region of the file
+/// only: the text around it and the other conflicts, open or resolved,
+/// stay as they are. A resolution that is not an agent's own is kept
+/// unless `replace` (see `Guard`). Returns the region's text as written,
+/// what a `Record` keeps.
 pub fn write(
     git: &dyn Git,
     root: &Path,
     path: &str,
     id: &str,
-    text: &str,
+    fill: &Fill,
+    replace: bool,
 ) -> Result<String, WriteError> {
     let file = root.join(path);
     let current = fs::read(&file).map_err(|error| LoadError::Io(file.clone(), error))?;
@@ -333,7 +381,41 @@ pub fn write(
     let marker_size = conflict::marker_size(git, Path::new(path));
     let written = as_git_wrote(git, path, &file, marker_size, ("ours", "theirs"))?
         .ok_or(WriteError::NotConflicted)?;
-    let laid = Laid::new(&written.text, &current, marker_size).map_err(LoadError::Parse)?;
+    let (records, reviewed) = Store::open(git)
+        .map(|store| (store.records(path), store.reviewed(path)))
+        .unwrap_or_default();
+    let guard = Guard {
+        records,
+        reviewed,
+        replace,
+    };
+    let (result, text) = rewrite(
+        &written.text,
+        written.breaks,
+        &current,
+        marker_size,
+        id,
+        fill,
+        &guard,
+    )?;
+    session::write_atomically(&file, &result).map_err(|error| WriteError::Io(file, error))?;
+    Ok(text)
+}
+
+/// `current` with conflict `id` resolved by `fill`, `written` being the
+/// file as git wrote it with markers of `marker_size`, and `breaks` whether
+/// ours and theirs end with a line break: what `write` writes, and the
+/// region's text as written (with the final line break git adds).
+pub fn rewrite(
+    written: &str,
+    breaks: (bool, bool),
+    current: &str,
+    marker_size: usize,
+    id: &str,
+    fill: &Fill,
+    guard: &Guard,
+) -> Result<(String, String), WriteError> {
+    let laid = Laid::new(written, current, marker_size).map_err(LoadError::Parse)?;
     let Some(index) = laid.analyses.iter().position(|analysis| analysis.id == id) else {
         return Err(WriteError::NoSuchConflict(
             laid.analyses
@@ -342,29 +424,68 @@ pub fn write(
                 .collect(),
         ));
     };
-    let holds_markers = conflict::parse_with_marker_size(text, marker_size)
-        .map_or(true, |segments| {
-            conflict::conflicts(&segments).next().is_some()
-        });
-    if holds_markers {
-        return Err(WriteError::Markers);
-    }
-    let mut text = text.replace("\r\n", "\n");
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
-    if session::line_break(&current) == "\r\n" {
-        text = text.replace('\n', "\r\n");
-    }
+    let text = match fill {
+        Fill::Pick { text, .. } => text.clone(),
+        Fill::Text(text) => {
+            if holds_markers(text, marker_size) {
+                return Err(WriteError::Markers);
+            }
+            let mut text = text.replace("\r\n", "\n");
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            if session::line_break(current) == "\r\n" {
+                text = text.replace('\n', "\r\n");
+            }
+            text
+        }
+    };
     let regions = laid.regions().ok_or(WriteError::ChangedOutside)?;
     let (start, end) = regions[index];
-    let mut result = format!("{}{text}{}", &laid.text[..start], &laid.text[end..]);
-    if laid.added_break && result.ends_with('\n') {
-        // The file ended without a line break: it still does.
-        result.pop();
+    let region = &laid.text[start..end];
+    if !guard.replace && !laid.layout().is_open(index, region) {
+        let record = guard.records.get(id);
+        let reviewed = guard.reviewed.get(id).is_some_and(|text| text == region);
+        let resolver = match record {
+            _ if reviewed => Some(Resolver::Reviewed),
+            Some(record) if record.text == region => None,
+            Some(record) => Some(Resolver::ChangedSince(record.by.clone())),
+            None => Some(Resolver::Outside),
+        };
+        if let Some(resolver) = resolver {
+            return Err(WriteError::Resolved(resolver));
+        }
     }
-    session::write_atomically(&file, &result).map_err(|error| WriteError::Io(file, error))?;
-    Ok(text)
+    let mut result = format!("{}{text}{}", &laid.text[..start], &laid.text[end..]);
+    let ends_the_file = end == laid.text.len();
+    let final_break = match fill {
+        // The file ends as the side the candidate ends with does.
+        Fill::Pick { kind, text } if ends_the_file && !text.is_empty() => match kind {
+            CandidateKind::Theirs
+            | CandidateKind::OursThenTheirs
+            | CandidateKind::OursThenTheirsClosed => breaks.1,
+            _ => breaks.0,
+        },
+        // As the file did.
+        _ => !laid.added_break,
+    };
+    if !final_break && result.ends_with('\n') {
+        result.pop();
+        // A candidate's own CRLF break goes whole; the break laid over a
+        // file without one is a bare line feed.
+        if matches!(fill, Fill::Pick { .. }) && result.ends_with('\r') {
+            result.pop();
+        }
+    }
+    Ok((result, text))
+}
+
+/// `text` holds conflict markers of `marker_size`, or ones that do not
+/// parse.
+fn holds_markers(text: &str, marker_size: usize) -> bool {
+    conflict::parse_with_marker_size(text, marker_size).map_or(true, |segments| {
+        conflict::conflicts(&segments).next().is_some()
+    })
 }
 
 /// A file as git writes it, and whether ours and theirs end with a line
@@ -384,10 +505,17 @@ fn as_git_wrote(
     marker_size: usize,
     (ours, theirs): (&str, &str),
 ) -> Result<Option<Written>, LoadError> {
+    // Calls at once in one process (the app's threads, parallel tests) can
+    // read the same clock: the count keeps their folders apart.
+    static FOLDERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let count = FOLDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |time| time.as_nanos());
-    let folder = std::env::temp_dir().join(format!("scry-review-{}-{nanos}", std::process::id()));
+    let folder = std::env::temp_dir().join(format!(
+        "scry-review-{}-{nanos}-{count}",
+        std::process::id()
+    ));
     fs::create_dir(&folder).map_err(|error| LoadError::Io(folder.clone(), error))?;
     let files = MergetoolFiles {
         base: folder.join("base"),
@@ -668,6 +796,35 @@ fn line_starts(text: &str, start: usize) -> impl Iterator<Item = usize> + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `write` refuses reads as a sentence, with the ids it has now.
+    #[test]
+    fn write_errors_say_what_happened() {
+        assert_eq!(
+            WriteError::NoSuchConflict(vec![String::from("c1"), String::from("c2")]).to_string(),
+            "no such conflict; now: c1, c2"
+        );
+        assert_eq!(
+            WriteError::ChangedOutside.to_string(),
+            "the text around the conflicts changed since git wrote it"
+        );
+        assert_eq!(
+            WriteError::Markers.to_string(),
+            "the text holds conflict markers"
+        );
+        assert_eq!(
+            WriteError::Resolved(Resolver::Outside).to_string(),
+            "already resolved outside Scry, without an agent's record (by hand or another tool)"
+        );
+        assert_eq!(
+            Resolver::ChangedSince(String::from("codex 1")).to_string(),
+            "by codex 1, then changed by someone else"
+        );
+        assert_eq!(
+            Resolver::Reviewed.to_string(),
+            "and reviewed by the user in Scry"
+        );
+    }
 
     /// When a resolution could end in two places, both leaving the rest of
     /// the file in order, the one holding a candidate's text wins: the

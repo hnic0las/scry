@@ -318,6 +318,82 @@ proptest! {
         prop_assert_eq!(found, expected);
     }
 
+    /// Resolving conflicts one at a time, in any order, through what the MCP
+    /// server's `resolve` writes (each left open, given a candidate's text
+    /// or given other text): the file is the one written by hand with the
+    /// same choices, each write changing only its conflict's lines, and
+    /// finding what was done gives the same choices back.
+    #[test]
+    fn resolving_conflict_by_conflict_writes_the_choices_found_back(
+        conflicts in prop::collection::vec(
+            (lines(3), prop::option::of(lines(2)), lines(3), 0..3usize, any::<prop::sample::Index>(), lines(3)),
+            1..5,
+        ),
+        order in any::<prop::sample::Index>(),
+    ) {
+        let mut parts = vec![Part::Common(String::from("first\n"))];
+        for (index, (ours, base, theirs, ..)) in conflicts.iter().enumerate() {
+            parts.push(Part::Conflict { ours: ours.clone(), base: base.clone(), theirs: theirs.clone() });
+            parts.push(Part::Common(format!("between {index}\n")));
+        }
+        let text = written(&parts);
+        let segments = conflict::parse(&text).unwrap();
+        let analyses = resolution::analyze(&segments);
+        let mut by_hand = String::from("first\n");
+        let mut expected = Vec::new();
+        let mut writes = Vec::new();
+        for (index, (ours, base, theirs, how, pick, own)) in conflicts.iter().enumerate() {
+            let candidates = &analyses[index].candidates;
+            let found = match how {
+                0 => {
+                    by_hand.push_str(&written(&[Part::Conflict {
+                        ours: ours.clone(),
+                        base: base.clone(),
+                        theirs: theirs.clone(),
+                    }]));
+                    Resolution::Open
+                }
+                1 => {
+                    let candidate = pick.get(candidates);
+                    by_hand.push_str(&candidate.text);
+                    writes.push((
+                        analyses[index].id.clone(),
+                        review::Fill::Pick { kind: candidate.kind, text: candidate.text.clone() },
+                        candidate.text.clone(),
+                    ));
+                    Resolution::Candidate(candidate.kind)
+                }
+                _ => {
+                    by_hand.push_str(own);
+                    writes.push((analyses[index].id.clone(), review::Fill::Text(own.clone()), own.clone()));
+                    candidates
+                        .iter()
+                        .find(|candidate| candidate.text == *own)
+                        .map_or(Resolution::Text(own.clone()), |candidate| Resolution::Candidate(candidate.kind))
+                }
+            };
+            expected.push(found);
+            by_hand.push_str(&format!("between {index}\n"));
+        }
+        // Any rotation of the order the agent resolves them in.
+        if !writes.is_empty() {
+            let shift = order.index(writes.len());
+            writes.rotate_left(shift);
+        }
+        let mut current = text.clone();
+        for (id, fill, expected) in &writes {
+            let (file, region) =
+                review::rewrite(&text, (true, true), &current, 7, id, fill, &review::Guard::default()).unwrap();
+            prop_assert_eq!(&region, expected);
+            current = file;
+        }
+        prop_assert_eq!(&current, &by_hand);
+        let review = review::resolutions(&text, &current, 7).unwrap();
+        prop_assert!(!review.changed_outside);
+        let found: Vec<Resolution> = review.conflicts.into_iter().map(|c| c.resolution).collect();
+        prop_assert_eq!(found, expected);
+    }
+
     /// Whatever text fills the conflicts, from the same few lines the text
     /// around them uses (so a resolution can repeat the lines after it),
     /// the review places each one so the file is rebuilt exactly, and never

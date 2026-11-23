@@ -238,13 +238,18 @@ fn definitions() -> Value {
                         "maxLength": tools::MAX_DROPPED,
                         "description": "With text: what of ours or theirs is not in it, or \"nothing\".",
                     },
+                    "replace": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Replace a resolution made by someone else (by hand, another tool) or reviewed by the user. Only when the user asked for it.",
+                    },
                 },
                 "required": ["path", "id", "reason"],
                 "additionalProperties": false,
             },
             "annotations": {
                 "readOnlyHint": false,
-                "destructiveHint": false,
+                "destructiveHint": true,
                 "idempotentHint": true,
                 "openWorldHint": false,
             },
@@ -252,17 +257,44 @@ fn definitions() -> Value {
     ])
 }
 
-/// The agent's name and version, as `initialize` gives them.
+/// The longest agent name kept, in characters.
+const MAX_CLIENT: usize = 80;
+
+/// The agent's name and version, as `initialize` gives them, on one line of
+/// printable characters, at most `MAX_CLIENT`: the app shows it as data.
 fn client(params: &Value) -> Option<String> {
     let info = params.get("clientInfo")?;
-    let name = info.get("name").and_then(Value::as_str)?.trim();
+    let field = |name: &str| {
+        info.get(name)
+            .and_then(Value::as_str)
+            .map(one_line)
+            .unwrap_or_default()
+    };
+    let name = field("name");
     if name.is_empty() {
         return None;
     }
-    Some(match info.get("version").and_then(Value::as_str) {
-        Some(version) if !version.trim().is_empty() => format!("{name} {}", version.trim()),
-        _ => name.to_string(),
-    })
+    let version = field("version");
+    let client = match version.is_empty() {
+        true => name,
+        false => format!("{name} {version}"),
+    };
+    Some(
+        client
+            .chars()
+            .take(MAX_CLIENT)
+            .collect::<String>()
+            .trim_end()
+            .to_string(),
+    )
+}
+
+/// `text` with control characters and runs of spaces as one space.
+fn one_line(text: &str) -> String {
+    text.split(|character: char| character.is_control() || character.is_whitespace())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `resolve`'s pick or text, reason and, with a text, what it leaves out.
@@ -327,8 +359,15 @@ fn resolution(arguments: &Value) -> Result<Resolution, String> {
             Some(dropped.to_string())
         }
     };
+    let replace = match arguments.get("replace") {
+        None | Some(Value::Null) => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| String::from("replace is true or false."))?,
+    };
     Ok(Resolution {
         resolve,
+        replace,
         reason: reason.to_string(),
         dropped,
     })
@@ -393,6 +432,7 @@ fn resolve_prompt(path: Option<&str>) -> String {
 2. Resolve each open conflict with resolve. Prefer pick, a candidate Scry offers (ours, theirs, ours-then-theirs, base...), when one keeps what both sides meant. Write text only when none does, and then say in dropped what of ours or theirs is not in it, or \"nothing\".
 3. Give each a reason the user can check quickly: which intent of each side is kept and why, in 1 to 3 sentences, naming each side by its label from overview.
 4. If resolve answers that the file does not parse, fix that conflict with resolve again.
+If it answers that a conflict is already resolved by someone else, leave it as it is and say so in your summary; use replace: true only when the user asks for it.
 5. Do not edit the conflicted files yourself, and do not stage, commit, continue, skip or abort the operation: the user reviews each resolution in Scry first.
 6. End with a short summary of what you resolved and what you were unsure about, and ask the user to review it with `git scry`."
     )
