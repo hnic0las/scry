@@ -31,7 +31,8 @@ pub const MAX_CONTEXT: usize = 100;
 pub const REASON_LENGTH: std::ops::RangeInclusive<usize> = 20..=600;
 /// The most `dropped` says, in characters.
 pub const MAX_DROPPED: usize = 600;
-/// The largest text `resolve` writes for one conflict, in bytes.
+/// The largest text `resolve` writes for one conflict, in characters, as
+/// the schema's `maxLength` counts them.
 pub const MAX_TEXT: usize = 100_000;
 
 /// What resolves a conflict, as the agent asks for it.
@@ -253,7 +254,7 @@ impl Tools {
         let opened = repo.open(&path)?;
         let session = &opened.session;
         let count = session.conflict_count();
-        let Some(index) = (0..count).find(|index| session.analysis_so_far(*index).id == id) else {
+        let Some(index) = index_of(session, id) else {
             return Err(stale(&repo, &path, id, session));
         };
         let analysis = session.analysis(index);
@@ -361,80 +362,14 @@ impl Tools {
         let path = repo.text_file(path)?;
         let fill = match resolution.resolve {
             Resolve::Text(text) => Fill::Text(text),
-            // The candidates the agent saw: the file opened as `conflicts`
-            // opens it, its candidates checked.
-            Resolve::Pick(kind) => {
-                let opened = repo.open(&path)?;
-                let session = &opened.session;
-                let index = (0..session.conflict_count())
-                    .find(|index| session.analysis_so_far(*index).id == id)
-                    .ok_or_else(|| stale(&repo, &path, id, session))?;
-                let candidates = &session.analysis(index).candidates;
-                let candidate = candidates
-                    .iter()
-                    .find(|candidate| candidate.answers(kind))
-                    .ok_or_else(|| {
-                        format!(
-                            "Conflict {id} offers no candidate {}. Its candidates: {}. Or write text of your own.",
-                            kind.id(),
-                            candidates
-                                .iter()
-                                .map(|candidate| candidate.kind.id())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    })?;
-                Fill::Pick {
-                    kind,
-                    text: candidate.text.clone(),
-                }
-            }
+            Resolve::Pick(kind) => repo.picked(&path, id, kind)?,
         };
         let pick = match &fill {
             Fill::Pick { kind, .. } => Some(*kind),
             Fill::Text(_) => None,
         };
-        let text = review::write(
-            &repo.git,
-            &repo.root,
-            &path,
-            id,
-            &fill,
-            resolution.replace,
-        )
-        .map_err(|error| match error {
-                WriteError::Resolved(resolver) => {
-                    let who = match resolver {
-                        Resolver::Outside => String::from(
-                            "outside Scry without an agent's record: by hand, or with another tool",
-                        ),
-                        Resolver::ChangedSince(by) => {
-                            format!("by {by}, then changed by someone else")
-                        }
-                        Resolver::Reviewed => {
-                            String::from("and the user reviewed that resolution in Scry")
-                        }
-                    };
-                    format!(
-                        "Nothing written: conflict {id} is already resolved {who}. Keep it, or ask the user before replacing it with replace: true."
-                    )
-                }
-                WriteError::NoSuchConflict(ids) => stale_ids(&repo, &path, id, &ids),
-                WriteError::Markers => String::from(
-                    "Nothing written: the text holds conflict markers. Write the conflict's resolved lines only.",
-                ),
-                WriteError::ChangedOutside => format!(
-                    "Nothing written: {path} changed outside its conflicts since git wrote it, so where each conflict starts and ends cannot be told. The user resolves it in Scry."
-                ),
-                WriteError::NotConflicted => {
-                    format!("Nothing written: git holds no text conflict for {path}.")
-                }
-                error => format!("Nothing written: {error}"),
-            },
-        )?;
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |time| time.as_secs());
+        let text = review::write(&repo.git, &repo.root, &path, id, &fill, resolution.replace)
+            .map_err(|error| repo.refusal(&path, id, error))?;
         let record = Record {
             conflict: id.to_string(),
             by: by.to_string(),
@@ -442,7 +377,9 @@ impl Tools {
             text,
             reason: resolution.reason,
             dropped: resolution.dropped,
-            at,
+            at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |time| time.as_secs()),
         };
         let recorded = Store::open(&repo.git)
             .map_err(|error| error.to_string())
@@ -459,49 +396,7 @@ impl Tools {
                 " Its reason could not be kept ({error}): the user sees no reason for it."
             );
         }
-        answer += "\n";
-        // Read back as the app reads it.
-        match repo.open(&path) {
-            Ok(opened) => {
-                let session = &opened.session;
-                let open = session.unresolved();
-                let index = (0..session.conflict_count())
-                    .find(|index| session.analysis_so_far(*index).id == id);
-                answer += &match (open, session.merged_check()) {
-                    (0, ParseCheck::Parses) => String::from("The file parses."),
-                    (0, ParseCheck::DoesNotParse { line }) => format!(
-                        "The file does not parse: error on line {line}. Fix it with resolve again."
-                    ),
-                    (0, ParseCheck::NotChecked) => String::from(
-                        "Not checked by parsing: Scry has no grammar it trusts for this file.",
-                    ),
-                    (open, _) => {
-                        let parse = pick.zip(index).and_then(|(kind, index)| {
-                            session
-                                .analysis(index)
-                                .candidates
-                                .iter()
-                                .find(|candidate| candidate.answers(kind))
-                                .map(|candidate| candidate.parse)
-                        });
-                        let check = match parse {
-                            Some(ParseCheck::Parses) => {
-                                "The file parses with it, the open conflicts taken as ours"
-                            }
-                            Some(ParseCheck::DoesNotParse { .. }) => {
-                                "The file does not parse with it, the open conflicts taken as ours"
-                            }
-                            _ => "Not checked by parsing yet",
-                        };
-                        format!(
-                            "{check}; {} left in this file.",
-                            plural(open, "open conflict")
-                        )
-                    }
-                };
-            }
-            Err(error) => answer += &format!("It could not be read back: {error}"),
-        }
+        answer += &format!("\n{}", repo.read_back(&path, id, pick));
         answer += "\nNothing is staged: the user reviews each resolution in Scry (git scry).";
         Ok(answer)
     }
@@ -580,21 +475,28 @@ impl Repo {
         Ok(path.to_string())
     }
 
-    /// The file opened as the app opens it: from its markers, or, when
-    /// conflicts were resolved outside Scry, rebuilt from git's versions
-    /// with what the file holds.
-    fn open(&self, path: &str) -> Result<Opened, String> {
+    /// The file's session, as `open` makes it, without the lines of its
+    /// conflicts.
+    fn session(&self, path: &str) -> Result<MergeSession, String> {
         let (ours, theirs) = presentation::side_labels(self.snapshot.operation.as_ref());
         let file = self.root.join(path);
         let folder = file.parent().unwrap_or(&self.root).to_path_buf();
-        let session = review::opened(
+        review::opened(
             &self.git,
             &self.git.in_dir(folder),
             &self.root,
             path,
             (&ours, &theirs),
         )
-        .map_err(|error| format!("{path}: {error}"))?;
+        .map_err(|error| format!("{path}: {error}"))
+    }
+
+    /// The file opened as the app opens it: from its markers, or, when
+    /// conflicts were resolved outside Scry, rebuilt from git's versions
+    /// with what the file holds.
+    fn open(&self, path: &str) -> Result<Opened, String> {
+        let (ours, theirs) = presentation::side_labels(self.snapshot.operation.as_ref());
+        let session = self.session(path)?;
         let lines = review::find(&self.git, &self.root, path)
             .ok()
             .flatten()
@@ -614,6 +516,106 @@ impl Repo {
         })
     }
 
+    /// The candidate `kind` of conflict `id`, as `conflicts` showed it: the
+    /// file opened as the app opens it, its candidates checked.
+    fn picked(&self, path: &str, id: &str, kind: CandidateKind) -> Result<Fill, String> {
+        let session = self.session(path)?;
+        let index = index_of(&session, id).ok_or_else(|| stale(self, path, id, &session))?;
+        let candidates = &session.analysis(index).candidates;
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.answers(kind))
+            .ok_or_else(|| {
+                format!(
+                    "Conflict {id} offers no candidate {}. Its candidates: {}. Or write text of your own.",
+                    kind.id(),
+                    candidates
+                        .iter()
+                        .map(|candidate| candidate.kind.id())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+        Ok(Fill::Pick {
+            kind,
+            text: candidate.text.clone(),
+        })
+    }
+
+    /// Why `resolve` wrote nothing, for the agent to act on.
+    fn refusal(&self, path: &str, id: &str, error: WriteError) -> String {
+        match error {
+            WriteError::Resolved(resolver) => {
+                let who = match resolver {
+                    Resolver::Outside => String::from(
+                        "outside Scry without an agent's record: by hand, or with another tool",
+                    ),
+                    Resolver::ChangedSince(by) => format!("by {by}, then changed by someone else"),
+                    Resolver::Reviewed => {
+                        String::from("and the user reviewed that resolution in Scry")
+                    }
+                };
+                format!(
+                    "Nothing written: conflict {id} is already resolved {who}. Keep it, or ask the user before replacing it with replace: true."
+                )
+            }
+            WriteError::NoSuchConflict(ids) => stale_ids(self, path, id, &ids),
+            WriteError::Markers => String::from(
+                "Nothing written: the text holds conflict markers. Write the conflict's resolved lines only.",
+            ),
+            WriteError::ChangedOutside => format!(
+                "Nothing written: {path} changed outside its conflicts since git wrote it, so where each conflict starts and ends cannot be told. The user resolves it in Scry."
+            ),
+            WriteError::NotConflicted => {
+                format!("Nothing written: git holds no text conflict for {path}.")
+            }
+            error => format!("Nothing written: {error}"),
+        }
+    }
+
+    /// What the file says once conflict `id` is written: whether it parses
+    /// when no conflict is left open, else the pick's own check and how
+    /// many are left.
+    fn read_back(&self, path: &str, id: &str, pick: Option<CandidateKind>) -> String {
+        let session = match self.session(path) {
+            Ok(session) => session,
+            Err(error) => return format!("It could not be read back: {error}"),
+        };
+        let open = session.unresolved();
+        if open == 0 {
+            return String::from(match session.merged_check() {
+                ParseCheck::Parses => "The file parses.",
+                ParseCheck::DoesNotParse { line } => {
+                    return format!(
+                        "The file does not parse: error on line {line}. Fix it with resolve again."
+                    );
+                }
+                ParseCheck::NotChecked => {
+                    "Not checked by parsing: Scry has no grammar it trusts for this file."
+                }
+            });
+        }
+        let parse = pick.zip(index_of(&session, id)).and_then(|(kind, index)| {
+            session
+                .analysis(index)
+                .candidates
+                .iter()
+                .find(|candidate| candidate.answers(kind))
+                .map(|candidate| candidate.parse)
+        });
+        let check = match parse {
+            Some(ParseCheck::Parses) => "The file parses with it, the open conflicts taken as ours",
+            Some(ParseCheck::DoesNotParse { .. }) => {
+                "The file does not parse with it, the open conflicts taken as ours"
+            }
+            _ => "Not checked by parsing yet",
+        };
+        format!(
+            "{check}; {} left in this file.",
+            plural(open, "open conflict")
+        )
+    }
+
     /// Why a conflicted file shows no conflict.
     fn nothing_to_tell_apart(&self, path: &str) -> String {
         let changed_outside = self
@@ -630,6 +632,11 @@ impl Repo {
             false => format!("{path} has no conflict left."),
         }
     }
+}
+
+/// The index of conflict `id` in `session`.
+fn index_of(session: &MergeSession, id: &str) -> Option<usize> {
+    (0..session.conflict_count()).find(|index| session.analysis_so_far(*index).id == id)
 }
 
 /// Why conflict `id` is not in `path`, with the ids it has now.

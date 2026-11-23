@@ -24,16 +24,9 @@ const INVALID_PARAMS: i64 = -32602;
 const INSTRUCTIONS: &str = "Scry's view of the merge, rebase, cherry-pick or revert in progress in this repository: start with overview, then conflicts(path), then conflict(path, id), and resolve(path, id, ...) to write a conflict's resolution with a reason. Conflict ids come from the content: they survive other conflicts being resolved. Prefer picking a candidate to writing text. Never stage, commit or continue the operation: the user reviews each resolution in Scry first.";
 
 /// The candidates `resolve` can pick, as their ids.
-const PICKS: [&str; 8] = [
-    "ours",
-    "theirs",
-    "ours-then-theirs",
-    "theirs-then-ours",
-    "neither",
-    "base",
-    "ours-then-theirs-closed",
-    "theirs-then-ours-closed",
-];
+fn picks() -> Vec<&'static str> {
+    CandidateKind::ALL.iter().map(|kind| kind.id()).collect()
+}
 
 /// One connection: an agent's messages in, answers out.
 pub struct Server {
@@ -104,6 +97,12 @@ impl Server {
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        if let Some(unknown) = unknown_argument(name, &arguments) {
+            return Ok(json!({
+                "content": [{ "type": "text", "text": unknown }],
+                "isError": true,
+            }));
+        }
         let answer = match name {
             "overview" => self.tools.overview(),
             "conflicts" => text(&arguments, "path").and_then(|path| self.tools.conflicts(&path)),
@@ -219,7 +218,7 @@ fn definitions() -> Value {
                     },
                     "pick": {
                         "type": "string",
-                        "enum": PICKS,
+                        "enum": picks(),
                         "description": "A candidate the conflict offers, as conflicts lists them. Either pick or text.",
                     },
                     "text": {
@@ -259,6 +258,27 @@ fn definitions() -> Value {
 
 /// The longest agent name kept, in characters.
 const MAX_CLIENT: usize = 80;
+
+/// An argument the tool's schema does not have (`additionalProperties:
+/// false`), with the ones it has: a misspelt `replace` must not be ignored.
+fn unknown_argument(name: &str, arguments: &Value) -> Option<String> {
+    let definitions = definitions();
+    let properties = definitions
+        .as_array()?
+        .iter()
+        .find(|tool| tool["name"] == name)?["inputSchema"]["properties"]
+        .as_object()?
+        .clone();
+    let unknown = arguments
+        .as_object()?
+        .keys()
+        .find(|key| !properties.contains_key(*key))?;
+    let known: Vec<&str> = properties.keys().map(String::as_str).collect();
+    Some(format!(
+        "{name} has no argument {unknown}. Its arguments: {}.",
+        known.join(", ")
+    ))
+}
 
 /// The agent's name and version, as `initialize` gives them, on one line of
 /// printable characters, at most `MAX_CLIENT`: the app shows it as data.
@@ -313,7 +333,7 @@ fn resolution(arguments: &Value) -> Result<Resolution, String> {
             Resolve::Pick(CandidateKind::from_id(id).ok_or_else(|| {
                 format!(
                     "pick {pick} is not a candidate: one of {}.",
-                    PICKS.join(", ")
+                    picks().join(", ")
                 )
             })?)
         }
@@ -321,9 +341,9 @@ fn resolution(arguments: &Value) -> Result<Resolution, String> {
             let own = own
                 .as_str()
                 .ok_or_else(|| String::from("text is a string: the resolved lines."))?;
-            if own.len() > tools::MAX_TEXT {
+            if own.chars().count() > tools::MAX_TEXT {
                 return Err(format!(
-                    "text is too long: {} bytes at most for one conflict.",
+                    "text is too long: {} characters at most for one conflict.",
                     tools::MAX_TEXT
                 ));
             }
@@ -342,23 +362,22 @@ fn resolution(arguments: &Value) -> Result<Resolution, String> {
             tools::REASON_LENGTH.end()
         ));
     }
-    let dropped = match resolve {
-        Resolve::Pick(_) => None,
-        Resolve::Text(_) => {
-            let dropped = arguments
-                .get("dropped")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .unwrap_or_default();
-            if dropped.is_empty() || dropped.chars().count() > tools::MAX_DROPPED {
-                return Err(format!(
-                    "Nothing written: with text, dropped is required, at most {} characters: what of ours or theirs is not in the text, or \"nothing\".",
-                    tools::MAX_DROPPED
-                ));
-            }
-            Some(dropped.to_string())
-        }
-    };
+    // Required with text; with a pick, kept when given, as the agent's note.
+    let dropped = arguments
+        .get("dropped")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|dropped| !dropped.is_empty());
+    let required = matches!(resolve, Resolve::Text(_));
+    if dropped.is_none() && required
+        || dropped.is_some_and(|dropped| dropped.chars().count() > tools::MAX_DROPPED)
+    {
+        return Err(format!(
+            "Nothing written: with text, dropped is required, at most {} characters: what of ours or theirs is not in the text, or \"nothing\".",
+            tools::MAX_DROPPED
+        ));
+    }
+    let dropped = dropped.map(str::to_string);
     let replace = match arguments.get("replace") {
         None | Some(Value::Null) => false,
         Some(value) => value

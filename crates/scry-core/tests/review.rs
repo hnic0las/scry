@@ -955,7 +955,9 @@ fn a_pick_keeps_its_own_line_breaks() {
 }
 
 /// What cannot be written is refused with nothing written: a stale id (with
-/// the ids now), text holding markers, a file changed outside its conflicts.
+/// the ids now), text holding markers, a conflict resolved in a file changed
+/// outside its conflicts. One still open there is written between its own
+/// markers.
 #[test]
 fn write_refuses_what_it_cannot_place() {
     let repo = Repo::merged(BASE, OURS, THEIRS, "");
@@ -972,15 +974,21 @@ fn write_refuses_what_it_cannot_place() {
         ),
         Err(review::WriteError::Markers)
     ));
+    repo.write(&ids[0], &own("one, agent\n"), false).unwrap();
     let changed = fs::read_to_string(repo.file())
         .unwrap()
         .replace("start\n", "begin\n");
     fs::write(repo.file(), &changed).unwrap();
     assert!(matches!(
-        repo.write(&ids[0], &own("x\n"), false),
+        repo.write(&ids[0], &own("x\n"), true),
         Err(review::WriteError::ChangedOutside)
     ));
     assert_eq!(fs::read_to_string(repo.file()).unwrap(), changed);
+    repo.write(&ids[1], &own("two, agent\n"), false).unwrap();
+    assert_eq!(
+        fs::read_to_string(repo.file()).unwrap(),
+        "begin\none, agent\nm1\nm2\nm3\nm4\nm5\ntwo, agent\nend\n"
+    );
 }
 
 /// Own text repeating the lines between two conflicts is placed where its
@@ -1024,4 +1032,37 @@ fn own_text_holding_the_lines_between_conflicts_is_placed_by_its_record() {
         fs::read_to_string(repo.file()).unwrap(),
         "A\nx6\ns\ns\ns\ns\ny3\nB\n"
     );
+}
+
+/// Markers in another conflict style than git's now (`git checkout
+/// --conflict=diff3` with the default style): the ids are the ones the
+/// file's markers give, as the editor and the MCP server show them, and
+/// writing one of them replaces those markers; an id from neither is
+/// refused with the file's ids (review P2#2).
+#[test]
+fn write_resolves_markers_in_another_style() {
+    let repo = Repo::merged("A\nb1\nb2\nB\n", "A\nk\no2\nB\n", "A\nk\nt2\nB\n", "");
+    repo.ok(&["checkout", "--conflict=diff3", "--", "file.txt"]);
+    assert!(fs::read_to_string(repo.file()).unwrap().contains("|||||||"));
+    let ids = repo.ids();
+    assert_eq!(ids.len(), 1);
+    match repo.write("c0000000", &own("x\n"), false) {
+        Err(review::WriteError::NoSuchConflict(now)) => assert_eq!(now, ids),
+        other => panic!("{other:?}"),
+    }
+    repo.write(&ids[0], &own("k\nboth\n"), false).unwrap();
+    assert_eq!(fs::read_to_string(repo.file()).unwrap(), "A\nk\nboth\nB\n");
+}
+
+/// A stale id in a file with no markers left is refused with git's ids: the
+/// file's own markers are a fallback only where it still has some.
+#[test]
+fn a_stale_id_in_a_resolved_file_names_git_s_ids() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    let ids = repo.ids();
+    fs::write(repo.file(), THEIRS).unwrap();
+    match repo.write("c0000000", &own("x\n"), false) {
+        Err(review::WriteError::NoSuchConflict(now)) => assert_eq!(now, ids),
+        other => panic!("{other:?}"),
+    }
 }

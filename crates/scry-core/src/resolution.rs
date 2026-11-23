@@ -80,6 +80,18 @@ pub enum CandidateKind {
 }
 
 impl CandidateKind {
+    /// Every kind, in the order the CLI and MCP list them.
+    pub const ALL: [CandidateKind; 8] = [
+        CandidateKind::Ours,
+        CandidateKind::Theirs,
+        CandidateKind::OursThenTheirs,
+        CandidateKind::TheirsThenOurs,
+        CandidateKind::Neither,
+        CandidateKind::Base,
+        CandidateKind::OursThenTheirsClosed,
+        CandidateKind::TheirsThenOursClosed,
+    ];
+
     /// The candidate's ID within its conflict, as used by the CLI and MCP.
     pub fn id(self) -> &'static str {
         match self {
@@ -96,18 +108,7 @@ impl CandidateKind {
 
     /// The candidate kind with this ID, as typed in the CLI or sent over MCP.
     pub fn from_id(id: &str) -> Option<CandidateKind> {
-        [
-            CandidateKind::Ours,
-            CandidateKind::Theirs,
-            CandidateKind::OursThenTheirs,
-            CandidateKind::TheirsThenOurs,
-            CandidateKind::Neither,
-            CandidateKind::Base,
-            CandidateKind::OursThenTheirsClosed,
-            CandidateKind::TheirsThenOursClosed,
-        ]
-        .into_iter()
-        .find(|kind| kind.id() == id)
+        CandidateKind::ALL.into_iter().find(|kind| kind.id() == id)
     }
 }
 

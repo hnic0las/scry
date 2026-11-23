@@ -222,6 +222,10 @@ fn an_agent_connects_and_lists_the_tools() {
         tools[3]["inputSchema"]["properties"]["reason"]["minLength"],
         20
     );
+    assert_eq!(
+        tools[3]["inputSchema"]["properties"]["pick"]["enum"],
+        json!(PICKS)
+    );
 
     let prompts = ask(&mut server, "prompts/list", json!({}))["result"]["prompts"].clone();
     assert_eq!(prompts[0]["name"], "resolve");
@@ -270,6 +274,18 @@ fn connected(repo: &Repo) -> Server {
     );
     server
 }
+
+/// Every candidate `resolve` can pick, in the order Scry lists them.
+const PICKS: [&str; 8] = [
+    "ours",
+    "theirs",
+    "ours-then-theirs",
+    "theirs-then-ours",
+    "neither",
+    "base",
+    "ours-then-theirs-closed",
+    "theirs-then-ours-closed",
+];
 
 const REASON: &str = "Keeps feature's x = 3: main only bumped the same constant.";
 
@@ -456,6 +472,18 @@ fn resolve_refuses_what_it_cannot_write() {
         assert!(is_error, "{arguments}: {answer}");
         assert!(answer.contains(expected), "{arguments}: {answer}");
     }
+    let (answer, _) = call(
+        &mut server,
+        "resolve",
+        json!({ "path": path, "id": id, "pick": "mine", "reason": REASON }),
+    );
+    assert_eq!(
+        answer,
+        format!(
+            "pick \"mine\" is not a candidate: one of {}.",
+            PICKS.join(", ")
+        )
+    );
     assert_eq!(fs::read_to_string(&file).unwrap(), before);
     assert!(
         Store::open(&repo.cli(&repo.path()))
@@ -967,8 +995,9 @@ fn resolve_takes_text_and_dropped_up_to_their_limits() {
         )
         .0
     };
-    let at_most = "a".repeat(100_000);
-    let too_long = "a".repeat(100_001);
+    // Characters, as the schema's maxLength counts them: "é" is two bytes.
+    let at_most = "é".repeat(100_000);
+    let too_long = "é".repeat(100_001);
     let note = "n".repeat(600);
     let long_note = "n".repeat(601);
     assert!(call_with(&mut server, too_long, note.clone()).contains("text is too long"));
@@ -1050,4 +1079,65 @@ fn a_client_s_name_is_kept_on_one_short_line() {
     );
     assert_eq!(by.chars().count(), 80);
     assert!(!by.chars().any(char::is_control));
+}
+
+/// An argument the schema does not have is refused, naming the ones it has, rather
+/// than ignored: a misspelt replace would otherwise write nothing and say why not.
+#[test]
+fn unknown_arguments_are_refused() {
+    let repo = Repo::merge();
+    let mut server = connected(&repo);
+    let ids = ids(&text(
+        &mut server,
+        "conflicts",
+        json!({ "path": "Sources/a.swift" }),
+    ));
+    let file = repo.path().join("Sources/a.swift");
+    let before = fs::read_to_string(&file).unwrap();
+    let (answer, is_error) = call(
+        &mut server,
+        "resolve",
+        json!({ "path": "Sources/a.swift", "id": ids[0], "pick": "theirs", "reason": REASON, "replce": true }),
+    );
+    assert!(is_error, "{answer}");
+    assert_eq!(
+        answer,
+        "resolve has no argument replce. Its arguments: path, id, pick, text, reason, dropped, replace."
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+    let (answer, is_error) = call(&mut server, "overview", json!({ "verbose": true }));
+    assert!(
+        is_error && answer.starts_with("overview has no argument verbose."),
+        "{answer}"
+    );
+}
+
+/// With a pick, dropped is optional: kept when given, refused when too long.
+#[test]
+fn dropped_with_a_pick_is_kept_and_checked() {
+    let repo = Repo::merge();
+    let mut server = connected(&repo);
+    let ids = ids(&text(
+        &mut server,
+        "conflicts",
+        json!({ "path": "Sources/a.swift" }),
+    ));
+    let (answer, is_error) = call(
+        &mut server,
+        "resolve",
+        json!({ "path": "Sources/a.swift", "id": ids[0], "pick": "theirs", "reason": REASON, "dropped": "n".repeat(601) }),
+    );
+    assert!(
+        is_error && answer.contains("at most 600 characters"),
+        "{answer}"
+    );
+    text(
+        &mut server,
+        "resolve",
+        json!({ "path": "Sources/a.swift", "id": ids[0], "pick": "theirs", "reason": REASON, "dropped": " main's x = 2 " }),
+    );
+    let records = Store::open(&repo.cli(&repo.path()))
+        .unwrap()
+        .records("Sources/a.swift");
+    assert_eq!(records[&ids[0]].dropped.as_deref(), Some("main's x = 2"));
 }

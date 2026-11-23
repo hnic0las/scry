@@ -392,7 +392,7 @@ pub fn write(
         reviewed,
         replace,
     };
-    let (result, text) = rewrite(
+    let (result, text) = match rewrite(
         &written.text,
         written.breaks,
         &current,
@@ -400,7 +400,34 @@ pub fn write(
         id,
         fill,
         &guard,
-    )?;
+    ) {
+        // Markers in another conflict style than git's now (`git checkout
+        // --conflict=diff3`): the file's own markers are the conflicts the
+        // agent was shown, laid over the file itself.
+        Err(error @ (WriteError::ChangedOutside | WriteError::NoSuchConflict(_)))
+            if has_conflicts(&current, marker_size) =>
+        {
+            let own = rewrite(
+                &current,
+                written.breaks,
+                &current,
+                marker_size,
+                id,
+                fill,
+                &guard,
+            );
+            match own {
+                // Not among the markers either: the text around it changed.
+                Err(WriteError::NoSuchConflict(_))
+                    if matches!(error, WriteError::ChangedOutside) =>
+                {
+                    return Err(error);
+                }
+                other => other?,
+            }
+        }
+        other => other?,
+    };
     session::write_atomically(&file, &result).map_err(|error| WriteError::Io(file, error))?;
     Ok(text)
 }
@@ -482,6 +509,12 @@ pub fn rewrite(
         }
     }
     Ok((result, text))
+}
+
+/// `text` holds whole conflicts with markers of `marker_size`.
+fn has_conflicts(text: &str, marker_size: usize) -> bool {
+    conflict::parse_with_marker_size(text, marker_size)
+        .is_ok_and(|segments| conflict::conflicts(&segments).next().is_some())
 }
 
 /// `text` holds conflict markers of `marker_size`, or ones that do not
