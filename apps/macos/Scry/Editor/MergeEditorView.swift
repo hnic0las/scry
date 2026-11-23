@@ -52,6 +52,12 @@ struct MergeEditorView: View {
                     .onChange(of: maxScrollX(width: geometry.size.width), initial: true) { _, maximum in
                         scroll.maximum = maximum
                     }
+                    // The other layout's view is built anew, scrolled to the
+                    // top: it opens on the focused conflict as the file did
+                    // (a window narrowed then widened went back to line 1).
+                    .onChange(of: viewModel.layout) {
+                        openedOnConflict = false
+                    }
                 }
                 .overlay(alignment: .bottom) { HintStrip(shortcuts: viewModel.hintStrip) }
                 .overlay(alignment: .top) { ToolbarHintRow(shortcuts: viewModel.toolbarHints) }

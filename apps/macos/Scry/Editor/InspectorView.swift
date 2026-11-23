@@ -135,6 +135,8 @@ struct ReviewCard: View {
                     symbol: review.reviewed ? "checkmark" : "eye",
                     color: review.reviewed ? Theme.States.resolved : Theme.States.needsReview
                 )
+                // Whole: the agent's name wraps instead.
+                .fixedSize()
             }
             Text(review.reason)
                 .font(Metrics.callout)
