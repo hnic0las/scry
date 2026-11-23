@@ -168,7 +168,8 @@ fn ids(listed: &str) -> Vec<String> {
 /// An agent connects as the protocol says: `initialize` agrees on a version (the
 /// client's when the server speaks it, else the newest it speaks, for the client to
 /// decide), the `initialized` notification gets no answer, and `tools/list` gives the
-/// three read-only tools in a stable order with their required arguments.
+/// three read-only tools then `resolve`, in a stable order with their required
+/// arguments, and `prompts/list` the `resolve` prompt.
 #[test]
 fn an_agent_connects_and_lists_the_tools() {
     let mut server = Server::new(GitCli::new(PathBuf::from(".")));
@@ -181,6 +182,7 @@ fn an_agent_connects_and_lists_the_tools() {
     assert_eq!(result["protocolVersion"], "2025-06-18");
     assert_eq!(result["serverInfo"]["name"], "git-scry");
     assert!(result["capabilities"]["tools"].is_object());
+    assert!(result["capabilities"]["prompts"].is_object());
     assert!(
         result["instructions"]
             .as_str()
@@ -205,12 +207,287 @@ fn an_agent_connects_and_lists_the_tools() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["overview", "conflicts", "conflict"]);
+    assert_eq!(names, ["overview", "conflicts", "conflict", "resolve"]);
     for tool in tools.as_array().unwrap() {
-        assert_eq!(tool["annotations"]["readOnlyHint"], true, "{tool}");
+        let read_only = tool["name"] != "resolve";
+        assert_eq!(tool["annotations"]["readOnlyHint"], read_only, "{tool}");
         assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
     }
     assert_eq!(tools[2]["inputSchema"]["required"], json!(["path", "id"]));
+    assert_eq!(
+        tools[3]["inputSchema"]["required"],
+        json!(["path", "id", "reason"])
+    );
+    assert_eq!(
+        tools[3]["inputSchema"]["properties"]["reason"]["minLength"],
+        20
+    );
+
+    let prompts = ask(&mut server, "prompts/list", json!({}))["result"]["prompts"].clone();
+    assert_eq!(prompts[0]["name"], "resolve");
+    assert_eq!(prompts[0]["arguments"][0]["required"], false);
+}
+
+/// The `resolve` prompt asks for the tools, a reason, no staging and a review in
+/// Scry, for one file when given one.
+#[test]
+fn the_resolve_prompt_says_how_to_resolve() {
+    let mut server = Server::new(GitCli::new(PathBuf::from(".")));
+    let answer = ask(
+        &mut server,
+        "prompts/get",
+        json!({ "name": "resolve", "arguments": { "path": "Sources/a.swift" } }),
+    );
+    let message = &answer["result"]["messages"][0];
+    assert_eq!(message["role"], "user");
+    let prompt = message["content"]["text"].as_str().unwrap();
+    for expected in [
+        "the conflicts of Sources/a.swift",
+        "Prefer pick",
+        "dropped",
+        "reason",
+        "do not stage, commit, continue",
+        "`git scry`",
+    ] {
+        assert!(prompt.contains(expected), "{expected:?} in {prompt}");
+    }
+    let all = ask(&mut server, "prompts/get", json!({ "name": "resolve" }));
+    let prompt = all["result"]["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap();
+    assert!(prompt.contains("the conflicts of the operation in progress"));
+    let unknown = ask(&mut server, "prompts/get", json!({ "name": "explain" }));
+    assert_eq!(unknown["error"]["code"], -32602);
+}
+
+/// Connects as Claude Code does, so `resolve` records its name.
+fn connected(repo: &Repo) -> Server {
+    let mut server = repo.server();
+    ask(
+        &mut server,
+        "initialize",
+        json!({ "protocolVersion": "2025-06-18", "clientInfo": { "name": "claude-code", "version": "2.1" } }),
+    );
+    server
+}
+
+const REASON: &str = "Keeps feature's x = 3: main only bumped the same constant.";
+
+/// `resolve` with a pick writes that conflict's lines only, the other conflict keeping
+/// its markers, records who resolved it and why, and `conflicts` then shows it; own
+/// text for the second takes a final line break, and with every conflict resolved
+/// the answer says the file parses. Nothing is staged.
+#[test]
+fn resolve_writes_one_conflict_and_records_why() {
+    let repo = Repo::merge();
+    let mut server = connected(&repo);
+    let listed = text(
+        &mut server,
+        "conflicts",
+        json!({ "path": "Sources/a.swift" }),
+    );
+    let ids = ids(&listed);
+    assert_eq!(ids.len(), 2, "{listed}");
+    let file = repo.path().join("Sources/a.swift");
+
+    let answer = text(
+        &mut server,
+        "resolve",
+        json!({ "path": "Sources/a.swift", "id": ids[0], "pick": "theirs", "reason": REASON }),
+    );
+    assert!(
+        answer.starts_with(&format!(
+            "Wrote theirs for conflict {} in Sources/a.swift.",
+            ids[0]
+        )),
+        "{answer}"
+    );
+    assert!(
+        answer.contains("1 open conflict left in this file"),
+        "{answer}"
+    );
+    assert!(answer.contains("Nothing is staged"), "{answer}");
+    let written = fs::read_to_string(&file).unwrap();
+    assert!(
+        written.starts_with("func first() {\n    let x = 3\n}\n"),
+        "{written}"
+    );
+    assert_eq!(written.matches("<<<<<<<").count(), 1, "{written}");
+
+    let records = Store::open(&repo.cli(&repo.path()))
+        .unwrap()
+        .records("Sources/a.swift");
+    let record = &records[&ids[0]];
+    assert_eq!(record.by, "claude-code 2.1");
+    assert_eq!(record.pick, Some(CandidateKind::Theirs));
+    assert_eq!(record.text, "    let x = 3\n");
+    assert_eq!(record.reason, REASON);
+    assert_eq!(record.dropped, None);
+
+    let listed = text(
+        &mut server,
+        "conflicts",
+        json!({ "path": "Sources/a.swift" }),
+    );
+    assert!(
+        listed.contains("resolved by claude-code 2.1: theirs, not reviewed yet"),
+        "{listed}"
+    );
+    assert_eq!(
+        self::ids(&listed),
+        ids,
+        "the ids stay the same once one is resolved"
+    );
+
+    let answer = text(
+        &mut server,
+        "resolve",
+        json!({
+            "path": "Sources/a.swift",
+            "id": ids[1],
+            "text": "    let y = 4",
+            "reason": "Neither side: main set 2 and feature 3, the spec now says 4.",
+            "dropped": "Both values, 2 from main and 3 from feature.",
+        }),
+    );
+    assert!(answer.contains("Wrote its own text"), "{answer}");
+    assert!(answer.contains("The file parses."), "{answer}");
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        OURS.replace("let x = 2", "let x = 3")
+            .replace("let y = 2", "let y = 4")
+    );
+    let record = &Store::open(&repo.cli(&repo.path()))
+        .unwrap()
+        .records("Sources/a.swift")[&ids[1]];
+    assert_eq!(
+        (record.pick, record.text.as_str()),
+        (None, "    let y = 4\n")
+    );
+    assert_eq!(
+        record.dropped.as_deref(),
+        Some("Both values, 2 from main and 3 from feature.")
+    );
+
+    let overview = text(&mut server, "overview", json!({}));
+    assert!(
+        overview.contains("Sources/a.swift  to review in Scry: 0 of 2 reviewed"),
+        "{overview}"
+    );
+    let unmerged = Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args(["ls-files", "--unmerged", "--", "Sources/a.swift"])
+        .envs(repo.environment())
+        .output()
+        .unwrap();
+    assert!(
+        !unmerged.stdout.is_empty(),
+        "the file is still unmerged: not staged"
+    );
+}
+
+/// `resolve` refuses, writing nothing, a call without a reason or with a short one,
+/// both pick and text or neither, text without dropped, text with markers, a
+/// candidate the conflict does not offer, a stale id and a file that is not a
+/// conflicted text file; each answer says what to do.
+#[test]
+fn resolve_refuses_what_it_cannot_write() {
+    let repo = Repo::merge();
+    let mut server = connected(&repo);
+    let ids = ids(&text(
+        &mut server,
+        "conflicts",
+        json!({ "path": "Sources/a.swift" }),
+    ));
+    let file = repo.path().join("Sources/a.swift");
+    let before = fs::read_to_string(&file).unwrap();
+    let path = "Sources/a.swift";
+    let id = ids[0].as_str();
+    for (arguments, expected) in [
+        (
+            json!({ "path": path, "id": id, "pick": "theirs" }),
+            "reason is required",
+        ),
+        (
+            json!({ "path": path, "id": id, "pick": "theirs", "reason": "theirs" }),
+            "reason is required",
+        ),
+        (
+            json!({ "path": path, "id": id, "pick": "theirs", "text": "x", "reason": REASON }),
+            "not both",
+        ),
+        (
+            json!({ "path": path, "id": id, "reason": REASON }),
+            "Give pick",
+        ),
+        (
+            json!({ "path": path, "id": id, "pick": "mine", "reason": REASON }),
+            "is not a candidate",
+        ),
+        (
+            json!({ "path": path, "id": id, "text": "    let x = 4\n", "reason": REASON }),
+            "dropped is required",
+        ),
+        (
+            json!({ "path": path, "id": id, "text": "<<<<<<< a\nx\n=======\ny\n>>>>>>> b\n", "reason": REASON, "dropped": "nothing" }),
+            "holds conflict markers",
+        ),
+        (
+            json!({ "path": path, "id": id, "pick": "theirs-then-ours-closed", "reason": REASON }),
+            "Its candidates: ours",
+        ),
+        (
+            json!({ "path": path, "id": "c0000000", "pick": "theirs", "reason": REASON }),
+            "Its conflicts now",
+        ),
+        (
+            json!({ "path": "staged.txt", "id": id, "pick": "theirs", "reason": REASON }),
+            "is staged",
+        ),
+        (
+            json!({ "path": "package-lock.json", "id": id, "pick": "theirs", "reason": REASON }),
+            "settle it in Scry",
+        ),
+    ] {
+        let (answer, is_error) = call(&mut server, "resolve", arguments.clone());
+        assert!(is_error, "{arguments}: {answer}");
+        assert!(answer.contains(expected), "{arguments}: {answer}");
+    }
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+    assert!(
+        Store::open(&repo.cli(&repo.path()))
+            .unwrap()
+            .records(path)
+            .is_empty()
+    );
+}
+
+/// Own text takes the file's line breaks: a CRLF file stays CRLF.
+#[test]
+fn resolve_writes_the_file_s_line_breaks() {
+    let repo = Repo::new();
+    repo.commit(&[("notes.txt", "head\r\nbase\r\ntail\r\n")]);
+    repo.ok(&["switch", "--quiet", "-c", "feature"]);
+    repo.commit(&[("notes.txt", "head\r\ntheirs\r\ntail\r\n")]);
+    repo.ok(&["switch", "--quiet", "main"]);
+    repo.commit(&[("notes.txt", "head\r\nours\r\ntail\r\n")]);
+    assert!(!repo.git(&["merge", "--quiet", "feature"]));
+    let mut server = connected(&repo);
+    let ids = ids(&text(
+        &mut server,
+        "conflicts",
+        json!({ "path": "notes.txt" }),
+    ));
+    text(
+        &mut server,
+        "resolve",
+        json!({ "path": "notes.txt", "id": ids[0], "text": "ours\ntheirs", "reason": REASON, "dropped": "nothing" }),
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("notes.txt")).unwrap(),
+        "head\r\nours\r\ntheirs\r\ntail\r\n"
+    );
 }
 
 /// What is not a request the agent should get an answer to is answered by JSON-RPC's

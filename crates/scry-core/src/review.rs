@@ -272,6 +272,101 @@ pub fn session(
     ))
 }
 
+/// Why `write` wrote nothing.
+#[derive(Debug)]
+pub enum WriteError {
+    Load(LoadError),
+    /// The index lacks a side of the file: no text conflict to resolve.
+    NotConflicted,
+    /// The text around the conflicts changed: where each conflict starts
+    /// and ends cannot be told.
+    ChangedOutside,
+    /// No conflict with that id; the file's ids now.
+    NoSuchConflict(Vec<String>),
+    /// The text holds conflict markers.
+    Markers,
+    Io(std::path::PathBuf, std::io::Error),
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteError::Load(error) => write!(f, "{error}"),
+            WriteError::NotConflicted => write!(f, "git holds no text conflict for this file"),
+            WriteError::ChangedOutside => {
+                write!(
+                    f,
+                    "the text around the conflicts changed since git wrote it"
+                )
+            }
+            WriteError::NoSuchConflict(ids) => {
+                write!(f, "no such conflict; now: {}", ids.join(", "))
+            }
+            WriteError::Markers => write!(f, "the text holds conflict markers"),
+            WriteError::Io(path, error) => write!(f, "{}: {error}", path.display()),
+        }
+    }
+}
+
+impl From<LoadError> for WriteError {
+    fn from(error: LoadError) -> WriteError {
+        WriteError::Load(error)
+    }
+}
+
+/// Resolves conflict `id` of `path` (from the repository root, `git`
+/// running there) with `text`, a candidate's or of its own (empty removes
+/// the conflict's lines), writing that conflict's region of the file only:
+/// the text around it and the other conflicts, open or resolved, stay as
+/// they are. The text takes the file's line breaks and ends with one.
+/// Returns the region's text as written, what a `Record` keeps.
+pub fn write(
+    git: &dyn Git,
+    root: &Path,
+    path: &str,
+    id: &str,
+    text: &str,
+) -> Result<String, WriteError> {
+    let file = root.join(path);
+    let current = fs::read(&file).map_err(|error| LoadError::Io(file.clone(), error))?;
+    let current = String::from_utf8(current).map_err(|_| LoadError::NotText(file.clone()))?;
+    let marker_size = conflict::marker_size(git, Path::new(path));
+    let written = as_git_wrote(git, path, &file, marker_size, ("ours", "theirs"))?
+        .ok_or(WriteError::NotConflicted)?;
+    let laid = Laid::new(&written.text, &current, marker_size).map_err(LoadError::Parse)?;
+    let Some(index) = laid.analyses.iter().position(|analysis| analysis.id == id) else {
+        return Err(WriteError::NoSuchConflict(
+            laid.analyses
+                .iter()
+                .map(|analysis| analysis.id.clone())
+                .collect(),
+        ));
+    };
+    let holds_markers = conflict::parse_with_marker_size(text, marker_size)
+        .map_or(true, |segments| {
+            conflict::conflicts(&segments).next().is_some()
+        });
+    if holds_markers {
+        return Err(WriteError::Markers);
+    }
+    let mut text = text.replace("\r\n", "\n");
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if session::line_break(&current) == "\r\n" {
+        text = text.replace('\n', "\r\n");
+    }
+    let regions = laid.regions().ok_or(WriteError::ChangedOutside)?;
+    let (start, end) = regions[index];
+    let mut result = format!("{}{text}{}", &laid.text[..start], &laid.text[end..]);
+    if laid.added_break && result.ends_with('\n') {
+        // The file ended without a line break: it still does.
+        result.pop();
+    }
+    session::write_atomically(&file, &result).map_err(|error| WriteError::Io(file, error))?;
+    Ok(text)
+}
+
 /// A file as git writes it, and whether ours and theirs end with a line
 /// break.
 struct Written {
@@ -331,43 +426,19 @@ pub fn resolutions(
     current: &str,
     marker_size: usize,
 ) -> Result<FileReview, ParseError> {
-    let segments = conflict::parse_with_marker_size(written, marker_size)?;
-    let analyses = resolution::analyze(&segments);
-    // The common text before, between and after the conflicts; empty when
-    // the file starts or ends with one.
-    let mut commons = vec![String::new()];
-    for segment in &segments {
-        match segment {
-            Segment::Common(text) => commons.last_mut().unwrap().push_str(text),
-            Segment::Conflict(_) => commons.push(String::new()),
-        }
-    }
-    // git adds a line break to sides that had none at the end of the file;
-    // the file then ends without one, which is laid over git's text with it.
-    let added_break = !current.is_empty() && !current.ends_with('\n') && written.ends_with('\n');
-    let text = if added_break {
-        format!("{current}\n")
-    } else {
-        current.to_string()
-    };
-    let conflicts: Vec<_> = conflict::conflicts(&segments).cloned().collect();
-    let layout = Layout {
-        text: &text,
-        commons: &commons,
-        analyses: &analyses,
-        conflicts: &conflicts,
-        marker_size,
-    };
-    let mut failed = HashSet::new();
-    let found = layout.place(0, 0, &mut failed);
-    let reviews = analyses
+    let laid = Laid::new(written, current, marker_size)?;
+    let layout = laid.layout();
+    let found = laid.regions();
+    let text = &laid.text;
+    let reviews = laid
+        .analyses
         .iter()
         .enumerate()
         .map(|(index, analysis)| {
             let (line, resolution, region) = match &found {
                 Some(regions) => {
                     let (start, end) = regions[index];
-                    let shown = if added_break && end == text.len() {
+                    let shown = if laid.added_break && end == text.len() {
                         &current[start..]
                     } else {
                         &text[start..end]
@@ -397,6 +468,68 @@ pub fn resolutions(
         changed_outside: found.is_none(),
         ends_with_break: current.is_empty() || current.ends_with('\n'),
     })
+}
+
+/// The file as it is, ready to be laid over git's text with markers.
+struct Laid {
+    analyses: Vec<Analysis>,
+    conflicts: Vec<conflict::Conflict>,
+    /// The common text before, between and after the conflicts; empty
+    /// when the file starts or ends with one.
+    commons: Vec<String>,
+    /// The file, with the line break git adds when it lacks a final one.
+    text: String,
+    added_break: bool,
+    marker_size: usize,
+}
+
+impl Laid {
+    fn new(written: &str, current: &str, marker_size: usize) -> Result<Laid, ParseError> {
+        let segments = conflict::parse_with_marker_size(written, marker_size)?;
+        let analyses = resolution::analyze(&segments);
+        let mut commons = vec![String::new()];
+        for segment in &segments {
+            match segment {
+                Segment::Common(text) => commons.last_mut().unwrap().push_str(text),
+                Segment::Conflict(_) => commons.push(String::new()),
+            }
+        }
+        // git adds a line break to sides that had none at the end of the
+        // file; the file then ends without one, which is laid over git's
+        // text with it.
+        let added_break =
+            !current.is_empty() && !current.ends_with('\n') && written.ends_with('\n');
+        let text = if added_break {
+            format!("{current}\n")
+        } else {
+            current.to_string()
+        };
+        let conflicts = conflict::conflicts(&segments).cloned().collect();
+        Ok(Laid {
+            analyses,
+            conflicts,
+            commons,
+            text,
+            added_break,
+            marker_size,
+        })
+    }
+
+    fn layout(&self) -> Layout<'_> {
+        Layout {
+            text: &self.text,
+            commons: &self.commons,
+            analyses: &self.analyses,
+            conflicts: &self.conflicts,
+            marker_size: self.marker_size,
+        }
+    }
+
+    /// Each conflict's region in `text`, as byte ranges; `None` when the
+    /// text around the conflicts changed.
+    fn regions(&self) -> Option<Vec<(usize, usize)>> {
+        self.layout().place(0, 0, &mut HashSet::new())
+    }
 }
 
 /// The file laid over git's: `commons[k]` must start where conflict `k`'s

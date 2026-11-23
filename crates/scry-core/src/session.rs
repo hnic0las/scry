@@ -1243,7 +1243,7 @@ fn opening_lines(text: &str) -> Vec<usize> {
 }
 
 /// The line break most of `text` uses; `"\n"` for a file without any.
-fn line_break(text: &str) -> &'static str {
+pub(crate) fn line_break(text: &str) -> &'static str {
     let crlf = text.matches("\r\n").count();
     let lf = text.matches('\n').count() - crlf;
     if crlf > lf { "\r\n" } else { "\n" }
