@@ -119,12 +119,30 @@ final class MergeEditorViewModel {
         if narrow != isNarrow { isNarrow = narrow }
     }
 
-    /// The row to scroll to the top for a conflict: its lens row, or in
-    /// the stacked layout the row 4 above it, so the conflict sits a little
-    /// below the top of both areas with some context.
-    func scrollTarget(for conflict: Int) -> Int? {
+    /// Where to scroll for a conflict: a row, and whether it goes to the
+    /// middle of the view or to its top.
+    struct ScrollTarget: Equatable {
+        let row: Int
+        let centered: Bool
+    }
+
+    /// Where to scroll for a conflict, in a view `visibleRows` rows tall.
+    /// A conflict that fits (lens row and lines, with a row to spare above
+    /// and below) is centred on its middle row. A taller one starts at the
+    /// top: its lens row, or in the stacked layout the row 4 above it, so
+    /// its first lines come with some context in both areas.
+    func scrollTarget(for conflict: Int, visibleRows: Int) -> ScrollTarget? {
         guard let lens = lensRowIndex(of: conflict) else { return nil }
-        return layout == .stacked ? max(lens - 4, 0) : lens
+        let rows = model.rows
+        var last = lens
+        while last + 1 < rows.count, case .code(_, _, _, let owner) = rows[last + 1], owner.map(Int.init) == conflict {
+            last += 1
+        }
+        let span = last - lens + 1
+        if span + 2 <= visibleRows {
+            return ScrollTarget(row: lens + (span - 1) / 2, centered: true)
+        }
+        return ScrollTarget(row: layout == .stacked ? max(lens - 4, 0) : lens, centered: false)
     }
 
     // MARK: Headers

@@ -232,6 +232,8 @@ struct RootView: View {
         Group {
             if let editor = viewModel.editor {
                 MergeEditorView(viewModel: editor)
+                    // A new file starts a new view: its scroll state and opening on a conflict.
+                    .id(ObjectIdentifier(editor))
             } else if let opening = viewModel.opening {
                 OpeningView(fileName: opening)
             } else if let overview = viewModel.overview {

@@ -6,6 +6,10 @@ struct MergeEditorView: View {
     @State private var showInspector = true
     /// How far the three panes are scrolled sideways, shared by all rows.
     @State private var scroll: SideScroll
+    /// The rows list's height, to centre a conflict that fits in it.
+    @State private var listHeight: CGFloat = 0
+    /// The file opened on its focused conflict, once the list had a size.
+    @State private var openedOnConflict = false
 
     /// `scrollX` starts the panes scrolled sideways, for previews.
     init(viewModel: MergeEditorViewModel, scrollX: CGFloat = 0) {
@@ -151,11 +155,27 @@ struct MergeEditorView: View {
                     scroll.scroll(by: delta)
                 }
             }
-            .onChange(of: viewModel.currentConflict) { _, conflict in
-                if let row = viewModel.scrollTarget(for: conflict) {
-                    withAnimation { proxy.scrollTo(row, anchor: .top) }
-                }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                listHeight = height
+                guard !openedOnConflict, height > 0 else { return }
+                openedOnConflict = true
+                // After this layout pass, once the rows exist.
+                Task { @MainActor in scrollToConflict(viewModel.currentConflict, proxy: proxy, animated: false) }
             }
+            .onChange(of: viewModel.currentConflict) { _, conflict in
+                scrollToConflict(conflict, proxy: proxy, animated: true)
+            }
+        }
+    }
+
+    private func scrollToConflict(_ conflict: Int, proxy: ScrollViewProxy, animated: Bool) {
+        let visibleRows = Int(listHeight / Metrics.rowHeight)
+        guard let target = viewModel.scrollTarget(for: conflict, visibleRows: visibleRows) else { return }
+        let anchor: UnitPoint = target.centered ? .center : .top
+        if animated {
+            withAnimation { proxy.scrollTo(target.row, anchor: anchor) }
+        } else {
+            proxy.scrollTo(target.row, anchor: anchor)
         }
     }
 

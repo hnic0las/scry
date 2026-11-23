@@ -162,15 +162,42 @@ struct MergeEditorViewModelTests {
         #expect(editor.layout == .columns)
     }
 
-    /// Stacked, a conflict scrolls to 4 rows below the top, so its lines
-    /// come with some context in both areas; in columns, to its lens row.
-    @Test func stackedScrollsAConflictBelowTheTop() throws {
-        let editor = try ConflictFile(text: String(repeating: "let x = 0\n", count: 10) + ConflictFile.text).editor()
+    /// Ten lines, then a conflict of six lines on each side.
+    private static let tallConflict = String(repeating: "let x = 0\n", count: 10)
+        + "<<<<<<< HEAD\n" + (1...6).map { "let a\($0) = 1\n" }.joined()
+        + "=======\n" + (1...6).map { "let a\($0) = 2\n" }.joined()
+        + ">>>>>>> other\nlet z = 0\n"
+
+    /// A conflict that fits in the view, with a row to spare above and
+    /// below, is centred on its middle row, in both layouts.
+    @Test func centresAConflictThatFits() throws {
+        let editor = try ConflictFile(text: Self.tallConflict).editor()
         let last = editor.lensRows.count - 1
         let lens = try #require(editor.lensRowIndex(of: last))
-        #expect(editor.scrollTarget(for: last) == lens)
+        let span = 1 + editor.rows[(lens + 1)...].prefix { row in
+            if case .code(let code) = row { return code.conflict == last }
+            return false
+        }.count
+        #expect(span >= 7)
+        let middle = MergeEditorViewModel.ScrollTarget(row: lens + (span - 1) / 2, centered: true)
+        #expect(editor.scrollTarget(for: last, visibleRows: 40) == middle)
+        #expect(editor.scrollTarget(for: last, visibleRows: span + 2) == middle)
+        #expect(editor.scrollTarget(for: last, visibleRows: span + 1)?.centered == false)
         editor.setLayout(.stacked)
-        #expect(editor.scrollTarget(for: last) == lens - 4)
+        #expect(editor.scrollTarget(for: last, visibleRows: 40) == middle)
+    }
+
+    /// A conflict taller than the view starts at the top: its lens row in
+    /// columns; stacked, 4 rows above it, so its lines come with some
+    /// context in both areas.
+    @Test func startsATallConflictAtTheTop() throws {
+        let editor = try ConflictFile(text: Self.tallConflict).editor()
+        let last = editor.lensRows.count - 1
+        let lens = try #require(editor.lensRowIndex(of: last))
+        #expect(editor.scrollTarget(for: last, visibleRows: 3) == .init(row: lens, centered: false))
+        #expect(editor.scrollTarget(for: last, visibleRows: 0) == .init(row: lens, centered: false))
+        editor.setLayout(.stacked)
+        #expect(editor.scrollTarget(for: last, visibleRows: 3) == .init(row: lens - 4, centered: false))
     }
 
     /// The panes scroll as far as the widest line as drawn: tabs reach

@@ -23,6 +23,10 @@ struct StackedPanes: View {
     /// The row under the pointer, in either area: the twin line, tinted in
     /// both so the eye can jump between them.
     @State private var hovered: Int?
+    /// Each area's height, to centre a conflict that fits in both.
+    @State private var heights: [Area: CGFloat] = [:]
+    /// The file opened on its focused conflict, once both areas had a size.
+    @State private var openedOnConflict = false
 
     private typealias Area = StackedScrollSync.Area
 
@@ -66,17 +70,39 @@ struct StackedPanes: View {
             .frame(maxHeight: .infinity)
         }
         .onChange(of: viewModel.currentConflict) { _, conflict in
-            guard let row = viewModel.scrollTarget(for: conflict) else { return }
-            // One area scrolls; the other follows it frame by frame. Both
-            // scrolling at once pulled each other back short of the row.
-            sync.jump()
-            withAnimation {
-                switch sync.jumpArea {
-                case .top: top.scrollTo(id: row, anchor: .top)
-                case .bottom: bottom.scrollTo(id: row, anchor: .top)
-                }
+            scrollToConflict(conflict, animated: true)
+        }
+    }
+
+    /// Both areas share one offset, so a row sits as far from the top in
+    /// each: a conflict is centred in the shorter area, and shows a little
+    /// above the middle of the taller one.
+    private func scrollToConflict(_ conflict: Int, animated: Bool) {
+        let jumpHeight = heights[sync.jumpArea] ?? 0
+        let shorter = min(heights[.top] ?? 0, heights[.bottom] ?? 0)
+        let visibleRows = Int(shorter / Metrics.rowHeight)
+        guard let target = viewModel.scrollTarget(for: conflict, visibleRows: visibleRows) else { return }
+        let anchor: UnitPoint = target.centered && jumpHeight > 0
+            ? UnitPoint(x: 0, y: shorter / 2 / jumpHeight)
+            : .top
+        // One area scrolls; the other follows it frame by frame. Both
+        // scrolling at once pulled each other back short of the row.
+        sync.jump()
+        let move = {
+            switch sync.jumpArea {
+            case .top: top.scrollTo(id: target.row, anchor: anchor)
+            case .bottom: bottom.scrollTo(id: target.row, anchor: anchor)
             }
         }
+        if animated { withAnimation { move() } } else { move() }
+    }
+
+    private func measured(_ area: Area, height: CGFloat) {
+        heights[area] = height
+        guard !openedOnConflict, (heights[.top] ?? 0) > 0, (heights[.bottom] ?? 0) > 0 else { return }
+        openedOnConflict = true
+        // After this layout pass, once the rows exist.
+        Task { @MainActor in scrollToConflict(viewModel.currentConflict, animated: false) }
     }
 
     private func area(_ area: Area, widths: PaneWidths) -> some View {
@@ -117,6 +143,7 @@ struct StackedPanes: View {
             .scrollTargetLayout()
         }
         .scrollPosition(area == .top ? $top : $bottom)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { measured(area, height: $0) }
         .onScrollPhaseChange { _, phase in
             if phase == .interacting || phase == .tracking || phase == .decelerating {
                 sync.userScrolls(area)
