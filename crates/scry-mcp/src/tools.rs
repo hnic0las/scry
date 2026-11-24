@@ -3,8 +3,10 @@
 //! next. An answer the agent should correct its call from (a path that is
 //! not a conflicted file, a stale id) is an `Err`, still a sentence.
 //!
-//! Only `resolve` writes: one conflict's region of a conflicted text file,
-//! and its record under the git folder. Nothing touches the index.
+//! Only `resolve` writes in the repository: one conflict's region of a
+//! conflicted text file, and its record under the git folder. `explain`
+//! writes only under the git folder, the answer to an ask made in Scry.
+//! Nothing touches the index.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,7 +16,7 @@ use scry_core::git::GitCli;
 use scry_core::operation::Side;
 use scry_core::overview::{self, FileView, Overview, Snapshot};
 use scry_core::presentation;
-use scry_core::records::{Record, Store};
+use scry_core::records::{Answer, AskKind, Record, Store};
 use scry_core::resolution::CandidateKind;
 use scry_core::resolution::{Analysis, Candidate};
 use scry_core::review::{self, Fill, Resolver, WriteError};
@@ -31,6 +33,9 @@ pub const MAX_CONTEXT: usize = 100;
 pub const REASON_LENGTH: std::ops::RangeInclusive<usize> = 20..=600;
 /// The most `dropped` says, in characters.
 pub const MAX_DROPPED: usize = 600;
+/// An explanation's length, in characters: 2 to 4 sentences, a little
+/// more for a hard conflict, read in the inspector.
+pub const EXPLANATION_LENGTH: std::ops::RangeInclusive<usize> = 20..=1_200;
 /// The largest text `resolve` writes for one conflict, in characters, as
 /// the schema's `maxLength` counts them.
 pub const MAX_TEXT: usize = 100_000;
@@ -399,6 +404,46 @@ impl Tools {
         answer += &format!("\n{}", repo.read_back(&path, id, pick));
         answer += "\nNothing is staged: the user reviews each resolution in Scry (git scry).";
         Ok(answer)
+    }
+
+    /// Keeps `text`, the explanation of conflict `id` of `path` the user
+    /// asked for in Scry, as `by`'s answer, replacing an earlier one.
+    pub fn explain(
+        &mut self,
+        path: &str,
+        id: &str,
+        text: &str,
+        by: &str,
+    ) -> Result<String, String> {
+        let repo = self.repo()?;
+        let path = path.strip_prefix("./").unwrap_or(path);
+        let store = Store::open(&repo.git).map_err(|error| error.to_string())?;
+        let asked = store
+            .asks(path)
+            .get(id)
+            .is_some_and(|ask| ask.kind == AskKind::Explain);
+        if !asked {
+            return Err(format!(
+                "Nobody asked in Scry to explain conflict {id} of {path}, or the ask was taken back: explain only what git scry wait printed."
+            ));
+        }
+        store
+            .answer(
+                path,
+                Answer {
+                    conflict: id.to_string(),
+                    kind: AskKind::Explain,
+                    by: by.to_string(),
+                    text: text.trim().to_string(),
+                    at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |time| time.as_millis() as u64),
+                },
+            )
+            .map_err(|error| format!("The explanation could not be kept: {error}"))?;
+        Ok(format!(
+            "Kept your explanation of conflict {id} in {path}: Scry shows it to the user."
+        ))
     }
 
     /// The repository the server was started in, read again.

@@ -21,7 +21,7 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
 /// What the server tells the agent about itself when it connects.
-const INSTRUCTIONS: &str = "Scry's view of the merge, rebase, cherry-pick or revert in progress in this repository: start with overview, then conflicts(path), then conflict(path, id), and resolve(path, id, ...) to write a conflict's resolution with a reason. Conflict ids come from the content: they survive other conflicts being resolved. Prefer picking a candidate to writing text. Never stage, commit or continue the operation: the user reviews each resolution in Scry first.";
+const INSTRUCTIONS: &str = "Scry's view of the merge, rebase, cherry-pick or revert in progress in this repository: start with overview, then conflicts(path), then conflict(path, id), and resolve(path, id, ...) to write a conflict's resolution with a reason. When git scry wait prints \"Scry asks: explain <path> <id>\", read that conflict and answer with explain(path, id, text). Conflict ids come from the content: they survive other conflicts being resolved. Prefer picking a candidate to writing text. Never stage, commit or continue the operation: the user reviews each resolution in Scry first.";
 
 /// The candidates `resolve` can pick, as their ids.
 fn picks() -> Vec<&'static str> {
@@ -114,11 +114,17 @@ impl Server {
                 let by = self.client.as_deref().unwrap_or("an MCP client");
                 self.tools.resolve(&path, &id, resolution, by)
             }),
+            "explain" => text(&arguments, "path").and_then(|path| {
+                let id = text(&arguments, "id")?;
+                let explanation = explanation(&arguments)?;
+                let by = self.client.as_deref().unwrap_or("an MCP client");
+                self.tools.explain(&path, &id, &explanation, by)
+            }),
             _ => {
                 return Err((
                     INVALID_PARAMS,
                     format!(
-                        "Unknown tool {name}: the tools are overview, conflicts, conflict and resolve"
+                        "Unknown tool {name}: the tools are overview, conflicts, conflict, resolve and explain"
                     ),
                 ));
             }
@@ -251,6 +257,35 @@ fn definitions() -> Value {
                 "openWorldHint": false,
             },
         },
+        {
+            "name": "explain",
+            "title": "Explain a conflict",
+            "description": "Answers an ask the user made in Scry (git scry wait prints \"Scry asks: explain <path> <id>\"): what each side meant to do, the risk of each candidate, which one looks safe and why. Scry shows it beside the conflict. Writes nothing in the repository's files.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": path,
+                    "id": {
+                        "type": "string",
+                        "description": "The conflict's id, as the ask names it.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "minLength": tools::EXPLANATION_LENGTH.start(),
+                        "maxLength": tools::EXPLANATION_LENGTH.end(),
+                        "description": "2 to 4 sentences for the user, naming each side by its label from overview. Calling again replaces it.",
+                    },
+                },
+                "required": ["path", "id", "text"],
+                "additionalProperties": false,
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+            },
+        },
     ])
 }
 
@@ -313,6 +348,20 @@ fn one_line(text: &str) -> String {
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// `explain`'s text, its length checked.
+fn explanation(arguments: &Value) -> Result<String, String> {
+    let text = text(arguments, "text")?;
+    let length = text.trim().chars().count();
+    if !tools::EXPLANATION_LENGTH.contains(&length) {
+        return Err(format!(
+            "The explanation has {length} characters: give {} to {}.",
+            tools::EXPLANATION_LENGTH.start(),
+            tools::EXPLANATION_LENGTH.end()
+        ));
+    }
+    Ok(text)
 }
 
 /// `resolve`'s pick or text, reason and, with a text, what it leaves out.

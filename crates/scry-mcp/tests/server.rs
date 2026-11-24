@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use scry_core::git::GitCli;
-use scry_core::records::{Record, Store};
+use scry_core::records::{Ask, AskKind, Record, Store};
 use scry_core::resolution::CandidateKind;
 use scry_core::session;
 use scry_mcp::Server;
@@ -168,8 +168,8 @@ fn ids(listed: &str) -> Vec<String> {
 /// An agent connects as the protocol says: `initialize` agrees on a version (the
 /// client's when the server speaks it, else the newest it speaks, for the client to
 /// decide), the `initialized` notification gets no answer, and `tools/list` gives the
-/// three read-only tools then `resolve`, in a stable order with their required
-/// arguments. There is no prompt: Claude Code users get `/git-scry:resolve` from
+/// three read-only tools then `resolve` and `explain`, in a stable order with their
+/// required arguments. There is no prompt: Claude Code users get `/git-scry:resolve` from
 /// the plugin.
 #[test]
 fn an_agent_connects_and_lists_the_tools() {
@@ -208,9 +208,12 @@ fn an_agent_connects_and_lists_the_tools() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["overview", "conflicts", "conflict", "resolve"]);
+    assert_eq!(
+        names,
+        ["overview", "conflicts", "conflict", "resolve", "explain"]
+    );
     for tool in tools.as_array().unwrap() {
-        let read_only = tool["name"] != "resolve";
+        let read_only = tool["name"] != "resolve" && tool["name"] != "explain";
         assert_eq!(tool["annotations"]["readOnlyHint"], read_only, "{tool}");
         assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
     }
@@ -226,6 +229,16 @@ fn an_agent_connects_and_lists_the_tools() {
     assert_eq!(
         tools[3]["inputSchema"]["properties"]["pick"]["enum"],
         json!(PICKS)
+    );
+
+    assert_eq!(
+        tools[4]["inputSchema"]["required"],
+        json!(["path", "id", "text"])
+    );
+    assert_eq!(tools[4]["annotations"]["destructiveHint"], false);
+    assert_eq!(
+        tools[4]["inputSchema"]["properties"]["text"]["maxLength"],
+        1200
     );
 
     let prompts = ask(&mut server, "prompts/list", json!({}));
@@ -1108,4 +1121,87 @@ fn dropped_with_a_pick_is_kept_and_checked() {
         .unwrap()
         .records("Sources/a.swift");
     assert_eq!(records[&ids[0]].dropped.as_deref(), Some("main's x = 2"));
+}
+
+const EXPLANATION: &str =
+    "Main bumped x to 2, the feature to 3 for its timeout; theirs keeps the feature's intent.";
+
+/// `explain` answers an ask made in Scry: the answer is kept with who gave it, closes
+/// the ask, and a second call replaces it. Without an ask, or with one taken back, it
+/// is refused; a text too short or too long is refused; the repository's files are
+/// left as they were.
+#[test]
+fn explain_answers_an_ask_made_in_scry() {
+    let repo = Repo::merge();
+    let mut server = connected(&repo);
+    let listed = text(
+        &mut server,
+        "conflicts",
+        json!({ "path": "Sources/a.swift" }),
+    );
+    let id = ids(&listed)[0].clone();
+    let file = repo.path().join("Sources/a.swift");
+    let before = fs::read_to_string(&file).unwrap();
+    let arguments = json!({ "path": "Sources/a.swift", "id": id, "text": EXPLANATION });
+
+    let (answer, is_error) = call(&mut server, "explain", arguments.clone());
+    assert!(is_error);
+    assert!(
+        answer.starts_with("Nobody asked in Scry to explain"),
+        "{answer}"
+    );
+
+    let store = Store::open(&repo.cli(&repo.path())).unwrap();
+    store
+        .ask(
+            "Sources/a.swift",
+            Ask {
+                conflict: id.clone(),
+                kind: AskKind::Explain,
+                at: 1_000,
+            },
+        )
+        .unwrap();
+    assert_eq!(store.open_asks().len(), 1);
+    let answer = text(&mut server, "explain", arguments.clone());
+    assert_eq!(
+        answer,
+        format!(
+            "Kept your explanation of conflict {id} in Sources/a.swift: Scry shows it to the user."
+        )
+    );
+    let answers = store.answers("Sources/a.swift");
+    assert_eq!(answers[&id].text, EXPLANATION);
+    assert_eq!(answers[&id].by, "claude-code 2.1");
+    assert!(store.open_asks().is_empty());
+
+    let corrected = format!("  {EXPLANATION} Base had 1.\n");
+    text(
+        &mut server,
+        "explain",
+        json!({ "path": "./Sources/a.swift", "id": id, "text": corrected }),
+    );
+    assert_eq!(
+        store.answers("Sources/a.swift")[&id].text,
+        format!("{EXPLANATION} Base had 1.")
+    );
+    assert_eq!(store.answers("Sources/a.swift").len(), 1);
+
+    for (text, length) in [("Too short.", 10), (&*"x".repeat(1_201), 1_201)] {
+        let (answer, is_error) = call(
+            &mut server,
+            "explain",
+            json!({ "path": "Sources/a.swift", "id": id, "text": text }),
+        );
+        assert!(is_error);
+        assert_eq!(
+            answer,
+            format!("The explanation has {length} characters: give 20 to 1200.")
+        );
+    }
+
+    store.cancel_ask("Sources/a.swift", &id).unwrap();
+    let (answer, is_error) = call(&mut server, "explain", arguments);
+    assert!(is_error, "{answer}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
 }
