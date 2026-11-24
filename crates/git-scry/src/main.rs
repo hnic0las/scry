@@ -6,6 +6,7 @@
 mod highlight;
 mod open;
 mod resolve;
+mod wait;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -72,6 +73,23 @@ enum Command {
     /// Writes only the conflicts the agent resolves: it stages, continues
     /// and commits nothing.
     Mcp,
+    /// Wait for what the user asks an agent in Scry (Explain on a
+    /// conflict), and print each ask on one line:
+    ///
+    ///   Scry asks: explain src/Large.swift c12
+    ///
+    /// Scry's Claude Code plugin runs `wait --follow` in the background of
+    /// the user's session, which answers through `git-scry mcp`. While it
+    /// runs, Scry shows that an agent is watching.
+    ///
+    /// Asks already waiting are printed at once. Exits with 0 after
+    /// printing, 2 outside a repository; with --follow, keeps printing
+    /// until stopped, and stays silent outside a repository.
+    Wait {
+        /// Keep waiting after an ask, printing each new one.
+        #[arg(long)]
+        follow: bool,
+    },
     /// Print a file with the syntax highlighting the app shows.
     ///
     /// Exits with 0, or 2 when the file cannot be read or Scry has no
@@ -136,6 +154,7 @@ fn main() -> ExitCode {
         Command::Conflicts { file } => list_conflicts(&file),
         Command::Session => show_session(),
         Command::Mcp => serve_mcp(),
+        Command::Wait { follow } => wait::run(follow),
         Command::Highlight { file, spans } => highlight::run(&file, spans),
         Command::Resolve {
             base,

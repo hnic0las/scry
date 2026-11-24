@@ -5,6 +5,7 @@
 //! free of platform-specific code (vault decision 0003).
 
 pub mod agent_setup;
+pub mod asks;
 pub mod blame;
 pub mod catalog;
 pub mod cli_link;
