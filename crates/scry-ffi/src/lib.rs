@@ -1393,6 +1393,26 @@ fn overview_event(event: overview::OverviewEvent) -> OverviewEvent {
     }
 }
 
+/// Where Explain stands in a repository, for the overview.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ExplainOverview {
+    /// A Claude Code session watches the repository (`git scry wait`).
+    pub watching: bool,
+    /// The files with a conflict explained or waiting to be.
+    pub files: Vec<FileExplanations>,
+}
+
+/// How far Explain is on one file's conflicts.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FileExplanations {
+    /// From the repository root.
+    pub path: String,
+    /// Conflicts with an answer and no newer ask.
+    pub explained: u32,
+    /// Conflicts asked about and not answered since.
+    pub waiting: u32,
+}
+
 /// The operation overview of one repository (S1).
 #[derive(uniffi::Object)]
 pub struct RepositoryOverview {
@@ -1762,6 +1782,25 @@ impl RepositoryOverview {
                     base: change.base,
                     ours: change.ours,
                     theirs: change.theirs,
+                })
+                .collect(),
+        })
+    }
+
+    /// Where Explain stands in the repository, for the overview: read
+    /// often, while it shows, since the agent answers from outside.
+    pub fn explanations(&self) -> Result<ExplainOverview, ScryError> {
+        let store = Store::open(&self.git)?;
+        let git_dir = asks::git_dir(&self.git)?;
+        Ok(ExplainOverview {
+            watching: asks::watching(&git_dir, SystemTime::now()),
+            files: store
+                .explanations()
+                .into_iter()
+                .map(|(path, counts)| FileExplanations {
+                    path,
+                    explained: counts.explained as u32,
+                    waiting: counts.waiting as u32,
                 })
                 .collect(),
         })
@@ -2197,7 +2236,7 @@ mod tests {
         assert_eq!(state.asked_at, None);
         assert!(state.answer.is_some());
 
-        asks::beat(&dir.path().join(".git"), "1").unwrap();
+        let _presence = asks::Presence::start(&dir.path().join(".git"), "1").unwrap();
         assert!(document.explain_state(0).watching);
         assert!(matches!(
             document.ask_explain(5),
@@ -2213,6 +2252,35 @@ mod tests {
             document.ask_explain(0),
             Err(ScryError::Refused { .. })
         ));
+    }
+
+    /// The overview reads, per file, the conflicts explained and waiting,
+    /// and whether a session watches the repository.
+    #[test]
+    fn the_overview_counts_explanations() {
+        let (dir, path) = merge_with_a_conflict();
+        let overview = RepositoryOverview::open(dir.path().display().to_string()).unwrap();
+        assert_eq!(
+            overview.explanations().unwrap(),
+            ExplainOverview {
+                watching: false,
+                files: Vec::new()
+            }
+        );
+        let document = MergeDocument::open(path.display().to_string()).unwrap();
+        document.ask_explain(0).unwrap();
+        let _presence = asks::Presence::start(&dir.path().join(".git"), "1").unwrap();
+        assert_eq!(
+            overview.explanations().unwrap(),
+            ExplainOverview {
+                watching: true,
+                files: vec![FileExplanations {
+                    path: String::from("a.txt"),
+                    explained: 0,
+                    waiting: 1
+                }]
+            }
+        );
     }
 
     /// The Swift-facing API end to end: open a file, read its header and candidates, choose,

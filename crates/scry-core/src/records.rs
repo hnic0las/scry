@@ -10,7 +10,7 @@
 //! server and the app each write their own files, atomically, so neither
 //! needs a lock.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -89,6 +89,15 @@ pub struct OpenAsk {
     /// The file, from the repository root.
     pub path: String,
     pub ask: Ask,
+}
+
+/// How far Explain is on one file's conflicts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Explanations {
+    /// Conflicts with an answer and no newer ask.
+    pub explained: usize,
+    /// Conflicts asked about and not answered since.
+    pub waiting: usize,
 }
 
 /// The review of the operation's current stop.
@@ -229,6 +238,50 @@ impl Store {
             .collect();
         open_asks.sort_by(|a, b| (a.ask.at, &a.path).cmp(&(b.ask.at, &b.path)));
         open_asks
+    }
+
+    /// How many conflicts of each file were explained and how many wait
+    /// for their explanation, for the overview; files with neither are
+    /// left out. A conflict asked again waits: its last answer is not
+    /// counted.
+    pub fn explanations(&self) -> BTreeMap<String, Explanations> {
+        let Ok(entries) = fs::read_dir(&self.folder) else {
+            return BTreeMap::new();
+        };
+        let paths: BTreeSet<String> = entries
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                let name = name.strip_suffix(".json")?;
+                decoded(
+                    name.strip_prefix("asks-")
+                        .or_else(|| name.strip_prefix("answers-"))?,
+                )
+            })
+            .collect();
+        paths
+            .into_iter()
+            .filter_map(|path| {
+                let asks = self.asks(&path);
+                let answers = self.answers(&path);
+                let waiting = asks
+                    .values()
+                    .filter(|ask| {
+                        ask.kind == AskKind::Explain && open(ask, answers.get(&ask.conflict))
+                    })
+                    .count();
+                let explained = answers
+                    .values()
+                    .filter(|answer| {
+                        answer.kind == AskKind::Explain
+                            && !asks
+                                .get(&answer.conflict)
+                                .is_some_and(|ask| open(ask, Some(answer)))
+                    })
+                    .count();
+                let counts = Explanations { explained, waiting };
+                (explained + waiting > 0).then_some((path, counts))
+            })
+            .collect()
     }
 
     /// The folder this stop's files are in.
@@ -428,6 +481,54 @@ mod tests {
         assert!(!store.is_open("src/a b.swift", "c1"));
         store.cancel_ask("src/a b.swift", "c1").unwrap();
         assert_eq!(store.open_asks().len(), 1);
+    }
+
+    /// The overview counts, per file, the conflicts explained and those
+    /// waiting; a conflict asked again waits and its last answer is not
+    /// counted; a file with an answer alone is listed, one with nothing
+    /// left (asks taken back) is not.
+    #[test]
+    fn explanations_count_per_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path(), "stop");
+        assert!(store.explanations().is_empty());
+        store.ask("a b.txt", ask("c1", 1_000)).unwrap();
+        store.ask("a b.txt", ask("c2", 1_000)).unwrap();
+        store
+            .answer("a b.txt", answer("c1", "One.", 1_500))
+            .unwrap();
+        store
+            .answer("a b.txt", answer("c2", "Two.", 1_500))
+            .unwrap();
+        store.ask("a b.txt", ask("c2", 2_000)).unwrap();
+        store.ask("a b.txt", ask("c3", 2_000)).unwrap();
+        store
+            .answer("only.txt", answer("c1", "One.", 1_000))
+            .unwrap();
+        store.ask("gone.txt", ask("c1", 1_000)).unwrap();
+        store.cancel_ask("gone.txt", "c1").unwrap();
+        fs::write(store.folder().join("records-x.txt.json"), "{}").unwrap();
+        fs::write(store.folder().join("asks-%zz.json"), "{}").unwrap();
+        assert_eq!(
+            store.explanations(),
+            BTreeMap::from([
+                (
+                    String::from("a b.txt"),
+                    Explanations {
+                        explained: 1,
+                        waiting: 2
+                    }
+                ),
+                (
+                    String::from("only.txt"),
+                    Explanations {
+                        explained: 1,
+                        waiting: 0
+                    }
+                ),
+            ])
+        );
+        assert!(Store::at(dir.path(), "other").explanations().is_empty());
     }
 
     /// Every encoded path decodes back; a name it cannot have given does

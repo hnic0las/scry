@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-/// The Keyboard Shortcuts sheet (⌘/): every shortcut of `Shortcut.all`,
+/// The Keyboard Shortcuts sheet (⌘/): the shortcuts of `Shortcut.all`,
 /// the current screen's section first, filtered by a search.
 @MainActor
 @Observable
@@ -23,10 +23,17 @@ final class KeyboardShortcutsViewModel: Identifiable {
     var query = ""
 
     @ObservationIgnored private let current: Shortcut.Section?
+    /// Without Explain (Settings › Agent), ⌃⌘E does nothing and is not
+    /// listed.
+    @ObservationIgnored private let shortcuts: [Shortcut]
 
     /// `current` is the screen the sheet opens on: its section comes first.
-    init(current: Shortcut.Section?) {
+    /// `defaults` holds whether Explain is on.
+    init(current: Shortcut.Section?, defaults: UserDefaults = .standard) {
         self.current = current
+        shortcuts = InspectorViewModel.explainEnabled(in: defaults)
+            ? Shortcut.all
+            : Shortcut.all.filter { $0 != .explain }
     }
 
     var groups: [Group] {
@@ -37,7 +44,7 @@ final class KeyboardShortcutsViewModel: Identifiable {
             sections.insert(current, at: 0)
         }
         return sections.compactMap { section in
-            let rows = Shortcut.all
+            let rows = shortcuts
                 .filter { $0.section == section }
                 .filter { needle.isEmpty || Self.matches($0, needle) }
                 .map { Row(id: $0.id, title: $0.title, keys: $0.keys, note: $0.note) }

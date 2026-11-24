@@ -133,49 +133,104 @@ fn watchers(git_dir: &Path) -> PathBuf {
     git_dir.join("scry").join("watchers")
 }
 
-/// How long the file of a watcher that stopped beating is kept: one
-/// killed with its session cannot remove its own, the next beat does.
+/// How long the file of a watcher that stopped beating is kept when its
+/// lock cannot be tried; a file still locked is never removed, a watcher
+/// waking from sleep being still there.
 pub const FORGOTTEN_AFTER: Duration = Duration::from_secs(3600);
 
-/// Says the watcher `id` (its process id) is there, now: written when it
-/// starts and every [`BEAT`] while it runs. Removes the files of watchers
-/// silent for [`FORGOTTEN_AFTER`].
-pub fn beat(git_dir: &Path, id: &str) -> io::Result<()> {
-    let folder = watchers(git_dir);
-    fs::create_dir_all(&folder)?;
-    fs::write(folder.join(id), "")?;
-    let now = SystemTime::now();
-    for entry in fs::read_dir(&folder)?.flatten() {
-        let silent = entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .is_ok_and(|beat| {
-                now.duration_since(beat)
-                    .is_ok_and(|since| since > FORGOTTEN_AFTER)
-            });
-        if silent {
-            let _ = fs::remove_file(entry.path());
-        }
+/// A watcher's presence file, `<git dir>/scry/watchers/<id>`, which it
+/// holds locked while it runs: the system releases the lock when the
+/// process ends, even killed with its session, so a watcher gone is seen
+/// at once rather than after [`GONE_AFTER`]. Removed when dropped.
+pub struct Presence {
+    file: fs::File,
+    path: PathBuf,
+}
+
+impl Presence {
+    /// Says the watcher `id` (its process id) is there, now.
+    pub fn start(git_dir: &Path, id: &str) -> io::Result<Presence> {
+        let folder = watchers(git_dir);
+        fs::create_dir_all(&folder)?;
+        let path = folder.join(id);
+        // Truncated, so the file of an earlier process with the same id
+        // reads as new until it is locked.
+        let file = fs::File::options()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+        file.lock()?;
+        let presence = Presence { file, path };
+        presence.beat()?;
+        Ok(presence)
     }
-    Ok(())
+
+    /// Says the watcher is still there, every [`BEAT`] while it runs.
+    /// Removes the files of watchers that ended without removing theirs,
+    /// never one a running watcher holds.
+    pub fn beat(&self) -> io::Result<()> {
+        let now = SystemTime::now();
+        self.file.set_modified(now)?;
+        let Some(folder) = self.path.parent() else {
+            return Ok(());
+        };
+        for entry in fs::read_dir(folder)?.flatten() {
+            let path = entry.path();
+            if path == self.path {
+                continue;
+            }
+            let silent = |after: Duration| {
+                entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .is_ok_and(|beat| now.duration_since(beat).is_ok_and(|since| since > after))
+            };
+            let remove = match held(&path) {
+                Some(true) => false,
+                Some(false) => silent(GONE_AFTER),
+                None => silent(FORGOTTEN_AFTER),
+            };
+            if remove {
+                let _ = fs::remove_file(path);
+            }
+        }
+        Ok(())
+    }
 }
 
-/// Says the watcher `id` left.
-pub fn leave(git_dir: &Path, id: &str) {
-    let _ = fs::remove_file(watchers(git_dir).join(id));
+impl Drop for Presence {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
-/// Whether a watcher beat within [`GONE_AFTER`] of `now`.
+/// Whether a running watcher holds `path` locked; `None` when the lock
+/// cannot be tried, the beat alone then saying.
+fn held(path: &Path) -> Option<bool> {
+    let file = fs::File::open(path).ok()?;
+    match file.try_lock_shared() {
+        Ok(()) => Some(false),
+        Err(fs::TryLockError::WouldBlock) => Some(true),
+        Err(fs::TryLockError::Error(_)) => None,
+    }
+}
+
+/// Whether a watcher that beat within [`GONE_AFTER`] of `now` still runs.
 pub fn watching(git_dir: &Path, now: SystemTime) -> bool {
     let Ok(entries) = fs::read_dir(watchers(git_dir)) else {
         return false;
     };
-    entries
-        .filter_map(|entry| entry.ok()?.metadata().ok()?.modified().ok())
-        .any(|beat| {
-            now.duration_since(beat)
-                .map_or(true, |since| since <= GONE_AFTER)
-        })
+    entries.flatten().any(|entry| {
+        let recent = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|beat| {
+                now.duration_since(beat)
+                    .map_or(true, |since| since <= GONE_AFTER)
+            });
+        recent && held(&entry.path()) != Some(false)
+    })
 }
 
 #[cfg(test)]
@@ -217,14 +272,15 @@ mod tests {
         assert_eq!(line(&open("a\\b", "c1")), r#"Scry asks: explain "a\\b" c1"#);
     }
 
-    /// A watcher counts until three beats are missed; none, or only old
-    /// ones, is nobody watching; one that left is gone at once.
+    /// A watcher counts while it runs and beat within three beats; none,
+    /// or only old ones, is nobody watching; one that left, or whose
+    /// process ended without removing its file, is gone at once.
     #[test]
-    fn a_watcher_counts_while_it_beats() {
+    fn a_watcher_counts_while_it_runs_and_beats() {
         let dir = tempfile::tempdir().unwrap();
         let now = SystemTime::now();
         assert!(!watching(dir.path(), now));
-        beat(dir.path(), "42").unwrap();
+        let presence = Presence::start(dir.path(), "42").unwrap();
         assert!(watching(dir.path(), now));
         assert!(watching(
             dir.path(),
@@ -234,19 +290,26 @@ mod tests {
             dir.path(),
             now + GONE_AFTER + Duration::from_secs(2)
         ));
-        leave(dir.path(), "42");
+        drop(presence);
         assert!(!watching(dir.path(), now));
-        leave(dir.path(), "42");
+
+        // Ended without removing its file: the lock went with it.
+        fs::write(watchers(dir.path()).join("43"), "").unwrap();
+        assert!(!watching(dir.path(), now));
     }
 
-    /// A beat removes the file of a watcher silent for an hour, killed with
-    /// its session, and keeps one that beat recently.
+    /// A beat removes the file of a watcher that ended without removing it
+    /// once it is silent; it keeps those that beat recently, and those that
+    /// run even silent for an hour (the Mac slept).
     #[test]
-    fn a_beat_forgets_watchers_long_gone() {
+    fn a_beat_forgets_watchers_gone() {
         let dir = tempfile::tempdir().unwrap();
-        beat(dir.path(), "1").unwrap();
-        beat(dir.path(), "2").unwrap();
         let folder = watchers(dir.path());
+        let running = Presence::start(dir.path(), "1").unwrap();
+        let old_running = Presence::start(dir.path(), "2").unwrap();
+        fs::write(folder.join("3"), "").unwrap();
+        fs::write(folder.join("4"), "").unwrap();
+        fs::write(folder.join("5"), "").unwrap();
         let set = |id: &str, age: Duration| {
             fs::File::options()
                 .write(true)
@@ -255,11 +318,18 @@ mod tests {
                 .set_modified(SystemTime::now() - age)
                 .unwrap();
         };
-        set("1", FORGOTTEN_AFTER + Duration::from_secs(60));
-        set("2", FORGOTTEN_AFTER - Duration::from_secs(60));
-        beat(dir.path(), "3").unwrap();
-        assert!(!folder.join("1").exists());
+        set("2", FORGOTTEN_AFTER + Duration::from_secs(60));
+        set("3", GONE_AFTER + Duration::from_secs(5));
+        set("4", GONE_AFTER - Duration::from_secs(5));
+        set("5", FORGOTTEN_AFTER - Duration::from_secs(60));
+        running.beat().unwrap();
+        assert!(folder.join("1").exists());
         assert!(folder.join("2").exists());
-        assert!(folder.join("3").exists());
+        assert!(!folder.join("3").exists());
+        assert!(folder.join("4").exists());
+        assert!(!folder.join("5").exists());
+        drop(old_running);
+        drop(running);
+        assert!(!folder.join("1").exists() && !folder.join("2").exists());
     }
 }

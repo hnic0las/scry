@@ -87,16 +87,18 @@ final class InspectorViewModel {
     }
 
     /// Whether a Claude Code session watches the repository, for the
-    /// status bar; `nil` without Explain (off, or no repository).
+    /// status bar; `nil` outside a repository, or once Settings › Agent
+    /// found Scry's plugin off. Explain off, it stays: the agent can still
+    /// resolve (SPEC).
     var watching: Bool? {
-        guard Self.explainEnabled(in: defaults), let state = explainState, state.available else { return nil }
+        guard ClaudeCodePlugin.isOn(in: defaults), let state = explainState, state.available else { return nil }
         return state.watching
     }
 
-    /// Reads where Explain stands on the focused conflict again: the view
-    /// does it every second while the inspector shows.
+    /// Reads where Explain stands on the focused conflict again, and
+    /// whether a session watches: the editor does it every second.
     func refreshExplain() {
-        guard let conflict, Self.explainEnabled(in: defaults) else {
+        guard let conflict else {
             explainState = nil
             return
         }

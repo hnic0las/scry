@@ -86,6 +86,12 @@ struct OverviewView: View {
         .navigationTitle(viewModel.title)
         .navigationSubtitle(viewModel.hasOperation ? viewModel.snapshot?.operation ?? "" : "")
         .toolbar {
+            if let watching = viewModel.watching {
+                ToolbarItem {
+                    Presence(watching: watching)
+                        .padding(.horizontal, 6)
+                }
+            }
             ToolbarItem {
                 Button { viewModel.refresh() } label: {
                     Image(systemName: "arrow.clockwise")
@@ -93,6 +99,14 @@ struct OverviewView: View {
                 .help(Shortcut.refresh.help())
                 .keyboardShortcut(Shortcut.refresh)
                 .disabled(viewModel.isRunning)
+            }
+        }
+        // Claude Code answers Explain from outside the app, and comes and
+        // goes: read where it stands every two seconds.
+        .task {
+            while !Task.isCancelled {
+                await viewModel.refreshExplanations()
+                try? await Task.sleep(for: .seconds(2))
             }
         }
         // Back from a terminal or another tool: the files may have changed.
@@ -156,6 +170,12 @@ struct OverviewView: View {
                         Text(review)
                             .font(Metrics.caption)
                             .rowForeground(Theme.Surfaces.textSecondary, secondary: true)
+                    }
+                    if let explanation = row.explanation {
+                        Label(explanation, systemImage: Provenance.agent.symbol)
+                            .font(Metrics.caption)
+                            .rowForeground(Theme.Surfaces.textSecondary, secondary: true)
+                            .help("Claude Code explains these conflicts; open the file to read them")
                     }
                 }
             }

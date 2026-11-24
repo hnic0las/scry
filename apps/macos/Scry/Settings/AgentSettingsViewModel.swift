@@ -19,6 +19,23 @@ protocol AgentRegistrar {
     func allowTools() async throws
 }
 
+/// Whether Scry's plugin is on in Claude Code, as Settings › Agent last
+/// found it: the "Claude Code is here" indicator shows only then (SPEC),
+/// without running `claude` each time a window opens.
+enum ClaudeCodePlugin {
+    static let key = "claudeCodePluginOn"
+
+    /// On until Settings › Agent finds otherwise: a user who never opened
+    /// it sees "Claude Code is not here", which leads there.
+    static func isOn(in defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: key) as? Bool ?? true
+    }
+
+    static func remember(_ state: AgentSetupState, in defaults: UserDefaults) {
+        defaults.set(state == .installed, forKey: key)
+    }
+}
+
 /// Settings › Agent: the `git-scry` plugin in Claude Code, for every
 /// project.
 @MainActor
@@ -70,6 +87,7 @@ final class AgentSettingsViewModel {
         let setup = await registrar.setup()
         guard !Task.isCancelled else { return }
         self.setup = setup
+        ClaudeCodePlugin.remember(setup.state, in: defaults)
     }
 
     var isInstalled: Bool { setup?.state == .installed }

@@ -184,7 +184,8 @@ fn wait_prints_the_next_ask_and_exits() {
 }
 
 /// With `--follow`, each new ask is printed once, two asks made together
-/// both, an ask made again printed again; the watch goes on.
+/// both, an ask made again printed again; the watch goes on until killed,
+/// and is seen gone at once.
 #[test]
 fn follow_prints_every_new_ask() {
     let dir = tempfile::tempdir().unwrap();
@@ -226,8 +227,13 @@ fn follow_prints_every_new_ask() {
     );
     assert!(lines.recv_timeout(Duration::from_millis(1500)).is_err());
     assert!(child.try_wait().unwrap().is_none());
+    // Killed with its session, it cannot remove its file: Scry sees it
+    // gone at once all the same.
+    assert!(asks::watching(&git_dir(&repo), SystemTime::now()));
     child.kill().unwrap();
     child.wait().unwrap();
+    assert!(last_beat(&repo, &child).is_some());
+    assert!(!asks::watching(&git_dir(&repo), SystemTime::now()));
 }
 
 /// Outside a repository, `wait` fails, while `wait --follow` (the plugin's

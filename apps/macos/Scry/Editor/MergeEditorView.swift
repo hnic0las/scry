@@ -438,7 +438,7 @@ struct StatusBar: View {
     let written: Bool
     let language: String?
     /// Whether a Claude Code session watches the repository; `nil`
-    /// without Explain.
+    /// outside a repository or without Scry's plugin.
     var watching: Bool?
 
     var body: some View {

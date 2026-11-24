@@ -30,13 +30,19 @@ pub fn run(follow: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let id = std::process::id().to_string();
+    // Held while the watch runs, the system releasing its lock when the
+    // process ends, even killed with its session: Scry then sees nobody
+    // watching at once. Without it Scry says nobody watches, and the
+    // asks are printed all the same.
+    let presence = asks::Presence::start(&git_dir, &std::process::id().to_string()).ok();
     let mut watch = Watch::new(&git_dir);
-    let mut last_beat: Option<Instant> = None;
+    let mut last_beat = Instant::now();
     loop {
-        if last_beat.is_none_or(|at| at.elapsed() >= asks::BEAT) {
-            let _ = asks::beat(&git_dir, &id);
-            last_beat = Some(Instant::now());
+        if last_beat.elapsed() >= asks::BEAT {
+            if let Some(presence) = &presence {
+                let _ = presence.beat();
+            }
+            last_beat = Instant::now();
         }
         // git failing for a moment (a lock, the operation ending) is not
         // the end of the watch: the next poll reads the stop again.
@@ -45,7 +51,7 @@ pub fn run(follow: bool) -> ExitCode {
             println!("{}", asks::line(open));
         }
         if !follow && !new.is_empty() {
-            asks::leave(&git_dir, &id);
+            drop(presence);
             return ExitCode::SUCCESS;
         }
         sleep(POLL);

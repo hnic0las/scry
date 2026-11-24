@@ -97,7 +97,8 @@ struct ExplainTests {
     }
 
     /// Off in Settings › Agent, or for a file in no repository, there is no Explain:
-    /// no block, no ⌃⌘E. Turned on again, the answers come back.
+    /// no block, no ⌃⌘E, nothing in the ⌘/ sheet. Whether Claude Code is here still
+    /// shows: the agent can resolve. Turned on again, the answers come back.
     @Test func offOrOutsideARepositoryThereIsNoExplain() throws {
         let explainer = FakeExplainer()
         explainer.answer(0, "An answer kept while Explain was off.")
@@ -105,7 +106,11 @@ struct ExplainTests {
         defaults.set(false, forKey: InspectorViewModel.explainKey)
         let inspector = try inspector(explainer, defaults: defaults)
         inspector.refreshExplain()
-        #expect(inspector.explain == nil && inspector.watching == nil)
+        #expect(inspector.explain == nil && inspector.watching == true)
+        let sheet = KeyboardShortcutsViewModel(current: .editor, defaults: defaults)
+        #expect(!sheet.groups.flatMap(\.rows).contains { $0.id == Shortcut.explain.id })
+        #expect(KeyboardShortcutsViewModel(current: .editor, defaults: .isolated)
+            .groups.flatMap(\.rows).contains { $0.id == Shortcut.explain.id })
         #expect(!inspector.explainOn && !inspector.canExplain)
         inspector.askExplain()
         #expect(explainer.asks.isEmpty)
@@ -119,7 +124,21 @@ struct ExplainTests {
 
         explainer.available = false
         inspector.refreshExplain()
-        #expect(inspector.explain == nil)
+        #expect(inspector.explain == nil && inspector.watching == nil)
+    }
+
+    /// The indicator shows until Settings › Agent finds Scry's plugin off, and
+    /// again once it finds it on.
+    @Test func theIndicatorFollowsThePlugin() throws {
+        let defaults = UserDefaults.isolated
+        let inspector = try inspector(FakeExplainer(), defaults: defaults)
+        inspector.refreshExplain()
+        #expect(inspector.watching == true)
+        ClaudeCodePlugin.remember(.disabled, in: defaults)
+        #expect(inspector.watching == nil)
+        #expect(inspector.explain == .notAsked(watching: true))
+        ClaudeCodePlugin.remember(.installed, in: defaults)
+        #expect(inspector.watching == true)
     }
 
     /// A failing ask says why, and the next one clears it; a long answer opens and

@@ -17,6 +17,15 @@ protocol OverviewSource: Sendable {
     func lockfile(path: String) throws -> LockfileInfo
     func unusual(path: String) throws -> UnusualInfo
     func commitDiff(commit: String, path: String) throws -> [CommitDiffLine]
+    /// Where Explain stands: files explained or waiting, and whether a
+    /// Claude Code session watches.
+    func explanations() throws -> ExplainOverview
+}
+
+extension OverviewSource {
+    /// Nothing asked, nobody watching: previews and tests that do not
+    /// look at Explain.
+    func explanations() throws -> ExplainOverview { ExplainOverview(watching: false, files: []) }
 }
 
 extension RepositoryOverview: OverviewSource {}
@@ -118,6 +127,9 @@ final class OverviewViewModel {
         /// "1 of 2 reviewed", under the state of a file resolved outside
         /// Scry and not fully reviewed; `nil` for any other.
         let review: String?
+        /// "1 explained · 1 waiting", while one of its conflicts waits for
+        /// Claude Code's explanation (SPEC); `nil` otherwise.
+        let explanation: String?
         /// What staging it leaves unreviewed: "1 conflict not reviewed",
         /// "changed outside its conflicts"; `nil` when nothing.
         let notReviewed: String?
@@ -226,6 +238,8 @@ final class OverviewViewModel {
     @ObservationIgnored private let now: () -> Date
 
     @ObservationIgnored private let source: OverviewSource
+    /// Holds whether Explain and Scry's plugin are on (Settings › Agent).
+    @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let openFile: (OverviewFile) -> Void
     /// The git action or read in flight.
     @ObservationIgnored private var work: Task<Void, Never>?
@@ -237,10 +251,12 @@ final class OverviewViewModel {
         source: OverviewSource,
         snapshot: OverviewSnapshot? = nil,
         now: @escaping () -> Date = Date.init,
+        defaults: UserDefaults = .standard,
         openFile: @escaping (OverviewFile) -> Void
     ) {
         self.source = source
         self.now = now
+        self.defaults = defaults
         self.openFile = openFile
         do {
             show(try snapshot ?? source.snapshot())
@@ -540,6 +556,7 @@ final class OverviewViewModel {
                         review.changedOutside ? "Changed outside its conflicts"
                             : "\(review.reviewed) of \(review.total) reviewed"
                     } : nil,
+                    explanation: explanationLine(file.path),
                     notReviewed: Self.notReviewed(file),
                     canOpen: file.canOpen,
                     special: file.state == .staged ? nil : file.special,
@@ -549,6 +566,37 @@ final class OverviewViewModel {
                     absolutePath: file.absolutePath
                 )
             }
+    }
+
+    // MARK: Explain
+
+    /// Where Explain stands in the repository, as last read.
+    private(set) var explanations: ExplainOverview?
+
+    /// Reads it again: the view does it every two seconds while it shows,
+    /// since Claude Code answers from outside the app.
+    func refreshExplanations() async {
+        let source = source
+        explanations = try? await Task.detached { try source.explanations() }.value
+    }
+
+    /// "Claude Code is here" in the toolbar; `nil` before the first read,
+    /// or once Settings › Agent found Scry's plugin off.
+    var watching: Bool? {
+        guard ClaudeCodePlugin.isOn(in: defaults), let explanations else { return nil }
+        return explanations.watching
+    }
+
+    /// The line under a file's state while one of its conflicts waits for
+    /// an explanation; none with Explain off.
+    private func explanationLine(_ path: String) -> String? {
+        guard InspectorViewModel.explainEnabled(in: defaults),
+              let file = explanations?.files.first(where: { $0.path == path }),
+              file.waiting > 0
+        else { return nil }
+        return file.explained > 0
+            ? "\(file.explained) explained · \(file.waiting) waiting"
+            : "\(file.waiting) waiting"
     }
 
     // MARK: Row menu

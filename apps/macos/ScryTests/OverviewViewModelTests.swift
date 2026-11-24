@@ -13,6 +13,9 @@ final class FakeOverview: OverviewSource, @unchecked Sendable {
     var reword: RewordInfo?
     private(set) var actions: [OverviewAction] = []
     private(set) var reads = 0
+    var explained = ExplainOverview(watching: false, files: [])
+
+    func explanations() throws -> ExplainOverview { explained }
 
     init(files: [OverviewFile]) {
         self.files = files
@@ -184,6 +187,37 @@ struct OverviewViewModelTests {
         #expect(overview.progressDetail == "1 unresolved")
         #expect(overview.abortTitle == "Abort rebase…")
         #expect(overview.continueTitle == "Continue rebase")
+    }
+
+    /// While a conflict waits for Claude Code's explanation, its file says
+    /// so under its state, until nothing waits; the toolbar says whether a
+    /// session watches. Explain off, no line; the plugin off, no indicator.
+    @Test func explanationsShowWhileOneWaits() async {
+        let source = FakeOverview(files: [file("A.swift", .unresolved), file("B.swift", .unresolved)])
+        let defaults = UserDefaults.isolated
+        let overview = OverviewViewModel(source: source, defaults: defaults) { _ in }
+        #expect(overview.watching == nil)
+        #expect(overview.rows.allSatisfy { $0.explanation == nil })
+
+        source.explained = ExplainOverview(watching: true, files: [
+            FileExplanations(path: "A.swift", explained: 1, waiting: 1),
+            FileExplanations(path: "B.swift", explained: 2, waiting: 0),
+        ])
+        await overview.refreshExplanations()
+        #expect(overview.watching == true)
+        #expect(overview.rows.map(\.explanation) == ["1 explained · 1 waiting", nil])
+        source.explained = ExplainOverview(watching: false, files: [
+            FileExplanations(path: "A.swift", explained: 0, waiting: 2),
+        ])
+        await overview.refreshExplanations()
+        #expect(overview.watching == false)
+        #expect(overview.rows.map(\.explanation) == ["2 waiting", nil])
+
+        defaults.set(false, forKey: InspectorViewModel.explainKey)
+        #expect(overview.rows.allSatisfy { $0.explanation == nil })
+        #expect(overview.watching == false)
+        ClaudeCodePlugin.remember(.notInstalled, in: defaults)
+        #expect(overview.watching == nil)
     }
 
     /// Filters count each state and show only its files; a file at the
