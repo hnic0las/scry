@@ -89,6 +89,7 @@ final class RootViewModel {
         overview = OverviewViewModel(source: source, snapshot: snapshot) { [weak self] file in
             Task { await self?.open(fromOverview: file) }
         }
+        OpenRepository.path = overview?.snapshot?.root
     }
 
     func dismissOpenError() {
@@ -133,6 +134,7 @@ final class RootViewModel {
         do {
             editor = MergeEditorViewModel(model: try await load())
             openError = nil
+            if overview == nil { OpenRepository.path = path }
         } catch {
             openError = error.message
         }

@@ -155,12 +155,17 @@ impl Presence {
         let path = folder.join(id);
         // Truncated, so the file of an earlier process with the same id
         // reads as new until it is locked.
-        let file = fs::File::options()
+        let mut file = fs::File::options()
             .write(true)
             .create(true)
             .truncate(true)
             .open(&path)?;
         file.lock()?;
+        // When it started, in seconds since 1970, for Settings › Agent.
+        let started = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        io::Write::write_all(&mut file, started.to_string().as_bytes())?;
         let presence = Presence { file, path };
         presence.beat()?;
         Ok(presence)
@@ -218,19 +223,41 @@ fn held(path: &Path) -> Option<bool> {
 
 /// Whether a watcher that beat within [`GONE_AFTER`] of `now` still runs.
 pub fn watching(git_dir: &Path, now: SystemTime) -> bool {
+    !sessions(git_dir, now).is_empty()
+}
+
+/// When each watcher still running started, earliest first: one per
+/// Claude Code session watching the repository. A file that does not say
+/// counts from its last beat.
+pub fn sessions(git_dir: &Path, now: SystemTime) -> Vec<SystemTime> {
     let Ok(entries) = fs::read_dir(watchers(git_dir)) else {
-        return false;
+        return Vec::new();
     };
-    entries.flatten().any(|entry| {
-        let recent = entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .is_ok_and(|beat| {
-                now.duration_since(beat)
-                    .map_or(true, |since| since <= GONE_AFTER)
-            });
-        recent && held(&entry.path()) != Some(false)
-    })
+    let mut started: Vec<SystemTime> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let beat = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()?;
+            let recent = now
+                .duration_since(beat)
+                .map_or(true, |since| since <= GONE_AFTER);
+            if !recent || held(&entry.path()) == Some(false) {
+                return None;
+            }
+            let written = fs::read_to_string(entry.path()).ok();
+            Some(
+                written
+                    .and_then(|text| text.trim().parse::<u64>().ok())
+                    .map_or(beat, |seconds| {
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+                    }),
+            )
+        })
+        .collect();
+    started.sort();
+    started
 }
 
 #[cfg(test)]
@@ -291,8 +318,29 @@ mod tests {
             dir.path(),
             now + GONE_AFTER + Duration::from_secs(2)
         ));
+        let second = Presence::start(dir.path(), "44").unwrap();
+        let started = sessions(dir.path(), now);
+        assert_eq!(started.len(), 2);
+        let seconds = |time: SystemTime| {
+            time.duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        };
+        assert!(seconds(started[0]).abs_diff(seconds(now)) <= 1);
+        // A file that does not say when it started counts from its beat.
+        fs::write(watchers(dir.path()).join("44"), "").unwrap();
+        let earlier = SystemTime::now() - Duration::from_secs(20);
+        fs::File::options()
+            .write(true)
+            .open(watchers(dir.path()).join("44"))
+            .unwrap()
+            .set_modified(earlier)
+            .unwrap();
+        assert_eq!(sessions(dir.path(), now)[0], earlier);
+        drop(second);
         drop(presence);
         assert!(!watching(dir.path(), now));
+        assert!(sessions(dir.path(), now).is_empty());
 
         // Ended without removing its file: the lock went with it.
         fs::write(watchers(dir.path()).join("43"), "").unwrap();

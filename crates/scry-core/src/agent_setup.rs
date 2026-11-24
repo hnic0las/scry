@@ -177,6 +177,17 @@ pub fn parse_plugins(json: &str) -> Option<Plugin> {
     })
 }
 
+/// The version of Scry's plugin `claude plugin list --json` lists for the
+/// user; `None` when it lists none, or no version.
+pub fn parse_plugin_version(json: &str) -> Option<String> {
+    let plugins: Vec<serde_json::Value> = serde_json::from_str(json).ok()?;
+    plugins.iter().find(|plugin| {
+        plugin["id"].as_str() == Some(PLUGIN) && plugin["scope"].as_str() == Some("user")
+    })?["version"]
+        .as_str()
+        .map(String::from)
+}
+
 /// Whether `claude plugin marketplace list --json` lists [`MARKETPLACE`],
 /// from GitHub or, while developing, from a folder.
 pub fn parse_marketplaces(json: &str) -> bool {
@@ -300,9 +311,10 @@ pub fn remove_old_server_arguments() -> Vec<String> {
     arguments(&["mcp", "remove", "--scope", "user", OLD_SERVER])
 }
 
-/// The commands to copy into a terminal, which do what the button does.
+/// The commands to copy into a terminal, which do what the button does:
+/// one per line, which a shell runs in order.
 pub fn command() -> String {
-    format!("claude plugin marketplace add {MARKETPLACE_SOURCE} && claude plugin install {PLUGIN}")
+    format!("claude plugin marketplace add {MARKETPLACE_SOURCE}\nclaude plugin install {PLUGIN}")
 }
 
 #[cfg(test)]
@@ -352,6 +364,32 @@ mod tests {
             Some(Plugin::Missing)
         );
         assert_eq!(parse_plugins("Unknown command"), None);
+
+        assert_eq!(
+            parse_plugin_version(&list(&[
+                entry("git-scry@scry", "project", true),
+                entry("git-scry@scry", "user", false)
+            ]))
+            .as_deref(),
+            Some("0.2.0")
+        );
+        assert_eq!(
+            parse_plugin_version(r#"[{"id":"git-scry@scry","scope":"user"}]"#),
+            None
+        );
+        // Only the user's install of Scry's plugin: not another plugin, not
+        // Scry's for one project.
+        assert_eq!(
+            parse_plugin_version(
+                r#"[{"id":"saymock@saymock","scope":"user","version":"9.0"},
+                    {"id":"git-scry@scry","scope":"project","version":"8.0"},
+                    {"id":"git-scry@scry","scope":"user","version":"0.3.0"}]"#
+            )
+            .as_deref(),
+            Some("0.3.0")
+        );
+        assert_eq!(parse_plugin_version("[]"), None);
+        assert_eq!(parse_plugin_version("Unknown command"), None);
     }
 
     /// Scry's marketplace is found by its name, from GitHub or a folder.
@@ -534,7 +572,7 @@ mod tests {
         );
         assert_eq!(
             command(),
-            "claude plugin marketplace add hnic0las/scry && claude plugin install git-scry@scry"
+            "claude plugin marketplace add hnic0las/scry\nclaude plugin install git-scry@scry"
         );
     }
 }

@@ -200,7 +200,10 @@ struct ExplainTests {
     @Test func theSwitchIsKept() {
         let defaults = UserDefaults.isolated
         #expect(InspectorViewModel.explainEnabled(in: defaults))
-        let settings = AgentSettingsViewModel(registrar: NoRegistrar(), defaults: defaults)
+        let installed = AgentSetup(
+            state: .installed, command: "", oldServer: false, pluginScry: "/s", toolsAllowed: true, pluginVersion: "0.3.0"
+        )
+        let settings = AgentSettingsViewModel(registrar: NoRegistrar(), setup: installed, defaults: defaults)
         #expect(settings.explainEnabled)
         settings.explainEnabled = false
         #expect(!InspectorViewModel.explainEnabled(in: defaults))
@@ -212,10 +215,11 @@ struct ExplainTests {
 @MainActor
 private struct NoRegistrar: AgentRegistrar {
     func setup() async -> AgentSetup {
-        AgentSetup(state: .noClaude, command: "", oldServer: false, pluginScry: nil, toolsAllowed: false)
+        AgentSetup(state: .noClaude, command: "", oldServer: false, pluginScry: nil, toolsAllowed: false, pluginVersion: nil)
     }
     func install() async throws {}
     func uninstall() async throws {}
     func removeOldServer() async throws {}
     func allowTools() async throws {}
+    func watch(path: String) async -> RepositoryWatch? { nil }
 }

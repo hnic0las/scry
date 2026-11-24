@@ -40,6 +40,8 @@ pub struct AgentSetup {
     /// Claude Code's settings let the plugin's read tools and `explain`
     /// run without asking, so Explain is answered without a question.
     pub tools_allowed: bool,
+    /// The plugin's version, once installed.
+    pub plugin_version: Option<String>,
 }
 
 /// Listing, enabling or removing: `claude mcp get` starts the server to
@@ -84,10 +86,9 @@ impl Found {
             Some((output, result)) if result.succeeded => Ok(output),
             Some((output, result)) => Err(ScryError::Failed {
                 message: format!(
-                    "claude {} failed: {}",
+                    "claude {} failed:\n{}",
                     arguments.join(" "),
-                    first_line(&result.error)
-                        .unwrap_or_else(|| first_line(&output).unwrap_or_default())
+                    answer(&result.error).unwrap_or_else(|| answer(&output).unwrap_or_default())
                 ),
             }),
             None => Err(ScryError::Failed {
@@ -99,11 +100,14 @@ impl Found {
     /// Whether Claude Code has the plugin; `None` without `claude`, or when
     /// its answer cannot be read.
     fn plugin(&self) -> Option<Plugin> {
+        agent_setup::parse_plugins(&self.plugins()?)
+    }
+
+    /// `claude plugin list --json`, as it answered.
+    fn plugins(&self) -> Option<String> {
         self.claude.as_ref()?;
-        let output = self
-            .claude(&agent_setup::list_arguments(), CLAUDE_TIMEOUT)
-            .ok()?;
-        agent_setup::parse_plugins(&output)
+        self.claude(&agent_setup::list_arguments(), CLAUDE_TIMEOUT)
+            .ok()
     }
 
     /// Whether an earlier Scry's server is registered for every project.
@@ -170,7 +174,8 @@ impl Found {
 #[uniffi::export]
 pub fn agent_setup() -> AgentSetup {
     let found = Found::new();
-    let state = match agent_setup::state(found.plugin()) {
+    let plugins = found.plugins();
+    let state = match agent_setup::state(plugins.as_deref().and_then(agent_setup::parse_plugins)) {
         AgentState::NoClaude => AgentSetupState::NoClaude,
         AgentState::NotInstalled => AgentSetupState::NotInstalled,
         AgentState::Disabled => AgentSetupState::Disabled,
@@ -183,6 +188,9 @@ pub fn agent_setup() -> AgentSetup {
         plugin_scry: agent_setup::plugin_scry(&found.path, &found.home)
             .map(|path| path.display().to_string()),
         tools_allowed: found.tools_allowed(),
+        plugin_version: plugins
+            .as_deref()
+            .and_then(agent_setup::parse_plugin_version),
     }
 }
 
@@ -234,9 +242,98 @@ pub fn remove_old_server() -> Result<(), ScryError> {
     Found::new().remove_old_server()
 }
 
-fn first_line(text: &str) -> Option<String> {
-    text.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(String::from)
+/// What `claude` said, as Settings shows it: its lines, the empty ones at
+/// either end left out, at most 40 of them.
+fn answer(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.trim().lines().map(str::trim_end).take(40).collect();
+    let text = lines.join("\n");
+    (!text.is_empty()).then_some(text)
+}
+
+/// Who watches a repository, for Settings › Agent.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RepositoryWatch {
+    /// The repository's folder name.
+    pub name: String,
+    /// When each Claude Code session watching it started, in seconds
+    /// since 1970, earliest first.
+    pub sessions: Vec<u64>,
+}
+
+/// Who watches the repository holding `path`, a file or a folder in it;
+/// `None` outside a repository.
+#[uniffi::export]
+pub fn repository_watch(path: String) -> Option<RepositoryWatch> {
+    let path = PathBuf::from(path);
+    let folder = if path.is_dir() {
+        path
+    } else {
+        path.parent()?.to_path_buf()
+    };
+    let git = scry_core::git::GitCli::discover(folder);
+    let root = scry_core::overview::root(&git).ok()?;
+    let git_dir = scry_core::asks::git_dir(&git).ok()?;
+    Some(RepositoryWatch {
+        name: root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        sessions: scry_core::asks::sessions(&git_dir, std::time::SystemTime::now())
+            .into_iter()
+            .map(|started| {
+                started
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_secs())
+            })
+            .collect(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Claude's answer is shown whole, its blank ends trimmed, cut at 40
+    /// lines; an empty one is none.
+    #[test]
+    fn claude_s_answer_is_kept_whole() {
+        assert_eq!(
+            answer("\nError: failed to add marketplace\nfatal: unable to access  \n\n").as_deref(),
+            Some("Error: failed to add marketplace\nfatal: unable to access")
+        );
+        assert_eq!(answer(" \n "), None);
+        let long: String = (0..50).map(|line| format!("{line}\n")).collect();
+        assert_eq!(answer(&long).unwrap().lines().count(), 40);
+    }
+
+    /// A repository's watchers are read from a file or a folder in it;
+    /// outside a repository there is none.
+    #[test]
+    fn a_repository_s_watchers_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("offline-sync");
+        std::fs::create_dir(&repo).unwrap();
+        assert!(repository_watch(repo.display().to_string()).is_none());
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let watch = repository_watch(repo.display().to_string()).unwrap();
+        assert_eq!(watch.name, "offline-sync");
+        assert!(watch.sessions.is_empty());
+        let _presence = scry_core::asks::Presence::start(&repo.join(".git"), "1").unwrap();
+        let file = repo.join("a.txt");
+        std::fs::write(&file, "a").unwrap();
+        assert_eq!(
+            repository_watch(file.display().to_string())
+                .unwrap()
+                .sessions
+                .len(),
+            1
+        );
+    }
 }
