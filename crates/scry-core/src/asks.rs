@@ -58,9 +58,10 @@ type Signature = BTreeSet<(PathBuf, Option<SystemTime>, u64)>;
 pub struct Watch {
     reviews: PathBuf,
     seen: Option<Signature>,
-    /// The asks already printed, by stop folder, file, conflict and time:
-    /// the same ask is printed once, an ask made again is printed again.
-    printed: BTreeSet<(PathBuf, String, String, u64)>,
+    /// The asks already printed, by stop folder, file, kind, conflict and
+    /// time: the same ask is printed once, an ask made again is printed
+    /// again.
+    printed: BTreeSet<(PathBuf, String, &'static str, String, u64)>,
 }
 
 impl Watch {
@@ -99,6 +100,7 @@ impl Watch {
                 self.printed.insert((
                     folder.clone(),
                     open.path.clone(),
+                    open.ask.kind.word(),
                     open.ask.conflict.clone(),
                     open.ask.at,
                 ))
@@ -275,6 +277,29 @@ mod tests {
                 edited: None,
             },
         }
+    }
+
+    /// An Explain and a Resolve asked at once about one conflict are two
+    /// lines, each naming its kind.
+    #[test]
+    fn each_kind_of_ask_is_printed() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = crate::git::GitCli::new(repo.path().to_path_buf());
+        git.run(&["init", "--quiet"]).unwrap();
+        let store = Store::open(&git).unwrap();
+        for kind in [AskKind::Explain, AskKind::Resolve] {
+            let ask = Ask {
+                kind,
+                ..open("a.txt", "c1").ask
+            };
+            store.ask("a.txt", ask).unwrap();
+        }
+        let mut watch = Watch::new(&repo.path().join(".git"));
+        let lines: Vec<String> = watch.poll(&git).unwrap().iter().map(line).collect();
+        assert_eq!(
+            lines,
+            ["Scry asks: explain a.txt c1", "Scry asks: resolve a.txt c1"]
+        );
     }
 
     /// The line names the kind, the path and the conflict; a path the

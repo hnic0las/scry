@@ -5,18 +5,19 @@
 //!
 //! Only `resolve` writes in the repository: one conflict's region of a
 //! conflicted text file, and its record under the git folder. `explain`
-//! writes only under the git folder, the answer to an ask made in Scry.
-//! Nothing touches the index.
+//! and `suggest` write only under the git folder, the answer to an ask
+//! made in Scry. Nothing touches the index.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use scry_core::blame::{self, LineCommit};
+use scry_core::conflict;
 use scry_core::git::GitCli;
 use scry_core::operation::Side;
 use scry_core::overview::{self, FileView, Overview, Snapshot};
 use scry_core::presentation;
-use scry_core::records::{Answer, AskKind, Record, Store};
+use scry_core::records::{Answer, Ask, AskKind, Proposal, Record, Store};
 use scry_core::resolution::CandidateKind;
 use scry_core::resolution::{Analysis, Candidate};
 use scry_core::review::{self, Fill, Resolver, WriteError};
@@ -422,32 +423,13 @@ impl Tools {
         let repo = self.repo()?;
         let path = path.strip_prefix("./").unwrap_or(path);
         let store = Store::open(&repo.git).map_err(|error| error.to_string())?;
-        let Some(ask) = store
-            .asks(path)
-            .remove(id)
-            .filter(|ask| ask.kind == AskKind::Explain)
-        else {
+        let Some(ask) = store.asks(path, AskKind::Explain).remove(id) else {
             return Err(format!(
                 "Nobody asked in Scry to explain conflict {id} of {path}, or the ask was taken back: explain only what git scry wait printed."
             ));
         };
         store
-            .answer(
-                path,
-                Answer {
-                    conflict: id.to_string(),
-                    kind: AskKind::Explain,
-                    by: by.to_string(),
-                    text: text.trim().to_string(),
-                    at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |time| time.as_millis() as u64),
-                    // What the user wrote by hand when asking: the answer
-                    // is stale once the conflict holds other text.
-                    edited: ask.edited,
-                    failed,
-                },
-            )
+            .answer(path, answer(ask, text, failed, None, by))
             .map_err(|error| format!("The explanation could not be kept: {error}"))?;
         Ok(match failed {
             true => format!(
@@ -456,6 +438,63 @@ impl Tools {
             false => format!(
                 "Kept your explanation of conflict {id} in {path}: Scry shows it to the user."
             ),
+        })
+    }
+
+    /// Keeps a resolution of conflict `id` of `path` that the user asked
+    /// for in Scry (`Ok`: the resolution, or `Err`: why `by` could not
+    /// propose one), as `by`'s answer, replacing an earlier one. Nothing is
+    /// written to the file: the user accepts it in Scry, or not.
+    pub fn suggest(
+        &mut self,
+        path: &str,
+        id: &str,
+        suggestion: Result<Resolution, String>,
+        by: &str,
+    ) -> Result<String, String> {
+        let repo = self.repo()?;
+        let path = path.strip_prefix("./").unwrap_or(path);
+        let store = Store::open(&repo.git).map_err(|error| error.to_string())?;
+        let Some(ask) = store.asks(path, AskKind::Resolve).remove(id) else {
+            return Err(format!(
+                "Nobody asked in Scry to resolve conflict {id} of {path}, or the ask was taken back: suggest only for what git scry wait printed."
+            ));
+        };
+        let (answer, check) = match suggestion {
+            Err(reason) => (answer(ask, &reason, true, None, by), None),
+            Ok(resolution) => {
+                let (proposal, check) = repo.proposal(path, id, resolution.resolve)?;
+                let proposal = Proposal {
+                    dropped: resolution.dropped,
+                    ..proposal
+                };
+                let answer = answer(ask, &resolution.reason, false, Some(proposal), by);
+                (answer, Some(check))
+            }
+        };
+        store
+            .answer(path, answer)
+            .map_err(|error| format!("Nothing kept: {error}"))?;
+        Ok(match check {
+            None => format!(
+                "Kept why you could not propose a resolution for conflict {id} in {path}: Scry shows it to the user."
+            ),
+            Some(check) => {
+                let check = match check {
+                    ParseCheck::Parses => {
+                        String::from("The file parses with it, the other conflicts taken as ours.")
+                    }
+                    ParseCheck::DoesNotParse { line } => format!(
+                        "The file does not parse with it (error on line {line}, the other conflicts taken as ours): suggest again with a fix, or say why in the reason."
+                    ),
+                    ParseCheck::NotChecked => String::from(
+                        "Not checked by parsing: Scry has no grammar it trusts for this file.",
+                    ),
+                };
+                format!(
+                    "Kept your proposal for conflict {id} in {path}: Scry shows it to the user, who accepts it or not. Nothing is written to the file.\n{check}"
+                )
+            }
         })
     }
 
@@ -600,6 +639,47 @@ impl Repo {
         })
     }
 
+    /// `resolve` as a proposal for conflict `id` of `path`, checked as the
+    /// file would be with it: a candidate's text, or the agent's own with a
+    /// final line break, without markers.
+    fn proposal(
+        &self,
+        path: &str,
+        id: &str,
+        resolve: Resolve,
+    ) -> Result<(Proposal, ParseCheck), String> {
+        let path = self.text_file(path)?;
+        let session = self.session(&path)?;
+        let index = index_of(&session, id).ok_or_else(|| stale(self, &path, id, &session))?;
+        let (pick, text) = match resolve {
+            Resolve::Pick(kind) => match self.picked(&path, id, kind)? {
+                Fill::Pick { kind, text } => (Some(kind), text),
+                Fill::Text(text) => (None, text),
+            },
+            Resolve::Text(mut text) => {
+                let size = conflict::marker_size(&self.git, std::path::Path::new(&path));
+                if review::holds_markers(&text, size) {
+                    return Err(String::from(
+                        "Nothing kept: the text holds conflict markers. Give the conflict's resolved lines only.",
+                    ));
+                }
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                (None, text)
+            }
+        };
+        let check = session.check_text(index, &text);
+        Ok((
+            Proposal {
+                pick,
+                text,
+                dropped: None,
+            },
+            check,
+        ))
+    }
+
     /// Why `resolve` wrote nothing, for the agent to act on.
     fn refusal(&self, path: &str, id: &str, error: WriteError) -> String {
         match error {
@@ -689,6 +769,25 @@ impl Repo {
             ),
             false => format!("{path} has no conflict left."),
         }
+    }
+}
+
+/// The answer to `ask`: `text` (the explanation, the proposal's reason, or
+/// with `failed` the problem met), by `by`, now.
+fn answer(ask: Ask, text: &str, failed: bool, proposal: Option<Proposal>, by: &str) -> Answer {
+    Answer {
+        conflict: ask.conflict,
+        kind: ask.kind,
+        by: by.to_string(),
+        text: text.trim().to_string(),
+        at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |time| time.as_millis() as u64),
+        // What the user wrote by hand when asking: the answer is stale
+        // once the conflict holds other text.
+        edited: ask.edited,
+        failed,
+        proposal,
     }
 }
 

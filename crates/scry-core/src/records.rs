@@ -61,6 +61,8 @@ pub struct Record {
 pub enum AskKind {
     /// What each side meant, the risk of each candidate.
     Explain,
+    /// A resolution to propose, which the user accepts or not in Scry.
+    Resolve,
 }
 
 impl AskKind {
@@ -68,6 +70,17 @@ impl AskKind {
     pub fn word(self) -> &'static str {
         match self {
             AskKind::Explain => "explain",
+            AskKind::Resolve => "resolve",
+        }
+    }
+
+    /// Where an ask or answer of this kind about `conflict` is kept in its
+    /// file: an Explain under the conflict's id alone, as before Resolve
+    /// existed, so earlier files still read.
+    fn key(self, conflict: &str) -> String {
+        match self {
+            AskKind::Explain => conflict.to_string(),
+            AskKind::Resolve => format!("resolve:{conflict}"),
         }
     }
 }
@@ -106,6 +119,23 @@ pub struct Answer {
     /// The agent could not answer: `text` says why.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub failed: bool,
+    /// For a Resolve, the resolution proposed; `text` is then its reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<Proposal>,
+}
+
+/// A resolution an agent proposes for a conflict, written to no file until
+/// the user accepts it in Scry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Proposal {
+    /// The candidate proposed; `None` for text of the agent's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pick: Option<CandidateKind>,
+    /// The resolution's text: the candidate's, or the agent's own.
+    pub text: String,
+    /// What of either side the text leaves out, as the agent said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped: Option<String>,
 }
 
 /// A conflict the user resolved in Scry.
@@ -219,46 +249,63 @@ impl Store {
         self.write(&self.file("chosen", path), chosen)
     }
 
-    /// What the user asked about the conflicts of `path`, by conflict id:
-    /// the last ask of each conflict.
-    pub fn asks(&self, path: &str) -> BTreeMap<String, Ask> {
-        read(&self.file("asks", path)).unwrap_or_default()
+    /// What the user asked about the conflicts of `path`, of `kind`, by
+    /// conflict id: the last ask of each conflict.
+    pub fn asks(&self, path: &str, kind: AskKind) -> BTreeMap<String, Ask> {
+        of_kind(self.all_asks(path), kind, |ask| (ask.kind, &ask.conflict))
     }
 
-    /// Asks about a conflict of `path`, replacing an earlier ask about it.
+    /// Asks about a conflict of `path`, replacing an earlier ask of the
+    /// same kind about it.
     pub fn ask(&self, path: &str, ask: Ask) -> io::Result<()> {
-        let mut asks = self.asks(path);
-        asks.insert(ask.conflict.clone(), ask);
+        let mut asks = self.all_asks(path);
+        asks.insert(ask.kind.key(&ask.conflict), ask);
         self.write(&self.file("asks", path), &asks)
     }
 
-    /// Takes back the ask about a conflict of `path`, answered or not.
-    pub fn cancel_ask(&self, path: &str, conflict: &str) -> io::Result<()> {
-        let mut asks = self.asks(path);
-        if asks.remove(conflict).is_some() {
+    /// Takes back the ask of `kind` about a conflict of `path`, answered
+    /// or not.
+    pub fn cancel_ask(&self, path: &str, kind: AskKind, conflict: &str) -> io::Result<()> {
+        let mut asks = self.all_asks(path);
+        if asks.remove(&kind.key(conflict)).is_some() {
             self.write(&self.file("asks", path), &asks)?;
         }
         Ok(())
     }
 
-    /// The agents' answers about the conflicts of `path`, by conflict id.
-    pub fn answers(&self, path: &str) -> BTreeMap<String, Answer> {
-        read(&self.file("answers", path)).unwrap_or_default()
+    /// The agents' answers of `kind` about the conflicts of `path`, by
+    /// conflict id.
+    pub fn answers(&self, path: &str, kind: AskKind) -> BTreeMap<String, Answer> {
+        of_kind(self.all_answers(path), kind, |answer| {
+            (answer.kind, &answer.conflict)
+        })
     }
 
     /// Keeps an agent's answer about a conflict of `path`, replacing an
-    /// earlier one: an agent correcting itself leaves one answer.
+    /// earlier one of the same kind: an agent correcting itself leaves one
+    /// answer.
     pub fn answer(&self, path: &str, answer: Answer) -> io::Result<()> {
-        let mut answers = self.answers(path);
-        answers.insert(answer.conflict.clone(), answer);
+        let mut answers = self.all_answers(path);
+        answers.insert(answer.kind.key(&answer.conflict), answer);
         self.write(&self.file("answers", path), &answers)
     }
 
-    /// Whether the ask about `conflict` of `path` waits for its answer.
-    pub fn is_open(&self, path: &str, conflict: &str) -> bool {
-        self.asks(path)
+    /// Whether the ask of `kind` about `conflict` of `path` waits for its
+    /// answer.
+    pub fn is_open(&self, path: &str, kind: AskKind, conflict: &str) -> bool {
+        self.asks(path, kind)
             .get(conflict)
-            .is_some_and(|ask| open(ask, self.answers(path).get(conflict)))
+            .is_some_and(|ask| open(ask, self.answers(path, kind).get(conflict)))
+    }
+
+    /// Every ask of `path`, of every kind, as its file keeps them.
+    fn all_asks(&self, path: &str) -> BTreeMap<String, Ask> {
+        read(&self.file("asks", path)).unwrap_or_default()
+    }
+
+    /// Every answer about `path`, of every kind, as its file keeps them.
+    fn all_answers(&self, path: &str) -> BTreeMap<String, Answer> {
+        read(&self.file("answers", path)).unwrap_or_default()
     }
 
     /// Every ask of this stop still waiting for its answer, oldest first.
@@ -272,10 +319,10 @@ impl Store {
                 decoded(name.strip_prefix("asks-")?.strip_suffix(".json")?)
             })
             .flat_map(|path| {
-                let answers = self.answers(&path);
-                self.asks(&path)
+                let answers = self.all_answers(&path);
+                self.all_asks(&path)
                     .into_values()
-                    .filter(|ask| open(ask, answers.get(&ask.conflict)))
+                    .filter(|ask| open(ask, answers.get(&ask.kind.key(&ask.conflict))))
                     .map(|ask| OpenAsk {
                         path: path.clone(),
                         ask,
@@ -308,19 +355,16 @@ impl Store {
         paths
             .into_iter()
             .filter_map(|path| {
-                let asks = self.asks(&path);
-                let answers = self.answers(&path);
+                let asks = self.asks(&path, AskKind::Explain);
+                let answers = self.answers(&path, AskKind::Explain);
                 let waiting = asks
                     .values()
-                    .filter(|ask| {
-                        ask.kind == AskKind::Explain && open(ask, answers.get(&ask.conflict))
-                    })
+                    .filter(|ask| open(ask, answers.get(&ask.conflict)))
                     .count();
                 let explained = answers
                     .values()
                     .filter(|answer| {
-                        answer.kind == AskKind::Explain
-                            && !answer.failed
+                        !answer.failed
                             && !asks
                                 .get(&answer.conflict)
                                 .is_some_and(|ask| open(ask, Some(answer)))
@@ -366,6 +410,22 @@ impl Store {
         let text = serde_json::to_string_pretty(value).map_err(io::Error::other)?;
         write_atomically(file, &text)
     }
+}
+
+/// The entries of `kind` of a file of asks or answers, by conflict id.
+fn of_kind<T>(
+    entries: BTreeMap<String, T>,
+    kind: AskKind,
+    key: impl Fn(&T) -> (AskKind, &String),
+) -> BTreeMap<String, T> {
+    entries
+        .into_values()
+        .filter_map(|entry| {
+            let (its_kind, conflict) = key(&entry);
+            let conflict = conflict.clone();
+            (its_kind == kind).then_some((conflict, entry))
+        })
+        .collect()
 }
 
 fn read<T: for<'de> Deserialize<'de>>(file: &Path) -> Option<T> {
@@ -492,6 +552,7 @@ mod tests {
             at,
             edited: None,
             failed: false,
+            proposal: None,
         }
     }
 
@@ -505,8 +566,8 @@ mod tests {
         assert!(store.open_asks().is_empty());
         store.ask("src/a b.swift", ask("c1", 2_000)).unwrap();
         store.ask("b.txt", ask("c2", 1_000)).unwrap();
-        assert!(store.is_open("src/a b.swift", "c1"));
-        assert!(!store.is_open("src/a b.swift", "c9"));
+        assert!(store.is_open("src/a b.swift", AskKind::Explain, "c1"));
+        assert!(!store.is_open("src/a b.swift", AskKind::Explain, "c9"));
         let open = store.open_asks();
         assert_eq!(
             open.iter()
@@ -518,20 +579,75 @@ mod tests {
         store
             .answer("src/a b.swift", answer("c1", "First.", 2_000))
             .unwrap();
-        assert!(!store.is_open("src/a b.swift", "c1"));
+        assert!(!store.is_open("src/a b.swift", AskKind::Explain, "c1"));
         assert_eq!(store.open_asks().len(), 1);
         store
             .answer("src/a b.swift", answer("c1", "Second.", 2_500))
             .unwrap();
-        assert_eq!(store.answers("src/a b.swift")["c1"].text, "Second.");
-        assert_eq!(store.answers("src/a b.swift").len(), 1);
+        assert_eq!(
+            store.answers("src/a b.swift", AskKind::Explain)["c1"].text,
+            "Second."
+        );
+        assert_eq!(store.answers("src/a b.swift", AskKind::Explain).len(), 1);
 
         store.ask("src/a b.swift", ask("c1", 3_000)).unwrap();
-        assert!(store.is_open("src/a b.swift", "c1"));
-        store.cancel_ask("src/a b.swift", "c1").unwrap();
-        assert!(!store.is_open("src/a b.swift", "c1"));
-        store.cancel_ask("src/a b.swift", "c1").unwrap();
+        assert!(store.is_open("src/a b.swift", AskKind::Explain, "c1"));
+        store
+            .cancel_ask("src/a b.swift", AskKind::Explain, "c1")
+            .unwrap();
+        assert!(!store.is_open("src/a b.swift", AskKind::Explain, "c1"));
+        store
+            .cancel_ask("src/a b.swift", AskKind::Explain, "c1")
+            .unwrap();
         assert_eq!(store.open_asks().len(), 1);
+    }
+
+    /// An Explain and a Resolve on the same conflict are kept apart: each
+    /// opens, closes and is taken back on its own, and every open one is
+    /// found; a Resolve's answer keeps its proposal.
+    #[test]
+    fn explain_and_resolve_asks_are_kept_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path(), "stop");
+        let resolve = |at| Ask {
+            kind: AskKind::Resolve,
+            ..ask("c1", at)
+        };
+        store.ask("a.txt", ask("c1", 1_000)).unwrap();
+        store.ask("a.txt", resolve(1_000)).unwrap();
+        assert_eq!(store.asks("a.txt", AskKind::Resolve).len(), 1);
+        assert_eq!(store.open_asks().len(), 2);
+
+        let proposal = Proposal {
+            pick: Some(CandidateKind::Theirs),
+            text: String::from("theirs\n"),
+            dropped: None,
+        };
+        store
+            .answer(
+                "a.txt",
+                Answer {
+                    kind: AskKind::Resolve,
+                    proposal: Some(proposal.clone()),
+                    ..answer("c1", "Theirs keeps the rename.", 1_500)
+                },
+            )
+            .unwrap();
+        assert!(!store.is_open("a.txt", AskKind::Resolve, "c1"));
+        assert!(store.is_open("a.txt", AskKind::Explain, "c1"));
+        assert!(store.answers("a.txt", AskKind::Explain).is_empty());
+        assert_eq!(
+            store.answers("a.txt", AskKind::Resolve)["c1"].proposal,
+            Some(proposal)
+        );
+        let open = store.open_asks();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].ask.kind, AskKind::Explain);
+
+        store.cancel_ask("a.txt", AskKind::Resolve, "c1").unwrap();
+        assert!(store.asks("a.txt", AskKind::Resolve).is_empty());
+        assert_eq!(store.asks("a.txt", AskKind::Explain).len(), 1);
+        assert_eq!(store.explanations()["a.txt"].waiting, 1);
     }
 
     /// The overview counts, per file, the conflicts explained and those
@@ -566,7 +682,9 @@ mod tests {
             )
             .unwrap();
         store.ask("gone.txt", ask("c1", 1_000)).unwrap();
-        store.cancel_ask("gone.txt", "c1").unwrap();
+        store
+            .cancel_ask("gone.txt", AskKind::Explain, "c1")
+            .unwrap();
         fs::write(store.folder().join("records-x.txt.json"), "{}").unwrap();
         fs::write(store.folder().join("asks-%zz.json"), "{}").unwrap();
         assert_eq!(
@@ -603,9 +721,13 @@ mod tests {
             r#"{"conflict":"c1","kind":"explain","by":"a","text":"t","at":1}"#,
         )
         .unwrap();
-        assert!(!answer.failed && answer.edited.is_none());
+        assert!(!answer.failed && answer.edited.is_none() && answer.proposal.is_none());
         let written = serde_json::to_string(&answer).unwrap();
-        assert!(!written.contains("failed") && !written.contains("edited"));
+        assert!(
+            !written.contains("failed")
+                && !written.contains("edited")
+                && !written.contains("proposal")
+        );
         let failed = Answer {
             failed: true,
             edited: Some(String::from("x")),

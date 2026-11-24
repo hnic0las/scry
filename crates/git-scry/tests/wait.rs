@@ -176,6 +176,7 @@ fn wait_prints_the_next_ask_and_exits() {
                 at: 2_000,
                 edited: None,
                 failed: false,
+                proposal: None,
             },
         )
         .unwrap();

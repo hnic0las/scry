@@ -1081,6 +1081,13 @@ impl MergeSession {
         highlighter.lines_in(&parsed, start..start + draft.len())
     }
 
+    /// Whether the file parses with `text` resolving conflict `index`, the
+    /// other conflicts filled with ours, without choosing it: an agent's
+    /// proposal, checked before the user sees it.
+    pub fn check_text(&self, index: usize, text: &str) -> ParseCheck {
+        self.check_in_place(index, text)
+    }
+
     /// Whether the file parses with `text` resolving conflict `index` and
     /// the other conflicts filled with ours, as candidates are checked.
     fn check_in_place(&self, index: usize, text: &str) -> ParseCheck {

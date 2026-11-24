@@ -575,16 +575,18 @@ impl MergeDocument {
         let id = self.conflict_id(conflict);
         let open = id
             .as_deref()
-            .is_some_and(|id| asking.store.is_open(&asking.path, id));
+            .is_some_and(|id| asking.store.is_open(&asking.path, AskKind::Explain, id));
         let asked_at = id
             .as_deref()
-            .and_then(|id| asking.store.asks(&asking.path).remove(id))
-            .filter(|ask| open && ask.kind == AskKind::Explain)
+            .and_then(|id| asking.store.asks(&asking.path, AskKind::Explain).remove(id))
+            .filter(|_| open)
             .map(|ask| ask.at);
-        let answer = id
-            .as_deref()
-            .and_then(|id| asking.store.answers(&asking.path).remove(id))
-            .filter(|answer| answer.kind == AskKind::Explain);
+        let answer = id.as_deref().and_then(|id| {
+            asking
+                .store
+                .answers(&asking.path, AskKind::Explain)
+                .remove(id)
+        });
         let edited = self.edited(conflict);
         let stale = answer
             .as_ref()
@@ -632,7 +634,7 @@ impl MergeDocument {
         let (asking, id) = self.asking(conflict)?;
         asking
             .store
-            .cancel_ask(&asking.path, &id)
+            .cancel_ask(&asking.path, AskKind::Explain, &id)
             .map_err(|error| ScryError::Failed {
                 message: format!("The ask could not be taken back: {error}"),
             })
@@ -2278,6 +2280,7 @@ mod tests {
                         at,
                         edited: None,
                         failed: false,
+                        proposal: None,
                     },
                 )
                 .unwrap();
@@ -2344,6 +2347,7 @@ mod tests {
                         at: u64::MAX,
                         edited: edited.map(String::from),
                         failed,
+                        proposal: None,
                     },
                 )
                 .unwrap();
@@ -2358,7 +2362,7 @@ mod tests {
         };
 
         document.ask_explain(0).unwrap();
-        assert_eq!(store.asks("a.txt")[&id].edited, None);
+        assert_eq!(store.asks("a.txt", AskKind::Explain)[&id].edited, None);
         answer(None, false);
         assert!(!document.explain_state(0).stale);
         document
@@ -2372,7 +2376,10 @@ mod tests {
         assert!(document.explain_state(0).stale);
 
         document.ask_explain(0).unwrap();
-        assert_eq!(store.asks("a.txt")[&id].edited.as_deref(), Some("mine\n"));
+        assert_eq!(
+            store.asks("a.txt", AskKind::Explain)[&id].edited.as_deref(),
+            Some("mine\n")
+        );
         answer(Some("mine\n"), false);
         assert!(!document.explain_state(0).stale);
         edit("mine again\n");

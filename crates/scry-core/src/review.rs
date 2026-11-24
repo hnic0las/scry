@@ -528,7 +528,7 @@ fn has_conflicts(text: &str, marker_size: usize) -> bool {
 
 /// `text` holds conflict markers of `marker_size`, or ones that do not
 /// parse.
-fn holds_markers(text: &str, marker_size: usize) -> bool {
+pub fn holds_markers(text: &str, marker_size: usize) -> bool {
     conflict::parse_with_marker_size(text, marker_size).map_or(true, |segments| {
         conflict::conflicts(&segments).next().is_some()
     })

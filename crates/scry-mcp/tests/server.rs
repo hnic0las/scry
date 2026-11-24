@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use scry_core::git::GitCli;
-use scry_core::records::{Ask, AskKind, Record, Store};
+use scry_core::records::{Ask, AskKind, Proposal, Record, Store};
 use scry_core::resolution::CandidateKind;
 use scry_core::session;
 use scry_mcp::Server;
@@ -210,10 +210,18 @@ fn an_agent_connects_and_lists_the_tools() {
         .collect();
     assert_eq!(
         names,
-        ["overview", "conflicts", "conflict", "resolve", "explain"]
+        [
+            "overview",
+            "conflicts",
+            "conflict",
+            "resolve",
+            "explain",
+            "suggest"
+        ]
     );
     for tool in tools.as_array().unwrap() {
-        let read_only = tool["name"] != "resolve" && tool["name"] != "explain";
+        let read_only =
+            !["resolve", "explain", "suggest"].contains(&tool["name"].as_str().unwrap());
         assert_eq!(tool["annotations"]["readOnlyHint"], read_only, "{tool}");
         assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
     }
@@ -1171,7 +1179,7 @@ fn explain_answers_an_ask_made_in_scry() {
             "Kept your explanation of conflict {id} in Sources/a.swift: Scry shows it to the user."
         )
     );
-    let answers = store.answers("Sources/a.swift");
+    let answers = store.answers("Sources/a.swift", AskKind::Explain);
     assert_eq!(answers[&id].text, EXPLANATION);
     assert_eq!(answers[&id].by, "claude-code 2.1");
     assert!(store.open_asks().is_empty());
@@ -1183,10 +1191,10 @@ fn explain_answers_an_ask_made_in_scry() {
         json!({ "path": "./Sources/a.swift", "id": id, "text": corrected }),
     );
     assert_eq!(
-        store.answers("Sources/a.swift")[&id].text,
+        store.answers("Sources/a.swift", AskKind::Explain)[&id].text,
         format!("{EXPLANATION} Base had 1.")
     );
-    assert_eq!(store.answers("Sources/a.swift").len(), 1);
+    assert_eq!(store.answers("Sources/a.swift", AskKind::Explain).len(), 1);
 
     for (text, length) in [("Too short.", 10), (&*"x".repeat(1_201), 1_201)] {
         let (answer, is_error) = call(
@@ -1225,7 +1233,7 @@ fn explain_answers_an_ask_made_in_scry() {
             "Kept why you could not explain conflict {id} in Sources/a.swift: Scry shows it to the user."
         )
     );
-    let kept = &store.answers("Sources/a.swift")[&id];
+    let kept = &store.answers("Sources/a.swift", AskKind::Explain)[&id];
     assert!(kept.failed);
     assert_eq!(kept.text, "Gone.");
     assert_eq!(kept.edited.as_deref(), Some("let timeout = 45\n"));
@@ -1247,10 +1255,160 @@ fn explain_answers_an_ask_made_in_scry() {
         json!({ "path": "Sources/a.swift", "id": id, "text": EXPLANATION, "failed": null }),
     );
     assert!(!is_error);
-    assert!(!store.answers("Sources/a.swift")[&id].failed);
+    assert!(!store.answers("Sources/a.swift", AskKind::Explain)[&id].failed);
 
-    store.cancel_ask("Sources/a.swift", &id).unwrap();
+    store
+        .cancel_ask("Sources/a.swift", AskKind::Explain, &id)
+        .unwrap();
     let (answer, is_error) = call(&mut server, "explain", arguments);
     assert!(is_error, "{answer}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+}
+
+/// `suggest` answers a Resolve ask made in Scry with a proposal and its
+/// reason, and writes nothing to the file: a pick keeps the candidate's
+/// text, own text gets a final line break and what it drops, and the
+/// answer says whether the file parses with it. An Explain ask on the same
+/// conflict stays open. Without an ask, with markers, with a stale id, a
+/// text without `dropped`, or `failed` with a pick, it is refused; the
+/// agent can say why it could not propose one.
+#[test]
+fn suggest_proposes_a_resolution_without_writing_it() {
+    let repo = Repo::merge();
+    let mut server = connected(&repo);
+    let listed = text(
+        &mut server,
+        "conflicts",
+        json!({ "path": "Sources/a.swift" }),
+    );
+    let id = ids(&listed)[0].clone();
+    let file = repo.path().join("Sources/a.swift");
+    let before = fs::read_to_string(&file).unwrap();
+    let pick = json!({ "path": "Sources/a.swift", "id": id, "pick": "theirs", "reason": REASON });
+
+    let (answer, is_error) = call(&mut server, "suggest", pick.clone());
+    assert!(is_error);
+    assert!(
+        answer.starts_with("Nobody asked in Scry to resolve"),
+        "{answer}"
+    );
+
+    let store = Store::open(&repo.cli(&repo.path())).unwrap();
+    for kind in [AskKind::Explain, AskKind::Resolve] {
+        let ask = Ask {
+            conflict: id.clone(),
+            kind,
+            at: 1_000,
+            edited: None,
+        };
+        store.ask("Sources/a.swift", ask).unwrap();
+    }
+    let answer = text(&mut server, "suggest", pick);
+    assert_eq!(
+        answer,
+        format!(
+            "Kept your proposal for conflict {id} in Sources/a.swift: Scry shows it to the user, who accepts it or not. Nothing is written to the file.\nThe file parses with it, the other conflicts taken as ours."
+        )
+    );
+    let kept = &store.answers("Sources/a.swift", AskKind::Resolve)[&id];
+    assert_eq!(
+        kept.proposal,
+        Some(Proposal {
+            pick: Some(CandidateKind::Theirs),
+            text: String::from("    let x = 3\n"),
+            dropped: None,
+        })
+    );
+    assert_eq!(
+        (kept.text.as_str(), kept.by.as_str()),
+        (REASON, "claude-code 2.1")
+    );
+    assert!(store.is_open("Sources/a.swift", AskKind::Explain, &id));
+    assert!(!store.is_open("Sources/a.swift", AskKind::Resolve, &id));
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+
+    let own = |text: &str| json!({ "path": "Sources/a.swift", "id": id, "text": text, "reason": REASON, "dropped": "nothing" });
+    text(&mut server, "suggest", own("    let x = 5"));
+    let kept = &store.answers("Sources/a.swift", AskKind::Resolve)[&id];
+    assert_eq!(
+        kept.proposal,
+        Some(Proposal {
+            pick: None,
+            text: String::from("    let x = 5\n"),
+            dropped: Some(String::from("nothing")),
+        })
+    );
+    let answer = text(&mut server, "suggest", own("    let x = (\n"));
+    assert!(
+        answer.ends_with("suggest again with a fix, or say why in the reason."),
+        "{answer}"
+    );
+    let proposed = |text: &str| {
+        let answers = store.answers("Sources/a.swift", AskKind::Resolve);
+        assert_eq!(answers[&id].proposal.as_ref().unwrap().text, text);
+    };
+    proposed("    let x = (\n");
+    text(&mut server, "suggest", own(""));
+    proposed("");
+
+    let refused = |server: &mut Server, arguments: Value| {
+        let (answer, is_error) = call(server, "suggest", arguments);
+        assert!(is_error, "{answer}");
+        answer
+    };
+    assert_eq!(
+        refused(
+            &mut server,
+            own("<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n")
+        ),
+        "Nothing kept: the text holds conflict markers. Give the conflict's resolved lines only."
+    );
+    assert!(
+        refused(
+            &mut server,
+            json!({ "path": "Sources/a.swift", "id": id, "text": "x\n", "reason": REASON })
+        )
+        .contains("dropped is required")
+    );
+    assert!(refused(
+        &mut server,
+        json!({ "path": "Sources/a.swift", "id": id, "pick": "theirs", "reason": "Gone.", "failed": true })
+    )
+    .starts_with("With failed, give only the reason"));
+    assert!(refused(
+        &mut server,
+        json!({ "path": "Sources/a.swift", "id": id, "pick": "ours", "reason": REASON, "replace": true })
+    )
+    .starts_with("suggest has no argument replace"));
+    store
+        .ask(
+            "Sources/a.swift",
+            Ask {
+                conflict: String::from("c00000000"),
+                kind: AskKind::Resolve,
+                at: 1_000,
+                edited: None,
+            },
+        )
+        .unwrap();
+    assert!(refused(
+        &mut server,
+        json!({ "path": "Sources/a.swift", "id": "c00000000", "pick": "ours", "reason": REASON })
+    )
+    .starts_with("No conflict c00000000 in Sources/a.swift"));
+
+    let answer = text(
+        &mut server,
+        "suggest",
+        json!({ "path": "Sources/a.swift", "id": id, "reason": "Gone.", "failed": true }),
+    );
+    assert_eq!(
+        answer,
+        format!(
+            "Kept why you could not propose a resolution for conflict {id} in Sources/a.swift: Scry shows it to the user."
+        )
+    );
+    let kept = &store.answers("Sources/a.swift", AskKind::Resolve)[&id];
+    assert!(kept.failed && kept.proposal.is_none());
     assert_eq!(fs::read_to_string(&file).unwrap(), before);
 }

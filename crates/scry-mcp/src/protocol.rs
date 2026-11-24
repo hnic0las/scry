@@ -21,7 +21,7 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
 /// What the server tells the agent about itself when it connects.
-const INSTRUCTIONS: &str = "Scry's view of the merge, rebase, cherry-pick or revert in progress in this repository: start with overview, then conflicts(path), then conflict(path, id), and resolve(path, id, ...) to write a conflict's resolution with a reason. When git scry wait prints \"Scry asks: explain <path> <id>\", read that conflict and answer with explain(path, id, text), or explain(path, id, text, failed: true) saying why you could not. Conflict ids come from the content: they survive other conflicts being resolved. Prefer picking a candidate to writing text. Never stage, commit or continue the operation: the user reviews each resolution in Scry first.";
+const INSTRUCTIONS: &str = "Scry's view of the merge, rebase, cherry-pick or revert in progress in this repository: start with overview, then conflicts(path), then conflict(path, id), and resolve(path, id, ...) to write a conflict's resolution with a reason. When git scry wait prints \"Scry asks: explain <path> <id>\", read that conflict and answer with explain(path, id, text), or explain(path, id, text, failed: true) saying why you could not. When it prints \"Scry asks: resolve <path> <id>\", read that conflict and propose a resolution with suggest(path, id, pick or text, reason): nothing is written, the user accepts it in Scry or not; or suggest(path, id, reason, failed: true) saying why you could not. Conflict ids come from the content: they survive other conflicts being resolved. Prefer picking a candidate to writing text. Never stage, commit or continue the operation: the user reviews each resolution in Scry first.";
 
 /// The candidates `resolve` can pick, as their ids.
 fn picks() -> Vec<&'static str> {
@@ -120,11 +120,17 @@ impl Server {
                 let by = self.client.as_deref().unwrap_or("an MCP client");
                 self.tools.explain(&path, &id, &explanation, failed, by)
             }),
+            "suggest" => text(&arguments, "path").and_then(|path| {
+                let id = text(&arguments, "id")?;
+                let suggestion = suggestion(&arguments)?;
+                let by = self.client.as_deref().unwrap_or("an MCP client");
+                self.tools.suggest(&path, &id, suggestion, by)
+            }),
             _ => {
                 return Err((
                     INVALID_PARAMS,
                     format!(
-                        "Unknown tool {name}: the tools are overview, conflicts, conflict, resolve and explain"
+                        "Unknown tool {name}: the tools are overview, conflicts, conflict, resolve, explain and suggest"
                     ),
                 ));
             }
@@ -290,6 +296,54 @@ fn definitions() -> Value {
                 "openWorldHint": false,
             },
         },
+        {
+            "name": "suggest",
+            "title": "Propose a resolution",
+            "description": "Answers an ask the user made in Scry (git scry wait prints \"Scry asks: resolve <path> <id>\"): proposes one conflict's resolution with a reason. Nothing is written to the file: Scry shows the proposal beside the candidates, and the user accepts, edits or rejects it. Pick a candidate when one keeps what both sides meant; write text only when none does. Answers whether the file parses with it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": path,
+                    "id": {
+                        "type": "string",
+                        "description": "The conflict's id, as the ask names it.",
+                    },
+                    "pick": {
+                        "type": "string",
+                        "enum": picks(),
+                        "description": "A candidate the conflict offers, as conflicts lists them. Either pick or text.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "maxLength": tools::MAX_TEXT,
+                        "description": "The conflict's resolved lines, written by you, without markers; empty removes them. Either pick or text.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "minLength": tools::FAILURE_LENGTH.start(),
+                        "maxLength": tools::REASON_LENGTH.end(),
+                        "description": "For the user: which intent of each side is kept and why, in 1 to 3 sentences (20 characters at least), naming each side by its label from overview; with failed, why you could not propose one. Calling again replaces it.",
+                    },
+                    "dropped": {
+                        "type": "string",
+                        "maxLength": tools::MAX_DROPPED,
+                        "description": "With text: what of ours or theirs is not in it, or \"nothing\".",
+                    },
+                    "failed": {
+                        "type": "boolean",
+                        "description": "true when you could not propose a resolution (the conflict is gone, it could not be read), without pick or text: Scry shows reason as the problem you met.",
+                    },
+                },
+                "required": ["path", "id", "reason"],
+                "additionalProperties": false,
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+            },
+        },
     ])
 }
 
@@ -376,6 +430,39 @@ fn explanation(arguments: &Value) -> Result<(String, bool), String> {
         ));
     }
     Ok((text, failed))
+}
+
+/// `suggest`'s resolution (`resolve`'s arguments without `replace`), or
+/// with `failed` the reason the agent could not propose one.
+fn suggestion(arguments: &Value) -> Result<Result<Resolution, String>, String> {
+    match arguments.get("failed") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => resolution(arguments).map(Ok),
+        Some(Value::Bool(true)) => {
+            if ["pick", "text"]
+                .iter()
+                .any(|name| arguments.get(*name).is_some_and(|value| !value.is_null()))
+            {
+                return Err(String::from(
+                    "With failed, give only the reason: no pick or text.",
+                ));
+            }
+            let reason = arguments
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            let length = reason.chars().count();
+            if !tools::FAILURE_LENGTH.contains(&length) {
+                return Err(format!(
+                    "The reason has {length} characters: give {} to {}.",
+                    tools::FAILURE_LENGTH.start(),
+                    tools::FAILURE_LENGTH.end()
+                ));
+            }
+            Ok(Err(reason.to_string()))
+        }
+        Some(other) => Err(format!("failed must be true or false, not {other}.")),
+    }
 }
 
 /// `resolve`'s pick or text, reason and, with a text, what it leaves out.
