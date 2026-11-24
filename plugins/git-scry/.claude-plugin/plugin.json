@@ -1,7 +1,7 @@
 {
   "name": "git-scry",
-  "version": "0.3.0",
-  "description": "Resolve merge conflicts with Scry's facts and record why, for the user to review in Scry, and answer the explanations the user asks for in Scry. Needs the Scry app (0.2 or later).",
+  "version": "0.4.0",
+  "description": "Resolve merge conflicts with Scry's facts and record why, for the user to review in Scry, and answer what the user asks for in Scry: explanations and proposed resolutions. Needs the Scry app (0.2 or later).",
   "author": { "name": "hnic0las" },
   "homepage": "https://github.com/hnic0las/scry",
   "license": "GPL-3.0-or-later"

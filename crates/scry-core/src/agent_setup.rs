@@ -8,7 +8,7 @@
 //! plugin, and `claude mcp get` and `remove --scope user` for the server
 //! named `scry` an earlier Scry registered, on the user's click; and adding
 //! to Claude Code's user settings the rules that let the plugin's read
-//! tools and `explain` run without asking, so the background agent that
+//! tools, `explain` and `suggest` run without asking, so the background agent that
 //! answers Scry's asks is never stopped by a question (amended again on
 //! 2026-11-24). These only change Claude Code's configuration: nothing
 //! here starts a session, sends a prompt or reads credentials.
@@ -32,13 +32,14 @@ pub const MARKETPLACE_SOURCE: &str = "hnic0las/scry";
 pub const OLD_SERVER: &str = "scry";
 
 /// The plugin's tools allowed without asking: the three that read, and
-/// `explain`, which writes only Scry's answer under the git folder.
-/// `resolve`, which writes the user's files, still asks.
-pub const ALLOWED_TOOLS: [&str; 4] = [
+/// `explain` and `suggest`, which write only Scry's answers under the git
+/// folder. `resolve`, which writes the user's files, still asks.
+pub const ALLOWED_TOOLS: [&str; 5] = [
     "mcp__plugin_git-scry_scry__overview",
     "mcp__plugin_git-scry_scry__conflicts",
     "mcp__plugin_git-scry_scry__conflict",
     "mcp__plugin_git-scry_scry__explain",
+    "mcp__plugin_git-scry_scry__suggest",
 ];
 
 /// Rules that allow every tool of the plugin's server, which the user may
@@ -499,7 +500,8 @@ mod tests {
                 "mcp__plugin_git-scry_scry__conflict",
                 "mcp__plugin_git-scry_scry__overview",
                 "mcp__plugin_git-scry_scry__conflicts",
-                "mcp__plugin_git-scry_scry__explain"
+                "mcp__plugin_git-scry_scry__explain",
+                "mcp__plugin_git-scry_scry__suggest"
             ])
         );
         assert_eq!(value["permissions"]["deny"], serde_json::json!([]));

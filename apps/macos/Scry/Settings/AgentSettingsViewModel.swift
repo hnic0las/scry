@@ -14,7 +14,7 @@ protocol AgentRegistrar {
     func install() async throws
     func uninstall() async throws
     func removeOldServer() async throws
-    /// Allows the plugin's read tools and `explain` in Claude Code's user
+    /// Allows the plugin's read tools, `explain` and `suggest` in Claude Code's user
     /// settings.
     func allowTools() async throws
     /// Who watches the repository holding `path`; `nil` outside one.
