@@ -547,6 +547,12 @@ impl MergeDocument {
         };
         let git = GitCli::beside(&files.merged);
         let (session, operation) = session::open_mergetool(&git, &files).map_err(failed)?;
+        // What the user resolves is kept, so the file reopened from the
+        // overview shows it again.
+        let session = match in_repository(&files.merged) {
+            Some((root, relative)) => review::keeping(&GitCli::discover(root), &relative, session),
+            None => session,
+        };
         Ok(MergeDocument::new(&files.merged, session, &git, operation))
     }
 
@@ -2206,6 +2212,38 @@ mod tests {
         assert!(git(&["commit", "--quiet", "-am", "main"]));
         assert!(!git(&["merge", "--quiet", "feature"]));
         (dir, path)
+    }
+
+    /// Resolved through `git mergetool`, then opened again from the
+    /// overview, a file shows what the user chose, not a resolution from
+    /// outside Scry.
+    #[test]
+    fn a_mergetool_resolution_opens_again_as_chosen() {
+        let (dir, path) = merge_with_a_conflict();
+        let write = |name: &str, text: &str| {
+            let file = dir.path().join(name);
+            std::fs::write(&file, text).unwrap();
+            file.display().to_string()
+        };
+        let base = write("a_BASE_1.txt", "first\nbase\nlast\n");
+        let local = write("a_LOCAL_1.txt", "first\nmain\nlast\n");
+        let remote = write("a_REMOTE_1.txt", "first\nfeature\nlast\n");
+        let path = path.display().to_string();
+        let document = MergeDocument::open_mergetool(base, local, remote, path.clone()).unwrap();
+        document
+            .apply(Command::Edit {
+                conflict: 0,
+                text: String::from("mine\n"),
+            })
+            .unwrap();
+        save(&document, false).unwrap();
+
+        let conflict = MergeDocument::open(path).unwrap().conflicts().remove(0);
+        assert_eq!(
+            conflict.chosen.map(|chosen| chosen.id).as_deref(),
+            Some("edited")
+        );
+        assert!(conflict.outside.is_none());
     }
 
     /// Explain through the API the app uses: an ask waits until the agent

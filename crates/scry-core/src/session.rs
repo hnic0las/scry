@@ -20,7 +20,7 @@ use crate::highlight::{Highlighter, Span};
 use crate::indent::{self, Newline};
 use crate::operation::{self, Operation};
 use crate::presentation;
-use crate::records::{Record, Store};
+use crate::records::{Chosen, Record, Store};
 use crate::resolution::{self, Analysis, Candidate, CandidateKind};
 use crate::syntax::{Language, ParseCheck, ParsedFile};
 use crate::words::{self, LineChange};
@@ -671,6 +671,19 @@ impl MergeSession {
         self
     }
 
+    /// Names the conflicts `ids`, those of the file as git wrote it when
+    /// the session shows them rebuilt with their base: the ids the
+    /// agent, the CLI and a review of the file see. Kept as computed when
+    /// the counts differ.
+    fn with_ids(mut self, ids: Vec<String>) -> MergeSession {
+        if ids.len() == self.analyses.len() {
+            for (analysis, id) in self.analyses.iter_mut().zip(ids) {
+                analysis.id = id;
+            }
+        }
+        self
+    }
+
     /// Keeps the review in `store` after every change, for the file at
     /// `path` from the repository root.
     pub(crate) fn keeping_reviews(mut self, store: Store, path: String) -> MergeSession {
@@ -683,7 +696,54 @@ impl MergeSession {
     fn keep_reviews(&self) {
         if let Some((store, path)) = &self.reviews {
             let _ = store.set_reviewed(path, &self.reviewed());
+            let _ = store.set_chosen(path, &self.chosen());
         }
+    }
+
+    /// The conflicts the user resolved in Scry, with what they chose and
+    /// its text: opening the file again gives them back as chosen.
+    pub fn chosen(&self) -> BTreeMap<String, Chosen> {
+        (0..self.choices.len())
+            .filter_map(|index| {
+                let candidate = match self.choices[index].as_ref()? {
+                    Choice::Candidate(kind) => Some(*kind),
+                    Choice::Edited(_) => None,
+                    Choice::Outside(_) => return None,
+                };
+                let text = self.chosen_text(index)?.to_string();
+                Some((self.analyses[index].id.clone(), Chosen { candidate, text }))
+            })
+            .collect()
+    }
+
+    /// Gives back what the user chose in Scry (`chosen`) to the conflicts
+    /// still holding that text, in place of a resolution from outside.
+    pub(crate) fn restoring(mut self, chosen: &BTreeMap<String, Chosen>) -> MergeSession {
+        for index in 0..self.choices.len() {
+            let Some(Choice::Outside(outside)) = &self.choices[index] else {
+                continue;
+            };
+            let Some(chosen) = chosen
+                .get(&self.analyses[index].id)
+                .filter(|chosen| chosen.text == outside.text)
+            else {
+                continue;
+            };
+            let outside = outside.clone();
+            self.choices[index] = Some(match chosen.candidate {
+                Some(kind) => Choice::Candidate(kind),
+                None => Choice::Edited(Edit {
+                    text: outside.text.clone(),
+                    parse: outside.parse,
+                }),
+            });
+            // A candidate whose text is not that one any more stays as
+            // the file holds it.
+            if self.chosen_text(index) != Some(outside.text.as_str()) {
+                self.choices[index] = Some(Choice::Outside(outside));
+            }
+        }
+        self
     }
 
     /// The conflicts whose resolution the user reviewed, with its text:
@@ -1458,7 +1518,8 @@ pub fn load(
     Ok(
         MergeSession::from_segments(rebuilt, Origin::Rebuilt, merged, language)
             .with_file(files.merged.clone())
-            .with_final_breaks(ours_break, theirs_break),
+            .with_final_breaks(ours_break, theirs_break)
+            .with_ids(resolution::ids(&segments)),
     )
 }
 

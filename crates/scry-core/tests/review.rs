@@ -513,8 +513,9 @@ fn a_review_survives_opening_the_file_again() {
     assert!(!outside(&repo.open(), 0).reviewed);
 }
 
-/// A conflict the user resolves in Scry during the review is theirs, so
-/// reviewed: once saved, opening the file again does not ask about it.
+/// A conflict the user resolves in Scry during the review is theirs: once
+/// saved, opening the file again gives it back as their choice, not to
+/// review.
 #[test]
 fn a_choice_made_in_scry_counts_as_reviewed() {
     let repo = Repo::merged(BASE, OURS, THEIRS, "");
@@ -538,7 +539,15 @@ fn a_choice_made_in_scry_counts_as_reviewed() {
         "start\none theirs\nm1\nm2\nm3\nm4\nm5\ntwo ours\nend\n"
     );
     let session = repo.open();
-    assert!(outside(&session, 1).reviewed);
+    assert_eq!(
+        session.choice(1),
+        Some(&Choice::Candidate(CandidateKind::Ours))
+    );
+    assert!(
+        session
+            .reviewed()
+            .contains_key(&session.analysis_so_far(1).id)
+    );
     assert_eq!(session.status().unreviewed, 1);
 }
 
@@ -668,6 +677,52 @@ fn a_file_resolved_in_scry_needs_no_review() {
         .unwrap();
     assert_eq!(repo.row(), (State::Resolved, progress(2, 2, false)));
     assert_eq!(repo.opened().unreviewed(), 0);
+}
+
+/// Opened again, a file resolved in Scry shows what the user chose there,
+/// a candidate or text written by hand, not a resolution from outside; a
+/// conflict changed outside since is to review, as from outside.
+#[test]
+fn a_file_resolved_in_scry_opens_again_with_its_choices() {
+    let repo = Repo::merged(BASE, OURS, THEIRS, "");
+    let mut session = repo.opened();
+    let commands = [
+        SessionCommand::Choose {
+            conflict: 0,
+            candidate: CandidateKind::Theirs,
+        },
+        SessionCommand::Edit {
+            conflict: 1,
+            text: String::from("two by hand\n"),
+        },
+        SessionCommand::Save { overwrite: false },
+    ];
+    for command in commands {
+        session.apply(command).unwrap();
+    }
+
+    let again = repo.opened();
+    assert_eq!(
+        again.choice(0),
+        Some(&Choice::Candidate(CandidateKind::Theirs))
+    );
+    assert!(matches!(again.choice(1), Some(Choice::Edited(edit)) if edit.text == "two by hand\n"));
+    assert!((0..2).all(|index| {
+        again
+            .conflict_view(index, "main", "feature")
+            .outside
+            .is_none()
+    }));
+    assert!(!again.status().unwritten);
+
+    let text = fs::read_to_string(repo.file()).unwrap();
+    fs::write(repo.file(), text.replace("two by hand", "two changed")).unwrap();
+    let changed = repo.opened();
+    assert_eq!(
+        changed.choice(0),
+        Some(&Choice::Candidate(CandidateKind::Theirs))
+    );
+    assert!(matches!(changed.choice(1), Some(Choice::Outside(outside)) if !outside.reviewed));
 }
 
 /// A file resolved elsewhere needs review in the overview, with how many

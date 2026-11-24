@@ -165,19 +165,28 @@ pub struct Analysis {
     pub suggestion: Option<CandidateKind>,
 }
 
-/// Analyzes every conflict of a parsed file, in order.
-pub fn analyze(segments: &[Segment]) -> Vec<Analysis> {
-    let mut analyses: Vec<Analysis> = Vec::new();
-    for (index, conflict) in conflicts(segments).enumerate() {
+/// The id of every conflict of a parsed file, in order.
+pub fn ids(segments: &[Segment]) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for conflict in conflicts(segments) {
         let content_id = content_id(conflict);
         // Identical conflicts in one file share a content ID: number the
         // repeats.
         let mut id = content_id.clone();
         let mut repeat = 2;
-        while analyses.iter().any(|analysis| analysis.id == id) {
+        while ids.contains(&id) {
             id = format!("{content_id}-{repeat}");
             repeat += 1;
         }
+        ids.push(id);
+    }
+    ids
+}
+
+/// Analyzes every conflict of a parsed file, in order.
+pub fn analyze(segments: &[Segment]) -> Vec<Analysis> {
+    let mut analyses: Vec<Analysis> = Vec::new();
+    for ((index, conflict), id) in conflicts(segments).enumerate().zip(ids(segments)) {
         let kind = classify(conflict);
         analyses.push(Analysis {
             id,

@@ -108,6 +108,17 @@ pub struct Answer {
     pub failed: bool,
 }
 
+/// A conflict the user resolved in Scry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Chosen {
+    /// The candidate chosen; `None` for text written by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<CandidateKind>,
+    /// The resolution's text: a file holding other text since was changed
+    /// outside Scry.
+    pub text: String,
+}
+
 /// An ask still waiting for its answer, with the file it is about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenAsk {
@@ -195,6 +206,17 @@ impl Store {
     /// Replaces the reviewed conflicts of `path`.
     pub fn set_reviewed(&self, path: &str, reviewed: &BTreeMap<String, String>) -> io::Result<()> {
         self.write(&self.file("reviewed", path), reviewed)
+    }
+
+    /// What the user chose in Scry for the conflicts of `path`, by
+    /// conflict id: what opening the file again gives back.
+    pub fn chosen(&self, path: &str) -> BTreeMap<String, Chosen> {
+        read(&self.file("chosen", path)).unwrap_or_default()
+    }
+
+    /// Replaces what the user chose for the conflicts of `path`.
+    pub fn set_chosen(&self, path: &str, chosen: &BTreeMap<String, Chosen>) -> io::Result<()> {
+        self.write(&self.file("chosen", path), chosen)
     }
 
     /// What the user asked about the conflicts of `path`, by conflict id:

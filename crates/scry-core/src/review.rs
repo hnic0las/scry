@@ -124,10 +124,17 @@ pub fn opened(
         return Ok(session);
     }
     let session = session::open_file(beside, &root.join(path))?;
-    Ok(match Store::open(git) {
+    Ok(keeping(git, path, session))
+}
+
+/// Keeps what the user resolves in `session`, opened by `git mergetool` on
+/// `path` (from the repository root, `git` running there), as for a file
+/// the editor opens itself: opening the file again gives it back.
+pub fn keeping(git: &dyn Git, path: &str, session: MergeSession) -> MergeSession {
+    match Store::open(git) {
         Ok(store) => session.keeping_reviews(store, path.to_string()),
         Err(_) => session,
-    })
+    }
 }
 
 /// What was done to `path` (from the repository root), with `git` running
@@ -192,7 +199,9 @@ pub fn open(
     Ok(found.map(|session| {
         let session = session.with_file(file);
         match store {
-            Some(store) => session.keeping_reviews(store, path.to_string()),
+            Some(store) => session
+                .restoring(&store.chosen(path))
+                .keeping_reviews(store, path.to_string()),
             None => session,
         }
     }))
