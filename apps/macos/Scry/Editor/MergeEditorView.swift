@@ -65,7 +65,8 @@ struct MergeEditorView: View {
                     resolved: viewModel.resolvedSummary,
                     verification: viewModel.verification,
                     written: viewModel.written,
-                    language: viewModel.language
+                    language: viewModel.language,
+                    watching: viewModel.inspector.watching
                 )
             }
             .background(Theme.Surfaces.pane)
@@ -73,6 +74,15 @@ struct MergeEditorView: View {
                 Rectangle().fill(Theme.Surfaces.hairline).frame(width: 1)
                 InspectorView(viewModel: viewModel.inspector)
                     .frame(width: Metrics.inspectorWidth)
+            }
+        }
+        // The agent answers from outside the app: read where Explain stands
+        // on the focused conflict, and whether a session watches, every
+        // second, for the inspector and the status bar.
+        .task(id: viewModel.inspector.conflict?.id) {
+            while !Task.isCancelled {
+                viewModel.inspector.refreshExplain()
+                try? await Task.sleep(for: .seconds(1))
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
@@ -303,6 +313,15 @@ struct MergeEditorView: View {
                 .keyboardShortcut(Shortcut.takeBase)
             Button("Take none") { viewModel.take("neither") }
                 .keyboardShortcut(Shortcut.takeNone)
+            // ⌃⌘E asks Claude Code about the focused conflict, from
+            // anywhere in the editor: the inspector shows the answer.
+            Button("Explain the conflict") {
+                showInspector = true
+                viewModel.inspector.refreshExplain()
+                viewModel.inspector.askExplain()
+            }
+            .keyboardShortcut(Shortcut.explain)
+            .disabled(!viewModel.inspector.explainOn)
             // Disabled while editing, so ↩ types a line break. Undo and
             // Redo are the Edit menu's (`UndoCommands`).
             Button("Edit by hand") { viewModel.startEditing() }
@@ -418,12 +437,18 @@ struct StatusBar: View {
     let verification: MergeEditorViewModel.Verification
     let written: Bool
     let language: String?
+    /// Whether a Claude Code session watches the repository; `nil`
+    /// without Explain.
+    var watching: Bool?
 
     var body: some View {
         HStack(spacing: 16) {
             Text(resolved)
             verificationLabel
             Spacer()
+            if let watching {
+                Presence(watching: watching)
+            }
             if written {
                 Label("Written to disk", systemImage: "checkmark.circle")
                     .foregroundStyle(Theme.States.resolved)

@@ -2,7 +2,7 @@
 name: scry-explainer
 description: Explains one merge conflict the user asked about in Scry. Use when a line "Scry asks: explain <path> <id>" arrives from Scry's monitor; run it in the background.
 tools: mcp__plugin_git-scry_scry__overview, mcp__plugin_git-scry_scry__conflict, mcp__plugin_git-scry_scry__explain, Read, Grep
-model: haiku
+model: inherit
 ---
 
 You explain one merge conflict for the user, who asked in Scry. The prompt is a line "Scry asks: explain <path> <id>"; the path may be quoted as a JSON string.

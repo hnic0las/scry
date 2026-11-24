@@ -8,7 +8,9 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use scry_core::asks;
 use scry_core::blame;
 use scry_core::command::{self as core, CommandError};
 use scry_core::commit_changes;
@@ -20,6 +22,7 @@ use scry_core::operation;
 use scry_core::overview;
 use scry_core::presentation;
 use scry_core::rebase_plan;
+use scry_core::records::{Ask, AskKind, Store};
 use scry_core::resolution::CandidateKind;
 use scry_core::review;
 use scry_core::session::{self, MergeSession, MergetoolFiles};
@@ -433,10 +436,45 @@ pub enum Event {
     Saved,
 }
 
+/// An agent's explanation of a conflict, as the user asked in Scry.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct Explanation {
+    pub text: String,
+    /// The agent's name and version, as its MCP client gave them.
+    pub by: String,
+    /// Milliseconds since 1970.
+    pub at: u64,
+}
+
+/// Where Explain stands on one conflict.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ExplainState {
+    /// The file is in a repository, where asks are kept: without one,
+    /// there is no Explain.
+    pub available: bool,
+    /// When the user asked, in milliseconds since 1970, while the ask
+    /// waits for its answer.
+    pub asked_at: Option<u64>,
+    /// The last answer, kept while a new ask waits.
+    pub answer: Option<Explanation>,
+    /// A Claude Code session watches the repository (`git scry wait`).
+    pub watching: bool,
+}
+
+/// Where a document's asks are kept: its repository's store for the stop
+/// it was opened at.
+struct Asking {
+    store: Store,
+    /// The file, from the repository root.
+    path: String,
+    git_dir: PathBuf,
+}
+
 /// One conflicted file open in the app.
 #[derive(uniffi::Object)]
 pub struct MergeDocument {
     header: Header,
+    asking: Option<Asking>,
     /// Per conflict; computed once, since the sides never change.
     commits: Vec<blame::ConflictCommits>,
     // UniFFI shares the object with Swift behind an `Arc`, so methods take
@@ -507,6 +545,76 @@ impl MergeDocument {
 
     pub fn header(&self) -> Header {
         self.header.clone()
+    }
+
+    /// Where Explain stands on conflict `conflict`: read from the
+    /// repository each time, since the agent answers from outside.
+    pub fn explain_state(&self, conflict: u32) -> ExplainState {
+        let Some(asking) = &self.asking else {
+            return ExplainState {
+                available: false,
+                asked_at: None,
+                answer: None,
+                watching: false,
+            };
+        };
+        let id = self.conflict_id(conflict);
+        let open = id
+            .as_deref()
+            .is_some_and(|id| asking.store.is_open(&asking.path, id));
+        let asked_at = id
+            .as_deref()
+            .and_then(|id| asking.store.asks(&asking.path).remove(id))
+            .filter(|ask| open && ask.kind == AskKind::Explain)
+            .map(|ask| ask.at);
+        let answer = id
+            .as_deref()
+            .and_then(|id| asking.store.answers(&asking.path).remove(id))
+            .filter(|answer| answer.kind == AskKind::Explain)
+            .map(|answer| Explanation {
+                text: answer.text,
+                by: answer.by,
+                at: answer.at,
+            });
+        ExplainState {
+            available: true,
+            asked_at,
+            answer,
+            watching: asks::watching(&asking.git_dir, SystemTime::now()),
+        }
+    }
+
+    /// Asks the agent watching the repository to explain conflict
+    /// `conflict`, again when it was explained before.
+    pub fn ask_explain(&self, conflict: u32) -> Result<(), ScryError> {
+        let (asking, id) = self.asking(conflict)?;
+        let at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |time| time.as_millis() as u64);
+        asking
+            .store
+            .ask(
+                &asking.path,
+                Ask {
+                    conflict: id,
+                    kind: AskKind::Explain,
+                    at,
+                },
+            )
+            .map_err(|error| ScryError::Failed {
+                message: format!("The ask could not be kept: {error}"),
+            })
+    }
+
+    /// Takes back the ask about conflict `conflict`; its last answer stays.
+    pub fn cancel_explain(&self, conflict: u32) -> Result<(), ScryError> {
+        let (asking, id) = self.asking(conflict)?;
+        asking
+            .store
+            .cancel_ask(&asking.path, &id)
+            .map_err(|error| ScryError::Failed {
+                message: format!("The ask could not be taken back: {error}"),
+            })
     }
 
     /// `show_base` adds each conflict's base lines above its block.
@@ -617,11 +725,38 @@ impl MergeDocument {
             }
             _ => Vec::new(),
         };
+        let asking = in_repository(path).and_then(|(root, relative)| {
+            let git = GitCli::discover(root);
+            Some(Asking {
+                store: Store::open(&git).ok()?,
+                path: relative,
+                git_dir: asks::git_dir(&git).ok()?,
+            })
+        });
         Arc::new(MergeDocument {
             header,
+            asking,
             commits,
             session: Mutex::new(session),
         })
+    }
+
+    /// The id of conflict `index`, as the agent and the asks name it.
+    fn conflict_id(&self, index: u32) -> Option<String> {
+        let session = self.lock();
+        let index = index as usize;
+        (index < session.conflict_count()).then(|| session.analysis(index).id.clone())
+    }
+
+    /// Where asks are kept, and conflict `index`'s id.
+    fn asking(&self, index: u32) -> Result<(&Asking, String), ScryError> {
+        let asking = self.asking.as_ref().ok_or_else(|| ScryError::Refused {
+            message: String::from("Explain needs the file to be in a git repository."),
+        })?;
+        let id = self.conflict_id(index).ok_or_else(|| ScryError::Refused {
+            message: format!("There is no conflict {}.", index.saturating_add(1)),
+        })?;
+        Ok((asking, id))
     }
 
     fn lock(&self) -> MutexGuard<'_, MergeSession> {
@@ -1969,6 +2104,115 @@ mod tests {
             .unwrap();
         assert_eq!(document.status().unreviewed, 0);
         assert!(document.conflict(0).unwrap().outside.unwrap().reviewed);
+    }
+
+    /// A repository stopped on a merge with one conflict in `a.txt`.
+    fn merge_with_a_conflict() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args([
+                    "-c",
+                    "user.name=Scry Test",
+                    "-c",
+                    "user.email=test@example.com",
+                ])
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        let path = dir.path().join("a.txt");
+        assert!(git(&["init", "--quiet", "--initial-branch=main"]));
+        std::fs::write(&path, "first\nbase\nlast\n").unwrap();
+        assert!(git(&["add", "a.txt"]));
+        assert!(git(&["commit", "--quiet", "-m", "base"]));
+        assert!(git(&["switch", "--quiet", "-c", "feature"]));
+        std::fs::write(&path, "first\nfeature\nlast\n").unwrap();
+        assert!(git(&["commit", "--quiet", "-am", "feature"]));
+        assert!(git(&["switch", "--quiet", "main"]));
+        std::fs::write(&path, "first\nmain\nlast\n").unwrap();
+        assert!(git(&["commit", "--quiet", "-am", "main"]));
+        assert!(!git(&["merge", "--quiet", "feature"]));
+        (dir, path)
+    }
+
+    /// Explain through the API the app uses: an ask waits until the agent
+    /// answers in the repository's store; asked again, the answer stays
+    /// while the new ask waits; taken back, the answer stays; a watcher's
+    /// beat shows. Outside a repository there is no Explain.
+    #[test]
+    fn explain_asks_wait_for_the_agent_s_answer() {
+        let (dir, path) = merge_with_a_conflict();
+        let document = MergeDocument::open(path.display().to_string()).unwrap();
+        let state = document.explain_state(0);
+        assert!(state.available);
+        assert_eq!(
+            (state.asked_at, state.answer, state.watching),
+            (None, None, false)
+        );
+
+        document.ask_explain(0).unwrap();
+        let asked = document.explain_state(0).asked_at.expect("asked");
+        let git = GitCli::new(dir.path().to_path_buf());
+        let store = Store::open(&git).unwrap();
+        let id = document.conflicts()[0].id.clone();
+        let answer = |text: &str, at: u64| {
+            store
+                .answer(
+                    "a.txt",
+                    scry_core::records::Answer {
+                        conflict: id.clone(),
+                        kind: AskKind::Explain,
+                        by: String::from("claude-code 2.1"),
+                        text: text.to_string(),
+                        at,
+                    },
+                )
+                .unwrap();
+        };
+        answer("Main and feature changed the same line.", asked + 1);
+        let state = document.explain_state(0);
+        assert_eq!(state.asked_at, None);
+        assert_eq!(
+            state.answer,
+            Some(Explanation {
+                text: String::from("Main and feature changed the same line."),
+                by: String::from("claude-code 2.1"),
+                at: asked + 1,
+            })
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        document.ask_explain(0).unwrap();
+        let state = document.explain_state(0);
+        assert!(state.asked_at.is_some_and(|at| at > asked + 1));
+        assert!(state.answer.is_some());
+        document.cancel_explain(0).unwrap();
+        let state = document.explain_state(0);
+        assert_eq!(state.asked_at, None);
+        assert!(state.answer.is_some());
+
+        asks::beat(&dir.path().join(".git"), "1").unwrap();
+        assert!(document.explain_state(0).watching);
+        assert!(matches!(
+            document.ask_explain(5),
+            Err(ScryError::Refused { .. })
+        ));
+
+        let outside = tempfile::tempdir().unwrap();
+        let file = outside.path().join("b.txt");
+        std::fs::write(&file, "<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n").unwrap();
+        let document = MergeDocument::open(file.display().to_string()).unwrap();
+        assert!(!document.explain_state(0).available);
+        assert!(matches!(
+            document.ask_explain(0),
+            Err(ScryError::Refused { .. })
+        ));
     }
 
     /// The Swift-facing API end to end: open a file, read its header and candidates, choose,

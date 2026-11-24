@@ -48,6 +48,17 @@ struct InspectorView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(card)
 
+        if let explain = viewModel.explain {
+            ExplainBlock(
+                explain: explain,
+                expanded: viewModel.isExpanded,
+                error: viewModel.explainError,
+                ask: { viewModel.askExplain() },
+                cancel: { viewModel.cancelExplain() },
+                toggleExpanded: { viewModel.toggleExpanded() }
+            )
+        }
+
         if let review = viewModel.review {
             ReviewCard(
                 review: review,
@@ -111,6 +122,225 @@ struct InspectorView: View {
         RoundedRectangle(cornerRadius: Metrics.cardCornerRadius)
             .fill(Theme.Surfaces.pane)
             .stroke(Theme.Surfaces.hairline)
+    }
+}
+
+/// Explain: what the user's Claude Code said about the conflict, asked
+/// from here and answered in the background of their session (SPEC:
+/// "Explain (answered by the user's Claude Code)"). Read-only: nothing in
+/// it changes the result.
+struct ExplainBlock: View {
+    let explain: InspectorViewModel.Explain
+    let expanded: Bool
+    let error: String?
+    let ask: () -> Void
+    let cancel: () -> Void
+    let toggleExpanded: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            switch explain {
+            case .notAsked(let watching):
+                notAsked(watching: watching)
+            case .waiting(let seconds, let previous):
+                box(strip: .dashed) {
+                    HStack {
+                        ProgressView().controlSize(.small)
+                        Text("Asked Claude Code…").font(Metrics.headline)
+                        Spacer()
+                        Text("\(seconds) s")
+                            .font(Metrics.callout)
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.Surfaces.textSecondary)
+                    }
+                    detail("A helper answers in the background of your session. Usually 5 to 20 seconds.")
+                    Button("Cancel", action: cancel)
+                        .keyboardShortcut(.cancelAction)
+                }
+                if let previous { answer(previous, quiet: true) }
+            case .noSession(let previous):
+                box(strip: nil) {
+                    HStack(spacing: 6) {
+                        PresenceDot(watching: false)
+                        Text("Waiting for Claude Code").font(Metrics.headline)
+                    }
+                    detail("Your ask is queued. Open Claude Code in this repository and it is answered right away.")
+                    HStack {
+                        Button("Cancel", action: cancel)
+                        SettingsLink {
+                            Text("Plugin not set up? Settings › Agent…")
+                        }
+                        .buttonStyle(.link)
+                    }
+                }
+                if let previous { answer(previous, quiet: true) }
+            case .noAnswer(let previous):
+                box(strip: nil) {
+                    Label {
+                        Text("No answer from Claude Code").font(Metrics.headline)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle").foregroundStyle(Theme.Severity.warning)
+                    }
+                    detail("Nothing came back after a minute. Look at your Claude Code session: it may be busy or waiting for you.")
+                    HStack {
+                        askAgain
+                        Button("Cancel", action: cancel)
+                    }
+                }
+                if let previous { answer(previous, quiet: true) }
+            case .answered(let explanation, _):
+                answer(explanation, quiet: false)
+            }
+            if let error {
+                Text(error)
+                    .font(Metrics.callout)
+                    .foregroundStyle(Theme.Severity.error)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Explanation")
+    }
+
+    private func notAsked(watching: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Button(action: ask) {
+                    Label("Explain", systemImage: "sparkle")
+                }
+                .help(Shortcut.explain.help())
+                Spacer()
+                Presence(watching: watching)
+            }
+            detail("Claude Code explains what each side meant and the risk of each candidate. It never changes the result.")
+        }
+    }
+
+    private func answer(_ explanation: Explanation, quiet: Bool) -> some View {
+        box(strip: .solid) {
+            Label {
+                Text("Explained by \(explanation.by)").font(Metrics.captionBold)
+            } icon: {
+                Image(systemName: "sparkle").foregroundStyle(Theme.Provenance.agent)
+            }
+            Text(explanation.text)
+                .font(Metrics.callout)
+                .lineSpacing(5)
+                .foregroundStyle(quiet ? Theme.Surfaces.textSecondary : Theme.Surfaces.text)
+                .lineLimit(expanded || !Self.isLong(explanation.text) ? nil : 8)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            HStack {
+                Text(Self.relative(explanation.at))
+                    .font(Metrics.caption)
+                    .foregroundStyle(Theme.Surfaces.textSecondary)
+                    .help(Self.exact(explanation.at))
+                Spacer()
+                if Self.isLong(explanation.text) {
+                    Button(expanded ? "Show Less" : "Show More", action: toggleExpanded)
+                        .buttonStyle(.link)
+                }
+                if !quiet { askAgain }
+            }
+        }
+    }
+
+    private var askAgain: some View {
+        Button("Ask Again", action: ask)
+            .help(Shortcut.explain.help())
+    }
+
+    private func detail(_ text: String) -> some View {
+        Text(text)
+            .font(Metrics.callout)
+            .foregroundStyle(Theme.Surfaces.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private enum Strip { case solid, dashed }
+
+    /// A box with the agent's provenance strip on its left edge: dashed
+    /// while asked, solid once answered, none while nobody watches.
+    private func box(strip: Strip?, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 6, content: content)
+            .padding(10)
+            .padding(.leading, strip == nil ? 0 : 3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: Metrics.cardCornerRadius)
+                    .fill(Theme.Surfaces.pane)
+                    .stroke(Theme.Surfaces.hairline)
+            )
+            .overlay(alignment: .leading) {
+                if let strip {
+                    VerticalLine()
+                        .stroke(
+                            Theme.Provenance.agent,
+                            style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: strip == .dashed ? [4, 4] : [])
+                        )
+                        .frame(width: 3)
+                        .padding(.vertical, 8)
+                        .padding(.leading, 5)
+                }
+            }
+    }
+
+    /// More than eight lines in the inspector, about.
+    static func isLong(_ text: String) -> Bool { text.count > 420 }
+
+    static func relative(_ milliseconds: UInt64) -> String {
+        let date = Date(timeIntervalSince1970: Double(milliseconds) / 1000)
+        return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
+    }
+
+    static func exact(_ milliseconds: UInt64) -> String {
+        Date(timeIntervalSince1970: Double(milliseconds) / 1000)
+            .formatted(date: .abbreviated, time: .standard)
+    }
+}
+
+/// A line down the middle of its frame, for the provenance strip.
+private struct VerticalLine: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path { path in
+            path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+        }
+    }
+}
+
+/// "Claude Code is here", or "is not here": whether a session watches the
+/// repository, in the Explain block and the editor's status bar. The
+/// words change, not only the dot; clicking opens Settings › Agent.
+struct Presence: View {
+    let watching: Bool
+
+    var body: some View {
+        SettingsLink {
+            HStack(spacing: 5) {
+                PresenceDot(watching: watching)
+                Text(watching ? "Claude Code is here" : "Claude Code is not here")
+                    .font(Metrics.caption)
+                    .foregroundStyle(Theme.Surfaces.textSecondary)
+            }
+        }
+        .buttonStyle(.plain)
+        .help(watching
+            ? "A Claude Code session is watching this repository"
+            : "No Claude Code session is watching this repository. An ask waits until one opens.")
+    }
+}
+
+/// Whether a Claude Code session watches the repository: filled in the
+/// agent's colour, or hollow. Never a state colour (SPEC).
+struct PresenceDot: View {
+    let watching: Bool
+
+    var body: some View {
+        Circle()
+            .fill(watching ? Theme.Provenance.agent : .clear)
+            .stroke(watching ? Theme.Provenance.agent : Theme.Surfaces.textTertiary, lineWidth: 1.5)
+            .frame(width: 7, height: 7)
+            .accessibilityHidden(true)
     }
 }
 
@@ -363,4 +593,44 @@ extension Provenance {
         InspectorView(viewModel: editor.inspector)
             .preferredColorScheme(.dark)
     }
+}
+
+private let previewExplanation = Explanation(
+    text: "Ours (main) raised the request timeout from 30 s to 60 s for slow cellular links. Theirs (rename) renamed it to requestTimeout and kept 30 s; line 17 already reads requestTimeout, so ours alone would not build. Keep theirs, then set it to 60 by hand.",
+    by: "claude-code 2.1.331",
+    at: UInt64(Date().addingTimeInterval(-120).timeIntervalSince1970 * 1000)
+)
+
+private struct ExplainPreview: View {
+    let states: [InspectorViewModel.Explain]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ForEach(Array(states.enumerated()), id: \.offset) { _, state in
+                ExplainBlock(explain: state, expanded: false, error: nil, ask: {}, cancel: {}, toggleExpanded: {})
+            }
+        }
+        .padding(12)
+        .frame(width: 320)
+        .background(Theme.Surfaces.sidebar)
+    }
+}
+
+#Preview("Explain states", traits: .fixedLayout(width: 320, height: 1000)) {
+    ExplainPreview(states: [
+        .notAsked(watching: true),
+        .waiting(seconds: 7, previous: nil),
+        .noSession(previous: nil),
+        .noAnswer(previous: nil),
+        .answered(previewExplanation, watching: true),
+    ])
+}
+
+#Preview("Explain states, dark", traits: .fixedLayout(width: 320, height: 1000)) {
+    ExplainPreview(states: [
+        .notAsked(watching: false),
+        .waiting(seconds: 12, previous: previewExplanation),
+        .answered(previewExplanation, watching: true),
+    ])
+    .preferredColorScheme(.dark)
 }

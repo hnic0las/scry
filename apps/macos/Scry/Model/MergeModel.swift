@@ -121,6 +121,22 @@ final class MergeModel {
         send(.undo)
     }
 
+    // MARK: Explain
+
+    /// Where Explain stands on a conflict, read from the repository: the
+    /// agent answers from outside the app.
+    func explainState(_ index: Int) -> ExplainState {
+        document.explainState(conflict: UInt32(index))
+    }
+
+    func askExplain(_ index: Int) throws {
+        try document.askExplain(conflict: UInt32(index))
+    }
+
+    func cancelExplain(_ index: Int) throws {
+        try document.cancelExplain(conflict: UInt32(index))
+    }
+
     func redo() {
         send(.redo)
     }

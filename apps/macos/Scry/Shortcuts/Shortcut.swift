@@ -117,6 +117,10 @@ extension Shortcut {
         id: "switchLayout", title: "Switch layout", section: .editor, key: .character("l"), modifiers: [.option, .command],
         note: "Three columns, or the sides above the result", hint: "Layout"
     )
+    static let explain = Shortcut(
+        id: "explain", title: "Explain the conflict", section: .editor, key: .character("e"),
+        modifiers: [.control, .command], note: "Asks Claude Code, or asks again", hint: "Explain"
+    )
     static let markAsResolved = Shortcut(
         id: "markAsResolved", title: "Mark as Resolved", section: .editor, key: .return, modifiers: [.command],
         note: "Writes the file; under git mergetool, git moves on"
@@ -171,7 +175,7 @@ extension Shortcut {
     /// Every shortcut, in the order the sheet lists them.
     static let all: [Shortcut] = [
         previousConflict, nextConflict, takeOurs, takeTheirs, takeBoth, takeBase, takeNone, editByHand,
-        undo, redo, toggleBase, switchLayout, toggleInspector, markAsResolved,
+        undo, redo, toggleBase, switchLayout, toggleInspector, explain, markAsResolved,
         applyEdit, cancelEdit,
         openFile, refresh, continueOperation,
         openRepository, openConflictedFile, keyboardShortcuts,

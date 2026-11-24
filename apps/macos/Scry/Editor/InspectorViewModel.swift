@@ -1,6 +1,17 @@
 import Foundation
 import Observation
 
+/// Explain's asks and answers for the conflicts of one file: the core,
+/// reading the repository, in the app; a fake in tests and previews.
+@MainActor
+protocol Explainer: AnyObject {
+    func explainState(_ index: Int) -> ExplainState
+    func askExplain(_ index: Int) throws
+    func cancelExplain(_ index: Int) throws
+}
+
+extension MergeModel: Explainer {}
+
 /// S3: the focused conflict, its classification and its candidates.
 @MainActor
 @Observable
@@ -9,9 +20,125 @@ final class InspectorViewModel {
     @ObservationIgnored var onEditByHand: (Int) -> Void = { _ in }
 
     @ObservationIgnored private let model: MergeModel
+    @ObservationIgnored private let explainer: Explainer
+    @ObservationIgnored private let defaults: UserDefaults
 
-    init(model: MergeModel) {
+    /// `explainer` answers Explain, the model by default; `defaults` holds
+    /// whether Explain is on (Settings › Agent).
+    init(model: MergeModel, explainer: Explainer? = nil, defaults: UserDefaults = .standard) {
         self.model = model
+        self.explainer = explainer ?? model
+        self.defaults = defaults
+    }
+
+    // MARK: Explain
+
+    /// Settings › Agent's switch: off, there is no Explain anywhere.
+    static let explainKey = "explainConflicts"
+
+    static func explainEnabled(in defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: explainKey) as? Bool ?? true
+    }
+
+    /// How long an ask waits, with a session watching, before Scry says no
+    /// answer came.
+    static let answerPatience: TimeInterval = 60
+
+    /// Where Explain stands on the focused conflict, as last read.
+    private(set) var explainState: ExplainState?
+    /// The conflict `explainState` is about.
+    private var explainedIndex: Int?
+    /// When `explainState` was read: the waiting time counts from it.
+    private(set) var now = Date()
+    /// Why the last ask or cancel failed.
+    private(set) var explainError: String?
+    /// The long answers the user opened, by conflict id, for the session.
+    private(set) var expanded: Set<String> = []
+
+    /// What the Explain block shows.
+    enum Explain: Equatable {
+        /// Nothing asked: the Explain button, and whether a session watches.
+        case notAsked(watching: Bool)
+        /// Asked, a session watching: answered within seconds. `previous`
+        /// stays shown below while asked again.
+        case waiting(seconds: Int, previous: Explanation?)
+        /// Asked, nobody watching: the ask waits for a session.
+        case noSession(previous: Explanation?)
+        /// Asked a minute ago, a session watching, and nothing came back.
+        case noAnswer(previous: Explanation?)
+        case answered(Explanation, watching: Bool)
+    }
+
+    /// The Explain block; `nil` when Explain is off, the file is in no
+    /// repository, or nothing was read yet.
+    var explain: Explain? {
+        guard Self.explainEnabled(in: defaults),
+              let state = explainState, state.available,
+              explainedIndex == conflict?.index
+        else { return nil }
+        guard let asked = state.askedAt else {
+            if let answer = state.answer { return .answered(answer, watching: state.watching) }
+            return .notAsked(watching: state.watching)
+        }
+        guard state.watching else { return .noSession(previous: state.answer) }
+        let waited = max(now.timeIntervalSince1970 - Double(asked) / 1000, 0)
+        if waited >= Self.answerPatience { return .noAnswer(previous: state.answer) }
+        return .waiting(seconds: Int(waited), previous: state.answer)
+    }
+
+    /// Whether a Claude Code session watches the repository, for the
+    /// status bar; `nil` without Explain (off, or no repository).
+    var watching: Bool? {
+        guard Self.explainEnabled(in: defaults), let state = explainState, state.available else { return nil }
+        return state.watching
+    }
+
+    /// Reads where Explain stands on the focused conflict again: the view
+    /// does it every second while the inspector shows.
+    func refreshExplain() {
+        guard let conflict, Self.explainEnabled(in: defaults) else {
+            explainState = nil
+            return
+        }
+        now = Date()
+        explainState = explainer.explainState(conflict.index)
+        explainedIndex = conflict.index
+    }
+
+    /// ⌃⌘E works on a conflict while Explain is on, even with the
+    /// inspector hidden (it shows it).
+    var explainOn: Bool { conflict != nil && Self.explainEnabled(in: defaults) }
+
+    /// ⌃⌘E and the block's button: asks, or asks again.
+    var canExplain: Bool { explain != nil }
+
+    func askExplain() {
+        guard let conflict, canExplain else { return }
+        run { try self.explainer.askExplain(conflict.index) }
+    }
+
+    /// Takes back a waiting ask; the last answer stays.
+    func cancelExplain() {
+        guard let conflict else { return }
+        run { try self.explainer.cancelExplain(conflict.index) }
+    }
+
+    private func run(_ action: () throws -> Void) {
+        do {
+            try action()
+            explainError = nil
+        } catch {
+            explainError = error.message
+        }
+        refreshExplain()
+    }
+
+    /// Whether the focused conflict's long answer is open.
+    var isExpanded: Bool { conflict.map { expanded.contains($0.id) } ?? false }
+
+    func toggleExpanded() {
+        guard let id = conflict?.id else { return }
+        if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) }
     }
 
     /// One candidate's card.

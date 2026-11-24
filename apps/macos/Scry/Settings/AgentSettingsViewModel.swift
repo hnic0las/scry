@@ -33,11 +33,30 @@ final class AgentSettingsViewModel {
 
     @ObservationIgnored private let registrar: AgentRegistrar
     @ObservationIgnored private var work: Task<Void, Never>?
+    @ObservationIgnored private let defaults: UserDefaults
 
-    /// `setup`: where Claude Code stands when already known, for previews.
-    init(registrar: AgentRegistrar, setup: AgentSetup? = nil) {
+    /// Explain in the conflict inspector (⌃⌘E): on by default; off, there
+    /// is no Explain anywhere, and answers already received are hidden.
+    var explainEnabled: Bool {
+        didSet {
+            guard explainEnabled != oldValue else { return }
+            defaults.set(explainEnabled, forKey: InspectorViewModel.explainKey)
+        }
+    }
+
+    /// `setup`: where Claude Code stands when already known, for previews;
+    /// `defaults` keeps the Explain switch, tests pass their own suite.
+    init(registrar: AgentRegistrar, setup: AgentSetup? = nil, defaults: UserDefaults = .standard) {
         self.registrar = registrar
         self.setup = setup
+        self.defaults = defaults
+        explainEnabled = InspectorViewModel.explainEnabled(in: defaults)
+    }
+
+    var explainDetail: String {
+        explainEnabled
+            ? "Adds Explain to the conflict inspector (⌃⌘E): Claude Code, open in the repository with Scry's plugin, answers in the background of your session. Read-only: it never changes a result. Uses your Claude Code plan."
+            : "Off: no Explain action anywhere in Scry. Explanations already received are hidden, not deleted."
     }
 
     /// Reads Claude Code's configuration again: the user may have changed

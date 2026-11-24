@@ -4,7 +4,7 @@ import SwiftUI
 /// Settings › Agent: Scry's plugin in Claude Code, installed for every
 /// project with one button, or with the commands to copy.
 struct AgentSettingsView: View {
-    let viewModel: AgentSettingsViewModel
+    @Bindable var viewModel: AgentSettingsViewModel
 
     var body: some View {
         Form {
@@ -68,6 +68,15 @@ struct AgentSettingsView: View {
                     .font(Metrics.caption)
                     .foregroundStyle(Theme.Surfaces.textSecondary)
             }
+            Section {
+                Toggle("Explain conflicts with Claude Code", isOn: $viewModel.explainEnabled)
+            } header: {
+                Text("Explain")
+            } footer: {
+                Text(viewModel.explainDetail)
+                    .font(Metrics.caption)
+                    .foregroundStyle(Theme.Surfaces.textSecondary)
+            }
         }
         .formStyle(.grouped)
         .fixedSize(horizontal: false, vertical: true)
@@ -114,7 +123,8 @@ private struct AgentPreview: View {
         )
         _viewModel = State(initialValue: AgentSettingsViewModel(
             registrar: PreviewRegistrar(current: setup),
-            setup: setup
+            setup: setup,
+            defaults: .preview
         ))
     }
 
