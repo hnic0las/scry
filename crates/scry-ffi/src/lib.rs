@@ -31,7 +31,9 @@ uniffi::setup_scaffolding!();
 
 mod agent;
 mod cli_command;
-pub use agent::{AgentSetup, AgentSetupState, agent_setup, register_agent, unregister_agent};
+pub use agent::{
+    AgentSetup, AgentSetupState, agent_setup, install_plugin, remove_old_server, uninstall_plugin,
+};
 pub use cli_command::{CliCommandState, cli_command_state, install_cli_command};
 
 /// Why a call failed, by kind, each with a sentence the UI shows as it is.

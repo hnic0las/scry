@@ -62,13 +62,15 @@ enum Command {
     /// repository).
     Session,
     /// Serve the operation in progress and its conflicts to an agent, over
-    /// the Model Context Protocol on standard input and output. Register it
-    /// in the agent rather than running it:
+    /// the Model Context Protocol on standard input and output. Claude Code
+    /// starts it through Scry's plugin rather than you running it:
     ///
-    ///   claude mcp add scry -- git-scry mcp
+    ///   claude plugin marketplace add hnic0las/scry
+    ///   claude plugin install git-scry@scry
     ///
     /// Answers about the repository of the folder the agent starts it in.
-    /// Reads only: it stages, continues and commits nothing.
+    /// Writes only the conflicts the agent resolves: it stages, continues
+    /// and commits nothing.
     Mcp,
     /// Print a file with the syntax highlighting the app shows.
     ///

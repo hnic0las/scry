@@ -61,7 +61,7 @@ Each of these gets its own view:
   /plugin install git-scry@scry
   ```
 
-  The plugin runs the Scry app's `git-scry`: install the app first.
+  The plugin runs the Scry app's `git-scry`: install the app first. Scry › Settings › Agent installs the plugin too, and removes the `scry` server an earlier Scry added with `claude mcp add`.
 - Scry never stages, commits or pushes on its own: each of those steps is a button you press.
 - Local first: no account and no server; nothing leaves your Mac.
 
