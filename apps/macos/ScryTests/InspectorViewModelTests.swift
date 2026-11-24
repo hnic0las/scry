@@ -106,7 +106,7 @@ struct InspectorViewModelTests {
 
         editor.next()
         let agent = try #require(inspector.review)
-        #expect(agent.by == "Resolved by claude-code 2.1")
+        #expect(agent.by == "Resolved by Claude Code")
         #expect(agent.provenance == .agent)
         #expect(agent.reason == ReviewSample.reason)
         #expect(agent.dropped == "Left out: nothing")

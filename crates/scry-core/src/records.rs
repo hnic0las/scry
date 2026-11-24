@@ -21,6 +21,20 @@ use crate::git::{Git, GitError};
 use crate::resolution::CandidateKind;
 use crate::session::write_atomically;
 
+/// An agent's name as the user reads it: its MCP client's name, without
+/// the version that follows it ("claude-code 2.1.331" is "Claude Code").
+/// The version stays in the records, for whoever reads the files.
+pub fn agent_name(by: &str) -> String {
+    let name = match by.trim().rsplit_once(' ') {
+        Some((name, version)) if version.starts_with(|c: char| c.is_ascii_digit()) => name,
+        _ => by.trim(),
+    };
+    match name {
+        "claude-code" => String::from("Claude Code"),
+        name => name.to_string(),
+    }
+}
+
 /// How an agent resolved one conflict, as it said.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
@@ -68,6 +82,10 @@ pub struct Ask {
     /// Milliseconds since 1970: asking again right after an answer opens
     /// the ask again.
     pub at: u64,
+    /// The text the user wrote by hand for the conflict when asking, if
+    /// any: an answer is about it, and stale once another is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited: Option<String>,
 }
 
 /// An agent's answer to an ask, written by the MCP server.
@@ -78,9 +96,16 @@ pub struct Answer {
     pub kind: AskKind,
     /// The agent's name and version, as its MCP client gave them.
     pub by: String,
+    /// The explanation, or with `failed` why there is none.
     pub text: String,
     /// Milliseconds since 1970.
     pub at: u64,
+    /// The text written by hand the ask was made with, copied from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited: Option<String>,
+    /// The agent could not answer: `text` says why.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failed: bool,
 }
 
 /// An ask still waiting for its answer, with the file it is about.
@@ -94,7 +119,7 @@ pub struct OpenAsk {
 /// How far Explain is on one file's conflicts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Explanations {
-    /// Conflicts with an answer and no newer ask.
+    /// Conflicts with an explanation (not a failure) and no newer ask.
     pub explained: usize,
     /// Conflicts asked about and not answered since.
     pub waiting: usize,
@@ -273,6 +298,7 @@ impl Store {
                     .values()
                     .filter(|answer| {
                         answer.kind == AskKind::Explain
+                            && !answer.failed
                             && !asks
                                 .get(&answer.conflict)
                                 .is_some_and(|ask| open(ask, Some(answer)))
@@ -431,6 +457,7 @@ mod tests {
             conflict: conflict.to_string(),
             kind: AskKind::Explain,
             at,
+            edited: None,
         }
     }
 
@@ -441,6 +468,8 @@ mod tests {
             by: String::from("claude-code 2.1"),
             text: text.to_string(),
             at,
+            edited: None,
+            failed: false,
         }
     }
 
@@ -505,6 +534,15 @@ mod tests {
         store
             .answer("only.txt", answer("c1", "One.", 1_000))
             .unwrap();
+        store
+            .answer(
+                "only.txt",
+                Answer {
+                    failed: true,
+                    ..answer("c2", "The conflict is gone.", 1_000)
+                },
+            )
+            .unwrap();
         store.ask("gone.txt", ask("c1", 1_000)).unwrap();
         store.cancel_ask("gone.txt", "c1").unwrap();
         fs::write(store.folder().join("records-x.txt.json"), "{}").unwrap();
@@ -529,6 +567,41 @@ mod tests {
             ])
         );
         assert!(Store::at(dir.path(), "other").explanations().is_empty());
+    }
+
+    /// Asks and answers written before `edited` and `failed` read as without
+    /// them, and those fields are written only when set.
+    #[test]
+    fn asks_and_answers_read_without_the_newer_fields() {
+        let ask: Ask =
+            serde_json::from_str(r#"{"conflict":"c1","kind":"explain","at":1}"#).unwrap();
+        assert_eq!(ask.edited, None);
+        assert!(!serde_json::to_string(&ask).unwrap().contains("edited"));
+        let answer: Answer = serde_json::from_str(
+            r#"{"conflict":"c1","kind":"explain","by":"a","text":"t","at":1}"#,
+        )
+        .unwrap();
+        assert!(!answer.failed && answer.edited.is_none());
+        let written = serde_json::to_string(&answer).unwrap();
+        assert!(!written.contains("failed") && !written.contains("edited"));
+        let failed = Answer {
+            failed: true,
+            edited: Some(String::from("x")),
+            ..answer
+        };
+        let written = serde_json::to_string(&failed).unwrap();
+        assert!(written.contains(r#""failed":true"#) && written.contains(r#""edited":"x""#));
+    }
+
+    /// The version goes, and Claude Code's client gets its product name;
+    /// other names stay as they are.
+    #[test]
+    fn agent_names_lose_their_version() {
+        assert_eq!(agent_name("claude-code 2.1.331"), "Claude Code");
+        assert_eq!(agent_name("claude-code"), "Claude Code");
+        assert_eq!(agent_name("cursor-vscode 1.0"), "cursor-vscode");
+        assert_eq!(agent_name("My Agent v2"), "My Agent v2");
+        assert_eq!(agent_name(" codex 0.9 "), "codex");
     }
 
     /// Every encoded path decodes back; a name it cannot have given does

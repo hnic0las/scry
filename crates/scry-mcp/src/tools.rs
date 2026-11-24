@@ -36,6 +36,8 @@ pub const MAX_DROPPED: usize = 600;
 /// An explanation's length, in characters: 2 to 4 sentences, a little
 /// more for a hard conflict, read in the inspector.
 pub const EXPLANATION_LENGTH: std::ops::RangeInclusive<usize> = 20..=1_200;
+/// Why an agent could not explain, in characters.
+pub const FAILURE_LENGTH: std::ops::RangeInclusive<usize> = 1..=1_200;
 /// The largest text `resolve` writes for one conflict, in characters, as
 /// the schema's `maxLength` counts them.
 pub const MAX_TEXT: usize = 100_000;
@@ -407,26 +409,28 @@ impl Tools {
     }
 
     /// Keeps `text`, the explanation of conflict `id` of `path` the user
-    /// asked for in Scry, as `by`'s answer, replacing an earlier one.
+    /// asked for in Scry, as `by`'s answer, replacing an earlier one; with
+    /// `failed`, why `by` could not explain it.
     pub fn explain(
         &mut self,
         path: &str,
         id: &str,
         text: &str,
+        failed: bool,
         by: &str,
     ) -> Result<String, String> {
         let repo = self.repo()?;
         let path = path.strip_prefix("./").unwrap_or(path);
         let store = Store::open(&repo.git).map_err(|error| error.to_string())?;
-        let asked = store
+        let Some(ask) = store
             .asks(path)
-            .get(id)
-            .is_some_and(|ask| ask.kind == AskKind::Explain);
-        if !asked {
+            .remove(id)
+            .filter(|ask| ask.kind == AskKind::Explain)
+        else {
             return Err(format!(
                 "Nobody asked in Scry to explain conflict {id} of {path}, or the ask was taken back: explain only what git scry wait printed."
             ));
-        }
+        };
         store
             .answer(
                 path,
@@ -438,12 +442,21 @@ impl Tools {
                     at: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |time| time.as_millis() as u64),
+                    // What the user wrote by hand when asking: the answer
+                    // is stale once the conflict holds other text.
+                    edited: ask.edited,
+                    failed,
                 },
             )
             .map_err(|error| format!("The explanation could not be kept: {error}"))?;
-        Ok(format!(
-            "Kept your explanation of conflict {id} in {path}: Scry shows it to the user."
-        ))
+        Ok(match failed {
+            true => format!(
+                "Kept why you could not explain conflict {id} in {path}: Scry shows it to the user."
+            ),
+            false => format!(
+                "Kept your explanation of conflict {id} in {path}: Scry shows it to the user."
+            ),
+        })
     }
 
     /// The repository the server was started in, read again.

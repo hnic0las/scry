@@ -125,6 +125,7 @@ fn ask(conflict: &str, at: u64) -> Ask {
         conflict: conflict.to_string(),
         kind: AskKind::Explain,
         at,
+        edited: None,
     }
 }
 
@@ -173,6 +174,8 @@ fn wait_prints_the_next_ask_and_exits() {
                 by: String::from("claude-code 2.1"),
                 text: String::from("Main renamed it; the feature changed the timeout."),
                 at: 2_000,
+                edited: None,
+                failed: false,
             },
         )
         .unwrap();

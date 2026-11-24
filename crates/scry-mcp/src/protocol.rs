@@ -21,7 +21,7 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
 /// What the server tells the agent about itself when it connects.
-const INSTRUCTIONS: &str = "Scry's view of the merge, rebase, cherry-pick or revert in progress in this repository: start with overview, then conflicts(path), then conflict(path, id), and resolve(path, id, ...) to write a conflict's resolution with a reason. When git scry wait prints \"Scry asks: explain <path> <id>\", read that conflict and answer with explain(path, id, text). Conflict ids come from the content: they survive other conflicts being resolved. Prefer picking a candidate to writing text. Never stage, commit or continue the operation: the user reviews each resolution in Scry first.";
+const INSTRUCTIONS: &str = "Scry's view of the merge, rebase, cherry-pick or revert in progress in this repository: start with overview, then conflicts(path), then conflict(path, id), and resolve(path, id, ...) to write a conflict's resolution with a reason. When git scry wait prints \"Scry asks: explain <path> <id>\", read that conflict and answer with explain(path, id, text), or explain(path, id, text, failed: true) saying why you could not. Conflict ids come from the content: they survive other conflicts being resolved. Prefer picking a candidate to writing text. Never stage, commit or continue the operation: the user reviews each resolution in Scry first.";
 
 /// The candidates `resolve` can pick, as their ids.
 fn picks() -> Vec<&'static str> {
@@ -116,9 +116,9 @@ impl Server {
             }),
             "explain" => text(&arguments, "path").and_then(|path| {
                 let id = text(&arguments, "id")?;
-                let explanation = explanation(&arguments)?;
+                let (explanation, failed) = explanation(&arguments)?;
                 let by = self.client.as_deref().unwrap_or("an MCP client");
-                self.tools.explain(&path, &id, &explanation, by)
+                self.tools.explain(&path, &id, &explanation, failed, by)
             }),
             _ => {
                 return Err((
@@ -271,9 +271,13 @@ fn definitions() -> Value {
                     },
                     "text": {
                         "type": "string",
-                        "minLength": tools::EXPLANATION_LENGTH.start(),
+                        "minLength": tools::FAILURE_LENGTH.start(),
                         "maxLength": tools::EXPLANATION_LENGTH.end(),
-                        "description": "2 to 4 sentences for the user, naming each side by its label from overview. Calling again replaces it.",
+                        "description": "2 to 4 sentences for the user (20 characters at least), naming each side by its label from overview; with failed, why you could not explain. Calling again replaces it.",
+                    },
+                    "failed": {
+                        "type": "boolean",
+                        "description": "true when you could not explain the conflict (it is gone, it could not be read): Scry shows text as the problem you met, and the user asks again.",
                     },
                 },
                 "required": ["path", "id", "text"],
@@ -350,18 +354,28 @@ fn one_line(text: &str) -> String {
         .join(" ")
 }
 
-/// `explain`'s text, its length checked.
-fn explanation(arguments: &Value) -> Result<String, String> {
+/// `explain`'s text, its length checked, and whether it says why the agent
+/// could not explain.
+fn explanation(arguments: &Value) -> Result<(String, bool), String> {
     let text = text(arguments, "text")?;
+    let failed = match arguments.get("failed") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(failed)) => *failed,
+        Some(other) => return Err(format!("failed must be true or false, not {other}.")),
+    };
+    let (what, range) = match failed {
+        true => ("The reason", tools::FAILURE_LENGTH),
+        false => ("The explanation", tools::EXPLANATION_LENGTH),
+    };
     let length = text.trim().chars().count();
-    if !tools::EXPLANATION_LENGTH.contains(&length) {
+    if !range.contains(&length) {
         return Err(format!(
-            "The explanation has {length} characters: give {} to {}.",
-            tools::EXPLANATION_LENGTH.start(),
-            tools::EXPLANATION_LENGTH.end()
+            "{what} has {length} characters: give {} to {}.",
+            range.start(),
+            range.end()
         ));
     }
-    Ok(text)
+    Ok((text, failed))
 }
 
 /// `resolve`'s pick or text, reason and, with a text, what it leaves out.

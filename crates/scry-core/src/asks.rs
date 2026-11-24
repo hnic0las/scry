@@ -245,6 +245,7 @@ mod tests {
                 conflict: conflict.to_string(),
                 kind: AskKind::Explain,
                 at: 1,
+                edited: None,
             },
         }
     }

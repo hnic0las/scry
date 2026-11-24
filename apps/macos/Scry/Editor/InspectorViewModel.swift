@@ -67,6 +67,11 @@ final class InspectorViewModel {
         /// Asked a minute ago, a session watching, and nothing came back.
         case noAnswer(previous: Explanation?)
         case answered(Explanation, watching: Bool)
+        /// The answer is about text written by hand that the user changed
+        /// since: kept, marked as about an earlier version.
+        case stale(Explanation)
+        /// Claude Code could not explain: the problem it met.
+        case failed(Explanation)
     }
 
     /// The Explain block; `nil` when Explain is off, the file is in no
@@ -77,13 +82,17 @@ final class InspectorViewModel {
               explainedIndex == conflict?.index
         else { return nil }
         guard let asked = state.askedAt else {
-            if let answer = state.answer { return .answered(answer, watching: state.watching) }
-            return .notAsked(watching: state.watching)
+            guard let answer = state.answer else { return .notAsked(watching: state.watching) }
+            if answer.failed { return .failed(answer) }
+            if state.stale { return .stale(answer) }
+            return .answered(answer, watching: state.watching)
         }
-        guard state.watching else { return .noSession(previous: state.answer) }
+        // Asked again: the last explanation stays below, a failure does not.
+        let previous = state.answer.flatMap { $0.failed ? nil : $0 }
+        guard state.watching else { return .noSession(previous: previous) }
         let waited = max(now.timeIntervalSince1970 - Double(asked) / 1000, 0)
-        if waited >= Self.answerPatience { return .noAnswer(previous: state.answer) }
-        return .waiting(seconds: Int(waited), previous: state.answer)
+        if waited >= Self.answerPatience { return .noAnswer(previous: previous) }
+        return .waiting(seconds: Int(waited), previous: previous)
     }
 
     /// Whether a Claude Code session watches the repository, for the
@@ -170,7 +179,7 @@ final class InspectorViewModel {
 
     /// A conflict resolved outside Scry, as the review shows it.
     struct Review: Equatable {
-        /// "Resolved by claude-code 2.1", or "Resolved outside Scry".
+        /// "Resolved by Claude Code", or "Resolved outside Scry".
         let by: String
         let provenance: Provenance
         /// The reason the agent gave, or that none was.

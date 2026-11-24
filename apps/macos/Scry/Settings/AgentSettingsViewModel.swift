@@ -31,7 +31,10 @@ enum ClaudeCodePlugin {
         defaults.object(forKey: key) as? Bool ?? true
     }
 
+    /// Without `claude`, or when its answer cannot be read, what was
+    /// known stays.
     static func remember(_ state: AgentSetupState, in defaults: UserDefaults) {
+        guard state != .noClaude else { return }
         defaults.set(state == .installed, forKey: key)
     }
 }

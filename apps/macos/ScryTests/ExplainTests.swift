@@ -10,11 +10,12 @@ private final class FakeExplainer: Explainer {
     var answers: [Int: Explanation] = [:]
     var watching = true
     var available = true
+    var stale = false
     var failure: ScryError?
     private(set) var asks: [Int] = []
 
     func explainState(_ index: Int) -> ExplainState {
-        ExplainState(available: available, askedAt: askedAt[index], answer: answers[index], watching: watching)
+        ExplainState(available: available, askedAt: askedAt[index], answer: answers[index], watching: watching, stale: stale)
     }
 
     func askExplain(_ index: Int) throws {
@@ -27,9 +28,11 @@ private final class FakeExplainer: Explainer {
         askedAt[index] = nil
     }
 
-    func answer(_ index: Int, _ text: String) {
+    func answer(_ index: Int, _ text: String, failed: Bool = false) {
         askedAt[index] = nil
-        answers[index] = Explanation(text: text, by: "claude-code 2.1.331", at: UInt64(Date().timeIntervalSince1970 * 1000))
+        answers[index] = Explanation(
+            text: text, by: "Claude Code", at: UInt64(Date().timeIntervalSince1970 * 1000), failed: failed
+        )
     }
 }
 
@@ -64,7 +67,7 @@ struct ExplainTests {
             Issue.record("not answered: \(String(describing: inspector.explain))")
             return
         }
-        #expect(explanation.by == "claude-code 2.1.331")
+        #expect(explanation.by == "Claude Code")
 
         inspector.askExplain()
         guard case .waiting(_, let previous) = inspector.explain else {
@@ -139,6 +142,38 @@ struct ExplainTests {
         #expect(inspector.explain == .notAsked(watching: true))
         ClaudeCodePlugin.remember(.installed, in: defaults)
         #expect(inspector.watching == true)
+        ClaudeCodePlugin.remember(.noClaude, in: defaults)
+        #expect(inspector.watching == true)
+    }
+
+    /// An answer about text rewritten since is stale, and can be asked again; a
+    /// failure shows the agent's problem and is not kept below a new ask.
+    @Test func staleAndFailedAnswers() throws {
+        let explainer = FakeExplainer()
+        let inspector = try inspector(explainer)
+        explainer.answer(0, "About the text written by hand then.")
+        explainer.stale = true
+        inspector.refreshExplain()
+        guard case .stale(let explanation) = inspector.explain else {
+            Issue.record("not stale: \(String(describing: inspector.explain))")
+            return
+        }
+        #expect(inspector.canExplain)
+        inspector.askExplain()
+        #expect(inspector.explain == .waiting(seconds: 0, previous: explanation))
+
+        explainer.answer(0, "conflict found no conflict c7a9.", failed: true)
+        inspector.refreshExplain()
+        guard case .failed(let failure) = inspector.explain else {
+            Issue.record("not failed: \(String(describing: inspector.explain))")
+            return
+        }
+        #expect(failure.text == "conflict found no conflict c7a9.")
+        inspector.askExplain()
+        #expect(inspector.explain == .waiting(seconds: 0, previous: nil))
+        explainer.watching = false
+        inspector.refreshExplain()
+        #expect(inspector.explain == .noSession(previous: nil))
     }
 
     /// A failing ask says why, and the next one clears it; a long answer opens and

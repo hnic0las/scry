@@ -1159,6 +1159,7 @@ fn explain_answers_an_ask_made_in_scry() {
                 conflict: id.clone(),
                 kind: AskKind::Explain,
                 at: 1_000,
+                edited: None,
             },
         )
         .unwrap();
@@ -1199,6 +1200,54 @@ fn explain_answers_an_ask_made_in_scry() {
             format!("The explanation has {length} characters: give 20 to 1200.")
         );
     }
+
+    // Asked again over text written by hand, which the answer keeps; the
+    // agent says it could not explain, in a few words.
+    store
+        .ask(
+            "Sources/a.swift",
+            Ask {
+                conflict: id.clone(),
+                kind: AskKind::Explain,
+                at: 2_000,
+                edited: Some(String::from("let timeout = 45\n")),
+            },
+        )
+        .unwrap();
+    let answer = text(
+        &mut server,
+        "explain",
+        json!({ "path": "Sources/a.swift", "id": id, "text": "Gone.", "failed": true }),
+    );
+    assert_eq!(
+        answer,
+        format!(
+            "Kept why you could not explain conflict {id} in Sources/a.swift: Scry shows it to the user."
+        )
+    );
+    let kept = &store.answers("Sources/a.swift")[&id];
+    assert!(kept.failed);
+    assert_eq!(kept.text, "Gone.");
+    assert_eq!(kept.edited.as_deref(), Some("let timeout = 45\n"));
+    for (failed, message) in [
+        (json!(true), "The reason has 0 characters: give 1 to 1200."),
+        (json!("yes"), "failed must be true or false, not \"yes\"."),
+    ] {
+        let (answer, is_error) = call(
+            &mut server,
+            "explain",
+            json!({ "path": "Sources/a.swift", "id": id, "text": "  ", "failed": failed }),
+        );
+        assert!(is_error);
+        assert_eq!(answer, message);
+    }
+    let (_, is_error) = call(
+        &mut server,
+        "explain",
+        json!({ "path": "Sources/a.swift", "id": id, "text": EXPLANATION, "failed": null }),
+    );
+    assert!(!is_error);
+    assert!(!store.answers("Sources/a.swift")[&id].failed);
 
     store.cancel_ask("Sources/a.swift", &id).unwrap();
     let (answer, is_error) = call(&mut server, "explain", arguments);

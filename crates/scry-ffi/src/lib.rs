@@ -22,7 +22,7 @@ use scry_core::operation;
 use scry_core::overview;
 use scry_core::presentation;
 use scry_core::rebase_plan;
-use scry_core::records::{Ask, AskKind, Store};
+use scry_core::records::{self, Ask, AskKind, Store};
 use scry_core::resolution::CandidateKind;
 use scry_core::review;
 use scry_core::session::{self, MergeSession, MergetoolFiles};
@@ -347,8 +347,8 @@ pub struct ConflictInfo {
 /// A conflict resolved outside Scry, as the review shows it.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct OutsideInfo {
-    /// The agent's name and version as it gave them; `None` when it did
-    /// not resolve through Scry, so nobody is known.
+    /// The agent's name, without its version ("Claude Code"); `None` when
+    /// it did not resolve through Scry, so nobody is known.
     pub by: Option<String>,
     pub reason: Option<String>,
     /// What of either side the agent's own text leaves out.
@@ -439,11 +439,14 @@ pub enum Event {
 /// An agent's explanation of a conflict, as the user asked in Scry.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct Explanation {
+    /// The explanation, or with `failed` why there is none.
     pub text: String,
-    /// The agent's name and version, as its MCP client gave them.
+    /// The agent's name, without its version ("Claude Code").
     pub by: String,
     /// Milliseconds since 1970.
     pub at: u64,
+    /// The agent could not explain: `text` is the problem it met.
+    pub failed: bool,
 }
 
 /// Where Explain stands on one conflict.
@@ -459,6 +462,10 @@ pub struct ExplainState {
     pub answer: Option<Explanation>,
     /// A Claude Code session watches the repository (`git scry wait`).
     pub watching: bool,
+    /// The answer is about an earlier version of the conflict: the user
+    /// wrote other text by hand since it was asked. Picking a candidate
+    /// does not make it stale.
+    pub stale: bool,
 }
 
 /// Where a document's asks are kept: its repository's store for the stop
@@ -556,6 +563,7 @@ impl MergeDocument {
                 asked_at: None,
                 answer: None,
                 watching: false,
+                stale: false,
             };
         };
         let id = self.conflict_id(conflict);
@@ -570,17 +578,22 @@ impl MergeDocument {
         let answer = id
             .as_deref()
             .and_then(|id| asking.store.answers(&asking.path).remove(id))
-            .filter(|answer| answer.kind == AskKind::Explain)
-            .map(|answer| Explanation {
-                text: answer.text,
-                by: answer.by,
-                at: answer.at,
-            });
+            .filter(|answer| answer.kind == AskKind::Explain);
+        let edited = self.edited(conflict);
+        let stale = answer
+            .as_ref()
+            .is_some_and(|answer| !answer.failed && edited.is_some() && edited != answer.edited);
         ExplainState {
             available: true,
             asked_at,
-            answer,
+            answer: answer.map(|answer| Explanation {
+                text: answer.text,
+                by: records::agent_name(&answer.by),
+                at: answer.at,
+                failed: answer.failed,
+            }),
             watching: asks::watching(&asking.git_dir, SystemTime::now()),
+            stale,
         }
     }
 
@@ -588,6 +601,7 @@ impl MergeDocument {
     /// `conflict`, again when it was explained before.
     pub fn ask_explain(&self, conflict: u32) -> Result<(), ScryError> {
         let (asking, id) = self.asking(conflict)?;
+        let edited = self.edited(conflict);
         let at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |time| time.as_millis() as u64);
@@ -599,6 +613,7 @@ impl MergeDocument {
                     conflict: id,
                     kind: AskKind::Explain,
                     at,
+                    edited,
                 },
             )
             .map_err(|error| ScryError::Failed {
@@ -748,6 +763,19 @@ impl MergeDocument {
         (index < session.conflict_count()).then(|| session.analysis(index).id.clone())
     }
 
+    /// The text conflict `index` holds written by hand in Scry, if any.
+    fn edited(&self, index: u32) -> Option<String> {
+        let session = self.lock();
+        let index = index as usize;
+        if index >= session.conflict_count() {
+            return None;
+        }
+        match session.choice(index)? {
+            session::Choice::Edited(edit) => Some(edit.text.clone()),
+            _ => None,
+        }
+    }
+
     /// Where asks are kept, and conflict `index`'s id.
     fn asking(&self, index: u32) -> Result<(&Asking, String), ScryError> {
         let asking = self.asking.as_ref().ok_or_else(|| ScryError::Refused {
@@ -788,7 +816,7 @@ impl MergeDocument {
             has_base: session.conflict(index).base.is_some(),
             checked: view.checked,
             outside: view.outside.map(|outside| OutsideInfo {
-                by: outside.by,
+                by: outside.by.as_deref().map(records::agent_name),
                 reason: outside.reason,
                 dropped: outside.dropped,
                 reviewed: outside.reviewed,
@@ -2210,6 +2238,8 @@ mod tests {
                         by: String::from("claude-code 2.1"),
                         text: text.to_string(),
                         at,
+                        edited: None,
+                        failed: false,
                     },
                 )
                 .unwrap();
@@ -2221,8 +2251,9 @@ mod tests {
             state.answer,
             Some(Explanation {
                 text: String::from("Main and feature changed the same line."),
-                by: String::from("claude-code 2.1"),
+                by: String::from("Claude Code"),
                 at: asked + 1,
+                failed: false,
             })
         );
 
@@ -2252,6 +2283,67 @@ mod tests {
             document.ask_explain(0),
             Err(ScryError::Refused { .. })
         ));
+    }
+
+    /// An answer goes stale once the user writes other text by hand than
+    /// the one asked about, not when picking a candidate; an ask keeps the
+    /// text written by hand; a failure is never stale.
+    #[test]
+    fn hand_written_text_makes_an_explanation_stale() {
+        let (dir, path) = merge_with_a_conflict();
+        let document = MergeDocument::open(path.display().to_string()).unwrap();
+        let store = Store::open(&GitCli::new(dir.path().to_path_buf())).unwrap();
+        let id = document.conflicts()[0].id.clone();
+        let answer = |edited: Option<&str>, failed: bool| {
+            store
+                .answer(
+                    "a.txt",
+                    scry_core::records::Answer {
+                        conflict: id.clone(),
+                        kind: AskKind::Explain,
+                        by: String::from("claude-code 2.1"),
+                        text: String::from("Main and feature changed the same line."),
+                        at: u64::MAX,
+                        edited: edited.map(String::from),
+                        failed,
+                    },
+                )
+                .unwrap();
+        };
+        let edit = |text: &str| {
+            document
+                .apply(Command::Edit {
+                    conflict: 0,
+                    text: text.to_string(),
+                })
+                .unwrap();
+        };
+
+        document.ask_explain(0).unwrap();
+        assert_eq!(store.asks("a.txt")[&id].edited, None);
+        answer(None, false);
+        assert!(!document.explain_state(0).stale);
+        document
+            .apply(Command::Choose {
+                conflict: 0,
+                candidate: String::from("theirs"),
+            })
+            .unwrap();
+        assert!(!document.explain_state(0).stale);
+        edit("mine\n");
+        assert!(document.explain_state(0).stale);
+
+        document.ask_explain(0).unwrap();
+        assert_eq!(store.asks("a.txt")[&id].edited.as_deref(), Some("mine\n"));
+        answer(Some("mine\n"), false);
+        assert!(!document.explain_state(0).stale);
+        edit("mine again\n");
+        assert!(document.explain_state(0).stale);
+        answer(Some("mine\n"), true);
+        let state = document.explain_state(0);
+        assert!(!state.stale);
+        assert!(state.answer.is_some_and(|answer| answer.failed));
+        assert!(document.edited(7).is_none());
     }
 
     /// The overview reads, per file, the conflicts explained and waiting,

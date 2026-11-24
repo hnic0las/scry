@@ -190,6 +190,30 @@ struct ExplainBlock: View {
                 if let previous { answer(previous, quiet: true) }
             case .answered(let explanation, _):
                 answer(explanation, quiet: false)
+            case .stale(let explanation):
+                stale(explanation)
+            case .failed(let explanation):
+                box(strip: nil) {
+                    Label {
+                        Text("Claude Code reported a problem").font(Metrics.headline)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle").foregroundStyle(Theme.Severity.warning)
+                    }
+                    detail("Look at your Claude Code session, then ask again.")
+                    Text(explanation.text)
+                        .font(Metrics.code)
+                        .foregroundStyle(Theme.Surfaces.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                    Text("\(explanation.by) · \(Self.relative(explanation.at))")
+                        .font(Metrics.caption)
+                        .foregroundStyle(Theme.Surfaces.textSecondary)
+                        .help(Self.exact(explanation.at))
+                    HStack {
+                        Spacer()
+                        askAgain
+                    }
+                }
             }
             if let error {
                 Text(error)
@@ -244,6 +268,40 @@ struct ExplainBlock: View {
         }
     }
 
+    /// An answer about text the user rewrote since: kept, quiet, with a
+    /// grey dashed strip.
+    private func stale(_ explanation: Explanation) -> some View {
+        box(strip: .stale) {
+            Label {
+                Text("About an earlier version").font(Metrics.captionBold)
+            } icon: {
+                Image(systemName: "clock").foregroundStyle(Theme.Surfaces.textSecondary)
+            }
+            detail("The conflict changed after this was written.")
+            Text(explanation.text)
+                .font(Metrics.callout)
+                .lineSpacing(5)
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+                .lineLimit(expanded || !Self.isLong(explanation.text) ? nil : 8)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            // Who and when on a line of its own: beside the buttons, the
+            // agent's name wrapped on four lines.
+            Text("Explained by \(explanation.by) · \(Self.relative(explanation.at))")
+                .font(Metrics.caption)
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+                .help(Self.exact(explanation.at))
+            HStack {
+                Spacer()
+                if Self.isLong(explanation.text) {
+                    Button(expanded ? "Show Less" : "Show More", action: toggleExpanded)
+                        .buttonStyle(.link)
+                }
+                askAgain
+            }
+        }
+    }
+
     private var askAgain: some View {
         Button("Ask Again", action: ask)
             .help(Shortcut.explain.help())
@@ -256,10 +314,11 @@ struct ExplainBlock: View {
             .fixedSize(horizontal: false, vertical: true)
     }
 
-    private enum Strip { case solid, dashed }
+    private enum Strip { case solid, dashed, stale }
 
     /// A box with the agent's provenance strip on its left edge: dashed
-    /// while asked, solid once answered, none while nobody watches.
+    /// while asked, solid once answered, grey dashed once stale, none
+    /// while nobody watches.
     private func box(strip: Strip?, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 6, content: content)
             .padding(10)
@@ -274,8 +333,8 @@ struct ExplainBlock: View {
                 if let strip {
                     VerticalLine()
                         .stroke(
-                            Theme.Provenance.agent,
-                            style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: strip == .dashed ? [4, 4] : [])
+                            strip == .stale ? Theme.Sides.base : Theme.Provenance.agent,
+                            style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: strip == .solid ? [] : [4, 4])
                         )
                         .frame(width: 3)
                         .padding(.vertical, 8)
@@ -597,8 +656,16 @@ extension Provenance {
 
 private let previewExplanation = Explanation(
     text: "Ours (main) raised the request timeout from 30 s to 60 s for slow cellular links. Theirs (rename) renamed it to requestTimeout and kept 30 s; line 17 already reads requestTimeout, so ours alone would not build. Keep theirs, then set it to 60 by hand.",
-    by: "claude-code 2.1.331",
-    at: UInt64(Date().addingTimeInterval(-120).timeIntervalSince1970 * 1000)
+    by: "Claude Code",
+    at: UInt64(Date().addingTimeInterval(-120).timeIntervalSince1970 * 1000),
+    failed: false
+)
+
+private let previewFailure = Explanation(
+    text: "conflict found no conflict c7a9 in Sources/Network.swift: the file has 2 conflicts.",
+    by: "Claude Code",
+    at: UInt64(Date().addingTimeInterval(-30).timeIntervalSince1970 * 1000),
+    failed: true
 )
 
 private struct ExplainPreview: View {
@@ -623,6 +690,13 @@ private struct ExplainPreview: View {
         .noSession(previous: nil),
         .noAnswer(previous: nil),
         .answered(previewExplanation, watching: true),
+    ])
+}
+
+#Preview("Explain stale and failed", traits: .fixedLayout(width: 320, height: 600)) {
+    ExplainPreview(states: [
+        .stale(previewExplanation),
+        .failed(previewFailure),
     ])
 }
 

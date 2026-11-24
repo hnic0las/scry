@@ -57,7 +57,7 @@ struct AgentSettingsViewModelTests {
     /// are shown only while there is something to install.
     @Test func installsThePlugin() async {
         let registrar = FakeRegistrar(.notInstalled)
-        let agent = AgentSettingsViewModel(registrar: registrar)
+        let agent = AgentSettingsViewModel(registrar: registrar, defaults: .isolated)
         #expect(agent.status == "Looking for Claude Code…")
         #expect(!agent.canInstall)
         await agent.read()
@@ -80,7 +80,7 @@ struct AgentSettingsViewModelTests {
 
     /// A plugin turned off is turned on by the same button, and can be uninstalled.
     @Test func turnsOnADisabledPlugin() async {
-        let agent = AgentSettingsViewModel(registrar: FakeRegistrar(.disabled))
+        let agent = AgentSettingsViewModel(registrar: FakeRegistrar(.disabled), defaults: .isolated)
         await agent.read()
         #expect(agent.status == "Scry's plugin is installed in Claude Code, and turned off.")
         #expect(agent.installTitle == "Turn On Scry's Plugin")
@@ -93,7 +93,7 @@ struct AgentSettingsViewModelTests {
     @Test func removesTheEarlierServer() async {
         let registrar = FakeRegistrar(.notInstalled)
         registrar.oldServer = true
-        let agent = AgentSettingsViewModel(registrar: registrar)
+        let agent = AgentSettingsViewModel(registrar: registrar, defaults: .isolated)
         await agent.read()
         #expect(agent.oldServerWarning != nil)
         await agent.install()
@@ -112,7 +112,7 @@ struct AgentSettingsViewModelTests {
     @Test func saysWhenThePluginWouldNotFindScry() async {
         let registrar = FakeRegistrar(.notInstalled)
         registrar.pluginScry = nil
-        let agent = AgentSettingsViewModel(registrar: registrar)
+        let agent = AgentSettingsViewModel(registrar: registrar, defaults: .isolated)
         await agent.read()
         #expect(agent.missingScry?.hasPrefix("The plugin will not find Scry") == true)
 
@@ -124,7 +124,7 @@ struct AgentSettingsViewModelTests {
     /// Without Claude Code there is nothing to press, only the commands to run once it is
     /// installed.
     @Test func withoutClaudeCodeOnlyTheCommandIsShown() async {
-        let agent = AgentSettingsViewModel(registrar: FakeRegistrar(.noClaude))
+        let agent = AgentSettingsViewModel(registrar: FakeRegistrar(.noClaude), defaults: .isolated)
         await agent.read()
         #expect(!agent.canInstall && !agent.canUninstall && !agent.canRemoveOldServer)
         #expect(agent.status.hasPrefix("Claude Code is not installed"))
@@ -136,7 +136,7 @@ struct AgentSettingsViewModelTests {
     @Test func showsWhyClaudeFailed() async {
         let registrar = FakeRegistrar(.notInstalled)
         registrar.failure = .Failed(message: "claude plugin install failed: marketplace not found")
-        let agent = AgentSettingsViewModel(registrar: registrar)
+        let agent = AgentSettingsViewModel(registrar: registrar, defaults: .isolated)
         await agent.read()
         await agent.install()
         #expect(agent.error == "claude plugin install failed: marketplace not found")
@@ -153,7 +153,7 @@ struct AgentSettingsViewModelTests {
     /// once allowed, or with no plugin, nothing is said.
     @Test func allowsThePluginsTools() async {
         let registrar = FakeRegistrar(.installed)
-        let agent = AgentSettingsViewModel(registrar: registrar)
+        let agent = AgentSettingsViewModel(registrar: registrar, defaults: .isolated)
         await agent.read()
         #expect(agent.toolsWarning?.hasPrefix("Claude Code asks before Scry's agent") == true)
         #expect(agent.canAllowTools)
