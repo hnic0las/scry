@@ -14,6 +14,9 @@ protocol AgentRegistrar {
     func install() async throws
     func uninstall() async throws
     func removeOldServer() async throws
+    /// Allows the plugin's read tools and `explain` in Claude Code's user
+    /// settings.
+    func allowTools() async throws
 }
 
 /// Settings › Agent: the `git-scry` plugin in Claude Code, for every
@@ -113,6 +116,20 @@ final class AgentSettingsViewModel {
         return "The plugin will not find Scry: move Scry to the Applications folder, or install the git scry command in Settings › CLI."
     }
 
+    /// Said when the plugin is installed and Claude Code would ask before
+    /// each tool the Explain agent runs: the user's own session would stop
+    /// on a question each time.
+    var toolsWarning: String? {
+        guard let setup, setup.state == .installed, !setup.toolsAllowed else { return nil }
+        return "Claude Code asks before Scry's agent reads a conflict or answers an Explain. Allow Scry's tools so Explain is answered without a question; resolving still asks."
+    }
+
+    var canAllowTools: Bool { !isWorking && toolsWarning != nil }
+
+    func allowTools() async {
+        await run { try await self.registrar.allowTools() }
+    }
+
     func install() async {
         await run { try await self.registrar.install() }
     }
@@ -154,5 +171,9 @@ struct AppAgentRegistrar: AgentRegistrar {
 
     func removeOldServer() async throws {
         try await Task.detached { try Scry.removeOldServer() }.value
+    }
+
+    func allowTools() async throws {
+        try await Task.detached { try allowPluginTools() }.value
     }
 }

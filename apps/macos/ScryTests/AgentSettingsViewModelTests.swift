@@ -8,6 +8,7 @@ private final class FakeRegistrar: AgentRegistrar {
     var state: AgentSetupState
     var oldServer = false
     var pluginScry: String? = "/Applications/Scry.app/Contents/Helpers/git-scry"
+    var toolsAllowed = false
     var failure: ScryError?
     private(set) var installs = 0
 
@@ -20,7 +21,8 @@ private final class FakeRegistrar: AgentRegistrar {
             state: state,
             command: "claude plugin marketplace add hnic0las/scry && claude plugin install git-scry@scry",
             oldServer: oldServer,
-            pluginScry: pluginScry
+            pluginScry: pluginScry,
+            toolsAllowed: toolsAllowed
         )
     }
 
@@ -29,6 +31,7 @@ private final class FakeRegistrar: AgentRegistrar {
         installs += 1
         state = .installed
         oldServer = false
+        toolsAllowed = true
     }
 
     func uninstall() async throws {
@@ -39,6 +42,11 @@ private final class FakeRegistrar: AgentRegistrar {
     func removeOldServer() async throws {
         if let failure { throw failure }
         oldServer = false
+    }
+
+    func allowTools() async throws {
+        if let failure { throw failure }
+        toolsAllowed = true
     }
 }
 
@@ -138,5 +146,25 @@ struct AgentSettingsViewModelTests {
         await agent.install()
         #expect(agent.error == nil)
         #expect(agent.isInstalled)
+    }
+
+    /// A plugin installed without Scry (from Claude Code) leaves Claude Code asking before
+    /// each tool Explain's agent runs: the settings say so and allow them in one click;
+    /// once allowed, or with no plugin, nothing is said.
+    @Test func allowsThePluginsTools() async {
+        let registrar = FakeRegistrar(.installed)
+        let agent = AgentSettingsViewModel(registrar: registrar)
+        await agent.read()
+        #expect(agent.toolsWarning?.hasPrefix("Claude Code asks before Scry's agent") == true)
+        #expect(agent.canAllowTools)
+        await agent.allowTools()
+        #expect(agent.toolsWarning == nil && !agent.canAllowTools)
+
+        registrar.state = .notInstalled
+        registrar.toolsAllowed = false
+        await agent.read()
+        #expect(agent.toolsWarning == nil)
+        await agent.install()
+        #expect(agent.toolsWarning == nil)
     }
 }

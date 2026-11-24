@@ -1,0 +1,16 @@
+#!/bin/sh
+# The plugin's monitor: `git-scry wait --follow`, which prints a line each
+# time the user asks for an explanation in Scry. It runs in every Claude
+# Code session, so without a Scry that can wait (not installed, too old)
+# it stays silent rather than speak in every session, and looks again each
+# minute: a session opened before Scry was installed or updated starts
+# watching without a restart.
+set -u
+. "$(dirname "$0")/find-git-scry"
+
+while :; do
+    if find_git_scry && "$git_scry" wait --help >/dev/null 2>&1; then
+        exec "$git_scry" wait --follow
+    fi
+    sleep 60
+done

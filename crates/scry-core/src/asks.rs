@@ -133,12 +133,31 @@ fn watchers(git_dir: &Path) -> PathBuf {
     git_dir.join("scry").join("watchers")
 }
 
+/// How long the file of a watcher that stopped beating is kept: one
+/// killed with its session cannot remove its own, the next beat does.
+pub const FORGOTTEN_AFTER: Duration = Duration::from_secs(3600);
+
 /// Says the watcher `id` (its process id) is there, now: written when it
-/// starts and every [`BEAT`] while it runs.
+/// starts and every [`BEAT`] while it runs. Removes the files of watchers
+/// silent for [`FORGOTTEN_AFTER`].
 pub fn beat(git_dir: &Path, id: &str) -> io::Result<()> {
     let folder = watchers(git_dir);
     fs::create_dir_all(&folder)?;
-    fs::write(folder.join(id), "")
+    fs::write(folder.join(id), "")?;
+    let now = SystemTime::now();
+    for entry in fs::read_dir(&folder)?.flatten() {
+        let silent = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|beat| {
+                now.duration_since(beat)
+                    .is_ok_and(|since| since > FORGOTTEN_AFTER)
+            });
+        if silent {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
 }
 
 /// Says the watcher `id` left.
@@ -218,5 +237,29 @@ mod tests {
         leave(dir.path(), "42");
         assert!(!watching(dir.path(), now));
         leave(dir.path(), "42");
+    }
+
+    /// A beat removes the file of a watcher silent for an hour, killed with
+    /// its session, and keeps one that beat recently.
+    #[test]
+    fn a_beat_forgets_watchers_long_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        beat(dir.path(), "1").unwrap();
+        beat(dir.path(), "2").unwrap();
+        let folder = watchers(dir.path());
+        let set = |id: &str, age: Duration| {
+            fs::File::options()
+                .write(true)
+                .open(folder.join(id))
+                .unwrap()
+                .set_modified(SystemTime::now() - age)
+                .unwrap();
+        };
+        set("1", FORGOTTEN_AFTER + Duration::from_secs(60));
+        set("2", FORGOTTEN_AFTER - Duration::from_secs(60));
+        beat(dir.path(), "3").unwrap();
+        assert!(!folder.join("1").exists());
+        assert!(folder.join("2").exists());
+        assert!(folder.join("3").exists());
     }
 }

@@ -28,6 +28,9 @@ struct AgentSettingsView: View {
                 if let old = viewModel.oldServerWarning {
                     warning(old)
                 }
+                if let tools = viewModel.toolsWarning {
+                    warning(tools)
+                }
                 HStack {
                     if viewModel.canInstall {
                         Button(viewModel.installTitle) {
@@ -37,6 +40,11 @@ struct AgentSettingsView: View {
                     if viewModel.canRemoveOldServer && !viewModel.canInstall {
                         Button("Remove the Earlier Server") {
                             Task { await viewModel.removeOldServer() }
+                        }
+                    }
+                    if viewModel.canAllowTools {
+                        Button("Allow Scry's Tools") {
+                            Task { await viewModel.allowTools() }
                         }
                     }
                     if viewModel.canUninstall {
@@ -56,7 +64,7 @@ struct AgentSettingsView: View {
             } header: {
                 Text("Claude Code")
             } footer: {
-                Text("Installs Scry's git-scry plugin in Claude Code once, for all your projects: the server that reads conflicts and writes the resolutions you ask for, and /git-scry:resolve. Restart Claude Code sessions to load it. Nothing is staged, continued or committed by it.")
+                Text("Installs Scry's git-scry plugin in Claude Code once, for all your projects: the server that reads conflicts and writes the resolutions you ask for, /git-scry:resolve, and the agent that answers Explain in the background of your session. Allows its read tools and Explain in Claude Code's settings; resolving still asks. Restart Claude Code sessions to load it. Nothing is staged, continued or committed by it.")
                     .font(Metrics.caption)
                     .foregroundStyle(Theme.Surfaces.textSecondary)
             }
@@ -90,17 +98,19 @@ private struct PreviewRegistrar: AgentRegistrar {
     func install() async throws {}
     func uninstall() async throws {}
     func removeOldServer() async throws {}
+    func allowTools() async throws {}
 }
 
 private struct AgentPreview: View {
     @State private var viewModel: AgentSettingsViewModel
 
-    init(_ state: AgentSetupState, oldServer: Bool = false, finds: Bool = true) {
+    init(_ state: AgentSetupState, oldServer: Bool = false, finds: Bool = true, allowed: Bool = true) {
         let setup = AgentSetup(
             state: state,
             command: PreviewRegistrar.command,
             oldServer: oldServer,
-            pluginScry: finds ? "/Applications/Scry.app/Contents/Helpers/git-scry" : nil
+            pluginScry: finds ? "/Applications/Scry.app/Contents/Helpers/git-scry" : nil,
+            toolsAllowed: allowed
         )
         _viewModel = State(initialValue: AgentSettingsViewModel(
             registrar: PreviewRegistrar(current: setup),
@@ -125,6 +135,10 @@ private struct AgentPreview: View {
 
 #Preview("Agent, earlier server left") {
     AgentPreview(.installed, oldServer: true)
+}
+
+#Preview("Agent, tools not allowed") {
+    AgentPreview(.installed, allowed: false)
 }
 
 #Preview("Agent, no Scry for the plugin") {

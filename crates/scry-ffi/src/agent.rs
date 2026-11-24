@@ -1,5 +1,6 @@
-//! Settings › Agent: installing the `git-scry` plugin in Claude Code, with
-//! the user's `claude` (`scry_core::agent_setup` says what to run and reads
+//! Settings › Agent: installing the `git-scry` plugin in Claude Code, and
+//! allowing its tools in Claude Code's user settings, with the user's
+//! `claude` (`scry_core::agent_setup` says what to run and reads
 //! its answers).
 
 use std::path::PathBuf;
@@ -7,6 +8,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use scry_core::agent_setup::{self, AgentState, Plugin};
+use scry_core::session::write_atomically;
 
 use crate::ScryError;
 use crate::cli_command::{fallback_path, home, run, shell_path};
@@ -35,6 +37,9 @@ pub struct AgentSetup {
     pub old_server: bool,
     /// The `git-scry` the plugin starts; `None` when it would find no Scry.
     pub plugin_scry: Option<String>,
+    /// Claude Code's settings let the plugin's read tools and `explain`
+    /// run without asking, so Explain is answered without a question.
+    pub tools_allowed: bool,
 }
 
 /// Listing, enabling or removing: `claude mcp get` starts the server to
@@ -118,6 +123,48 @@ impl Found {
     }
 }
 
+impl Found {
+    /// Claude Code's user settings, as `change` rewrites them; nothing
+    /// written when it changes nothing.
+    fn change_settings(
+        &self,
+        change: fn(Option<&str>) -> Result<Option<String>, String>,
+    ) -> Result<(), ScryError> {
+        let file = agent_setup::settings_file(&self.home);
+        let text = match std::fs::read_to_string(&file) {
+            Ok(text) => Some(text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(ScryError::Failed {
+                    message: format!("{} could not be read: {error}", file.display()),
+                });
+            }
+        };
+        let changed = change(text.as_deref()).map_err(|why| ScryError::Refused {
+            message: format!(
+                "Scry did not change {}: {why}. Allow Scry's tools in Claude Code instead (\"don't ask again\").",
+                file.display()
+            ),
+        })?;
+        let Some(changed) = changed else {
+            return Ok(());
+        };
+        if let Some(folder) = file.parent() {
+            std::fs::create_dir_all(folder).map_err(|error| ScryError::Failed {
+                message: format!("{} could not be made: {error}", folder.display()),
+            })?;
+        }
+        write_atomically(&file, &changed).map_err(|error| ScryError::Failed {
+            message: format!("{} could not be written: {error}", file.display()),
+        })
+    }
+
+    fn tools_allowed(&self) -> bool {
+        let text = std::fs::read_to_string(agent_setup::settings_file(&self.home)).ok();
+        agent_setup::tools_allowed(text.as_deref())
+    }
+}
+
 /// Where Claude Code stands with Scry's plugin. Runs the user's shell and
 /// `claude`, which can take seconds: call it off the main thread.
 #[uniffi::export]
@@ -135,13 +182,15 @@ pub fn agent_setup() -> AgentSetup {
         old_server: found.old_server(),
         plugin_scry: agent_setup::plugin_scry(&found.path, &found.home)
             .map(|path| path.display().to_string()),
+        tools_allowed: found.tools_allowed(),
     }
 }
 
 /// Installs the plugin for every project, adding Scry's marketplace first
 /// when Claude Code does not have it, or turns it on when it is installed
 /// and off; then removes the server an earlier Scry registered, so Claude
-/// Code shows Scry once.
+/// Code shows Scry once, and allows the plugin's read tools and `explain`
+/// in Claude Code's user settings.
 #[uniffi::export]
 pub fn install_plugin() -> Result<(), ScryError> {
     let found = Found::new();
@@ -159,15 +208,24 @@ pub fn install_plugin() -> Result<(), ScryError> {
             found.claude(&agent_setup::install_arguments(), INSTALL_TIMEOUT)?;
         }
     }
-    found.remove_old_server()
+    found.remove_old_server()?;
+    found.change_settings(agent_setup::allowing)
 }
 
-/// Uninstalls the plugin. Scry's marketplace stays, as other marketplaces
-/// do once added.
+/// Allows the plugin's read tools and `explain` in Claude Code's user
+/// settings, for a plugin installed without Scry.
+#[uniffi::export]
+pub fn allow_plugin_tools() -> Result<(), ScryError> {
+    Found::new().change_settings(agent_setup::allowing)
+}
+
+/// Uninstalls the plugin and removes the rules Scry added for its tools.
+/// Scry's marketplace stays, as other marketplaces do once added.
 #[uniffi::export]
 pub fn uninstall_plugin() -> Result<(), ScryError> {
-    Found::new().claude(&agent_setup::uninstall_arguments(), CLAUDE_TIMEOUT)?;
-    Ok(())
+    let found = Found::new();
+    found.claude(&agent_setup::uninstall_arguments(), CLAUDE_TIMEOUT)?;
+    found.change_settings(agent_setup::disallowing)
 }
 
 /// Removes the server an earlier Scry registered for every project.

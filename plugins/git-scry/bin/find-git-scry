@@ -1,0 +1,22 @@
+# Sourced by the plugin's launchers: sets git_scry to the Scry app's
+# git-scry, found as git-scry finds the app: $SCRY_APP, then git-scry on the
+# PATH (Claude Code started from an IDE may not have the terminal's), then
+# /Applications and ~/Applications. Returns 1 when there is none.
+
+find_git_scry() {
+    if [ -n "${SCRY_APP:-}" ] && [ -x "$SCRY_APP/Contents/Helpers/git-scry" ]; then
+        git_scry="$SCRY_APP/Contents/Helpers/git-scry"
+        return 0
+    fi
+    if command -v git-scry >/dev/null 2>&1; then
+        git_scry=$(command -v git-scry)
+        return 0
+    fi
+    for app in /Applications/Scry.app "$HOME/Applications/Scry.app"; do
+        if [ -x "$app/Contents/Helpers/git-scry" ]; then
+            git_scry="$app/Contents/Helpers/git-scry"
+            return 0
+        fi
+    done
+    return 1
+}

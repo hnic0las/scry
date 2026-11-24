@@ -1,0 +1,7 @@
+[
+  {
+    "name": "asks",
+    "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/git-scry-watch",
+    "description": "Explanations the user asks for in Scry. On each line \"Scry asks: explain <path> <id>\", start the git-scry:scry-explainer agent in the background with that line as its prompt, then go back to what you were doing. Do not explain it yourself and do not wait for the agent. Scry shows the answer to the user: say nothing about the ask, the agent or its result, beyond at most one short line, and run no tool for it; when the agent ends, the same."
+  }
+]

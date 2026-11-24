@@ -1,29 +1,10 @@
 #!/bin/sh
 # Starts Scry's MCP server, `git-scry mcp`, for Claude Code. The plugin does
-# not carry git-scry: it is the one of the Scry app, found as git-scry finds
-# the app: $SCRY_APP, then git-scry on the PATH (Claude Code started from an
-# IDE may not have the terminal's), then /Applications and ~/Applications.
+# not carry git-scry: it is the one of the Scry app (see find-git-scry).
 set -u
+. "$(dirname "$0")/find-git-scry"
 
-find_git_scry() {
-    if [ -n "${SCRY_APP:-}" ] && [ -x "$SCRY_APP/Contents/Helpers/git-scry" ]; then
-        echo "$SCRY_APP/Contents/Helpers/git-scry"
-        return 0
-    fi
-    if command -v git-scry >/dev/null 2>&1; then
-        command -v git-scry
-        return 0
-    fi
-    for app in /Applications/Scry.app "$HOME/Applications/Scry.app"; do
-        if [ -x "$app/Contents/Helpers/git-scry" ]; then
-            echo "$app/Contents/Helpers/git-scry"
-            return 0
-        fi
-    done
-    return 1
-}
-
-if ! git_scry=$(find_git_scry); then
+if ! find_git_scry; then
     echo "git-scry-mcp: Scry is not installed. Install the Scry app in /Applications (https://github.com/hnic0las/scry), or set SCRY_APP to where it is." >&2
     exit 1
 fi

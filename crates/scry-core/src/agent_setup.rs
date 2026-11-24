@@ -6,9 +6,12 @@
 //! decision 0002, amended on 2026-11-17 and 2026-11-23): `claude plugin`
 //! to list, add the marketplace, install, enable and uninstall Scry's
 //! plugin, and `claude mcp get` and `remove --scope user` for the server
-//! named `scry` an earlier Scry registered, on the user's click. These only
-//! change Claude Code's configuration: nothing here starts a session, sends
-//! a prompt or reads credentials.
+//! named `scry` an earlier Scry registered, on the user's click; and adding
+//! to Claude Code's user settings the rules that let the plugin's read
+//! tools and `explain` run without asking, so the background agent that
+//! answers Scry's asks is never stopped by a question (amended again on
+//! 2026-11-24). These only change Claude Code's configuration: nothing
+//! here starts a session, sends a prompt or reads credentials.
 //!
 //! What to run and how to read its answer is decided here; running it is
 //! the front end's, which knows the user's `PATH`.
@@ -27,6 +30,130 @@ pub const MARKETPLACE_SOURCE: &str = "hnic0las/scry";
 /// add --scope user scry`), which Claude Code would show next to the
 /// plugin's.
 pub const OLD_SERVER: &str = "scry";
+
+/// The plugin's tools allowed without asking: the three that read, and
+/// `explain`, which writes only Scry's answer under the git folder.
+/// `resolve`, which writes the user's files, still asks.
+pub const ALLOWED_TOOLS: [&str; 4] = [
+    "mcp__plugin_git-scry_scry__overview",
+    "mcp__plugin_git-scry_scry__conflicts",
+    "mcp__plugin_git-scry_scry__conflict",
+    "mcp__plugin_git-scry_scry__explain",
+];
+
+/// Rules that allow every tool of the plugin's server, which the user may
+/// have written instead.
+const SERVER_RULES: [&str; 2] = ["mcp__plugin_git-scry_scry", "mcp__plugin_git-scry_scry__*"];
+
+/// Claude Code's user settings.
+pub fn settings_file(home: &Path) -> PathBuf {
+    home.join(".claude").join("settings.json")
+}
+
+/// The rules of `permissions.allow` in Claude Code's settings.
+fn allow_rules(settings: &serde_json::Value) -> Vec<&str> {
+    settings["permissions"]["allow"]
+        .as_array()
+        .map(|rules| rules.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default()
+}
+
+/// Whether Claude Code's user settings (`settings`, the file's text, `None`
+/// when there is none) let the tools of [`ALLOWED_TOOLS`] run without
+/// asking: each named, or the whole server.
+pub fn tools_allowed(settings: Option<&str>) -> bool {
+    let Some(settings) = settings.and_then(|text| serde_json::from_str(text).ok()) else {
+        return false;
+    };
+    let rules = allow_rules(&settings);
+    rules.iter().any(|rule| SERVER_RULES.contains(rule))
+        || ALLOWED_TOOLS.iter().all(|tool| rules.contains(tool))
+}
+
+/// Claude Code's user settings with the rules of [`ALLOWED_TOOLS`] added
+/// to `permissions.allow`, everything else kept in its order; `None` when
+/// they are all there. An error when the file is not a JSON object, which
+/// Scry does not rewrite.
+pub fn allowing(settings: Option<&str>) -> Result<Option<String>, String> {
+    let mut value = parsed(settings)?;
+    let rules: Vec<String> = allow_rules(&value)
+        .iter()
+        .map(|rule| rule.to_string())
+        .collect();
+    let missing: Vec<&str> = ALLOWED_TOOLS
+        .into_iter()
+        .filter(|tool| !rules.iter().any(|rule| rule == tool))
+        .collect();
+    if missing.is_empty() {
+        return Ok(None);
+    }
+    let permissions = value
+        .as_object_mut()
+        .expect("parsed checks it is an object")
+        .entry("permissions")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(permissions) = permissions.as_object_mut() else {
+        return Err(String::from("its permissions are not an object"));
+    };
+    let allow = permissions
+        .entry("allow")
+        .or_insert_with(|| serde_json::json!([]));
+    let Some(allow) = allow.as_array_mut() else {
+        return Err(String::from("its permissions.allow is not a list"));
+    };
+    allow.extend(missing.into_iter().map(serde_json::Value::from));
+    pretty(&value).map(Some)
+}
+
+/// Claude Code's user settings without the rules of [`ALLOWED_TOOLS`];
+/// `None` when there are none to remove. Rules the user wrote another way
+/// are theirs, and kept.
+pub fn disallowing(settings: Option<&str>) -> Result<Option<String>, String> {
+    if settings.is_none() {
+        return Ok(None);
+    }
+    let mut value = parsed(settings)?;
+    let Some(allow) = value
+        .get_mut("permissions")
+        .and_then(|permissions| permissions.get_mut("allow"))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(None);
+    };
+    let before = allow.len();
+    allow.retain(|rule| {
+        !rule
+            .as_str()
+            .is_some_and(|rule| ALLOWED_TOOLS.contains(&rule))
+    });
+    if allow.len() == before {
+        return Ok(None);
+    }
+    pretty(&value).map(Some)
+}
+
+/// The settings as a JSON object: empty when there is no file.
+fn parsed(settings: Option<&str>) -> Result<serde_json::Value, String> {
+    let value: serde_json::Value = match settings {
+        None => serde_json::json!({}),
+        Some(text) if text.trim().is_empty() => serde_json::json!({}),
+        Some(text) => {
+            serde_json::from_str(text).map_err(|error| format!("it is not JSON ({error})"))?
+        }
+    };
+    match value.is_object() {
+        true => Ok(value),
+        false => Err(String::from("it is not a JSON object")),
+    }
+}
+
+/// The settings written as Claude Code writes them: two spaces, a final
+/// line break.
+fn pretty(value: &serde_json::Value) -> Result<String, String> {
+    serde_json::to_string_pretty(value)
+        .map(|text| text + "\n")
+        .map_err(|error| error.to_string())
+}
 
 /// Whether Claude Code has the plugin, for every project of the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,6 +432,74 @@ mod tests {
             executable(&users);
             assert_eq!(plugin_scry(&[empty], &home), Some(users));
         }
+    }
+
+    /// The rules are added to what the settings hold, in its order, once;
+    /// a file that is no JSON object is not rewritten; removing them keeps
+    /// the user's other rules, including a rule for the whole server.
+    #[test]
+    fn the_tools_are_allowed_in_claude_s_settings() {
+        assert!(!tools_allowed(None));
+        assert!(!tools_allowed(Some("not json")));
+        let added = allowing(None).unwrap().unwrap();
+        assert!(tools_allowed(Some(&added)));
+        assert!(added.ends_with("]\n  }\n}\n"), "{added}");
+        assert_eq!(allowing(Some(&added)).unwrap(), None);
+
+        let theirs = r#"{"model":"opus","permissions":{"allow":["Bash(ls *)","mcp__plugin_git-scry_scry__conflict"],"deny":[]},"theme":"dark"}"#;
+        assert!(!tools_allowed(Some(theirs)));
+        let added = allowing(Some(theirs)).unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&added).unwrap();
+        assert_eq!(
+            value.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["model", "permissions", "theme"]
+        );
+        assert_eq!(
+            value["permissions"]["allow"],
+            serde_json::json!([
+                "Bash(ls *)",
+                "mcp__plugin_git-scry_scry__conflict",
+                "mcp__plugin_git-scry_scry__overview",
+                "mcp__plugin_git-scry_scry__conflicts",
+                "mcp__plugin_git-scry_scry__explain"
+            ])
+        );
+        assert_eq!(value["permissions"]["deny"], serde_json::json!([]));
+        let removed = disallowing(Some(&added)).unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&removed).unwrap();
+        assert_eq!(
+            value["permissions"]["allow"],
+            serde_json::json!(["Bash(ls *)"])
+        );
+        assert_eq!(disallowing(Some(&removed)).unwrap(), None);
+        assert_eq!(disallowing(None).unwrap(), None);
+        assert_eq!(disallowing(Some(r#"{"model":"opus"}"#)).unwrap(), None);
+
+        for server in [
+            r#"{"permissions":{"allow":["mcp__plugin_git-scry_scry"]}}"#,
+            r#"{"permissions":{"allow":["mcp__plugin_git-scry_scry__*"]}}"#,
+        ] {
+            assert!(tools_allowed(Some(server)));
+            assert_eq!(disallowing(Some(server)).unwrap(), None);
+        }
+        assert_eq!(allowing(Some("  ")).unwrap(), allowing(None).unwrap());
+        assert!(
+            allowing(Some("[1]"))
+                .unwrap_err()
+                .contains("not a JSON object")
+        );
+        assert!(
+            allowing(Some("{,}"))
+                .unwrap_err()
+                .starts_with("it is not JSON")
+        );
+        assert!(allowing(Some(r#"{"permissions":[]}"#)).is_err());
+        assert!(allowing(Some(r#"{"permissions":{"allow":{}}}"#)).is_err());
+        assert!(disallowing(Some("{,}")).is_err());
+        assert_eq!(
+            settings_file(Path::new("/Users/me")),
+            Path::new("/Users/me/.claude/settings.json")
+        );
     }
 
     /// The plugin is installed from Scry's marketplace, for every project;

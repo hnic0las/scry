@@ -36,17 +36,43 @@ fn repository(dir: &Path) -> PathBuf {
     repo
 }
 
-fn wait(dir: &Path, args: &[&str]) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_git-scry"))
-        .current_dir(dir)
-        .arg("wait")
-        .args(args)
-        .env("GIT_CONFIG_GLOBAL", dir.join("../gitconfig"))
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap()
+/// A `git-scry wait` that is killed when the test ends, passed or not: a
+/// failing test, or a mutant that never exits, leaves no process behind.
+struct Running(Child);
+
+impl std::ops::Deref for Running {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Running {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn wait(dir: &Path, args: &[&str]) -> Running {
+    Running(
+        Command::new(env!("CARGO_BIN_EXE_git-scry"))
+            .current_dir(dir)
+            .arg("wait")
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", dir.join("../gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    )
 }
 
 /// The lines `child` prints, as they come.

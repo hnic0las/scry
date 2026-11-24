@@ -32,7 +32,8 @@ uniffi::setup_scaffolding!();
 mod agent;
 mod cli_command;
 pub use agent::{
-    AgentSetup, AgentSetupState, agent_setup, install_plugin, remove_old_server, uninstall_plugin,
+    AgentSetup, AgentSetupState, agent_setup, allow_plugin_tools, install_plugin,
+    remove_old_server, uninstall_plugin,
 };
 pub use cli_command::{CliCommandState, cli_command_state, install_cli_command};
 
