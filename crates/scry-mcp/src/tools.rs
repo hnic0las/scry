@@ -302,6 +302,13 @@ impl Tools {
             Some(Choice::Edited(edit)) => {
                 text += &format!("\nResolved with its own text:\n{}", fenced(&edit.text))
             }
+            Some(Choice::Proposed(proposed)) => {
+                let record = &proposed.record;
+                text += &format!("Reason given by {}: {}\n", record.by, record.reason);
+                if record.pick.is_none() {
+                    text += &format!("\nResolved with its own text:\n{}", fenced(&record.text));
+                }
+            }
             Some(Choice::Candidate(_)) | None => {}
         }
 
@@ -836,6 +843,11 @@ fn state(choice: Option<&Choice>) -> String {
         None => String::from("open"),
         Some(Choice::Candidate(kind)) => format!("resolved in Scry: {}", kind.id()),
         Some(Choice::Edited(_)) => String::from("resolved in Scry: own text"),
+        Some(Choice::Proposed(proposed)) => format!(
+            "resolved in Scry with {}'s proposal: {}",
+            proposed.record.by,
+            proposed.record.pick.map_or("own text", |kind| kind.id())
+        ),
         Some(Choice::Outside(outside)) => {
             let by = outside
                 .record

@@ -164,6 +164,8 @@ pub struct Explanations {
     pub explained: usize,
     /// Conflicts asked about and not answered since.
     pub waiting: usize,
+    /// Conflicts whose resolution the user asked for, not proposed since.
+    pub suggesting: usize,
 }
 
 /// The review of the operation's current stop.
@@ -290,6 +292,16 @@ impl Store {
         self.write(&self.file("answers", path), &answers)
     }
 
+    /// Forgets the answer of `kind` about a conflict of `path`: a proposal
+    /// the user rejected.
+    pub fn forget_answer(&self, path: &str, kind: AskKind, conflict: &str) -> io::Result<()> {
+        let mut answers = self.all_answers(path);
+        if answers.remove(&kind.key(conflict)).is_some() {
+            self.write(&self.file("answers", path), &answers)?;
+        }
+        Ok(())
+    }
+
     /// Whether the ask of `kind` about `conflict` of `path` waits for its
     /// answer.
     pub fn is_open(&self, path: &str, kind: AskKind, conflict: &str) -> bool {
@@ -370,8 +382,18 @@ impl Store {
                                 .is_some_and(|ask| open(ask, Some(answer)))
                     })
                     .count();
-                let counts = Explanations { explained, waiting };
-                (explained + waiting > 0).then_some((path, counts))
+                let proposals = self.answers(&path, AskKind::Resolve);
+                let suggesting = self
+                    .asks(&path, AskKind::Resolve)
+                    .values()
+                    .filter(|ask| open(ask, proposals.get(&ask.conflict)))
+                    .count();
+                let counts = Explanations {
+                    explained,
+                    waiting,
+                    suggesting,
+                };
+                (explained + waiting + suggesting > 0).then_some((path, counts))
             })
             .collect()
     }
@@ -647,7 +669,16 @@ mod tests {
         store.cancel_ask("a.txt", AskKind::Resolve, "c1").unwrap();
         assert!(store.asks("a.txt", AskKind::Resolve).is_empty());
         assert_eq!(store.asks("a.txt", AskKind::Explain).len(), 1);
-        assert_eq!(store.explanations()["a.txt"].waiting, 1);
+        assert_eq!(
+            store.explanations()["a.txt"],
+            Explanations {
+                explained: 0,
+                waiting: 1,
+                suggesting: 0
+            }
+        );
+        store.ask("a.txt", resolve(2_000)).unwrap();
+        assert_eq!(store.explanations()["a.txt"].suggesting, 1);
     }
 
     /// The overview counts, per file, the conflicts explained and those
@@ -694,14 +725,16 @@ mod tests {
                     String::from("a b.txt"),
                     Explanations {
                         explained: 1,
-                        waiting: 2
+                        waiting: 2,
+                        suggesting: 0
                     }
                 ),
                 (
                     String::from("only.txt"),
                     Explanations {
                         explained: 1,
-                        waiting: 0
+                        waiting: 0,
+                        suggesting: 0
                     }
                 ),
             ])

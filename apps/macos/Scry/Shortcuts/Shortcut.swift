@@ -121,6 +121,10 @@ extension Shortcut {
         id: "explain", title: "Explain the conflict", section: .editor, key: .character("e"),
         modifiers: [.control, .command], note: "Asks Claude Code, or asks again", hint: "Explain"
     )
+    static let suggest = Shortcut(
+        id: "suggest", title: "Suggest a resolution", section: .editor, key: .character("g"),
+        modifiers: [.control, .command], note: "Claude Code proposes one; you accept it or not", hint: "Suggest"
+    )
     static let markAsResolved = Shortcut(
         id: "markAsResolved", title: "Mark as Resolved", section: .editor, key: .return, modifiers: [.command],
         note: "Writes the file; under git mergetool, git moves on"
@@ -175,7 +179,7 @@ extension Shortcut {
     /// Every shortcut, in the order the sheet lists them.
     static let all: [Shortcut] = [
         previousConflict, nextConflict, takeOurs, takeTheirs, takeBoth, takeBase, takeNone, editByHand,
-        undo, redo, toggleBase, switchLayout, toggleInspector, explain, markAsResolved,
+        undo, redo, toggleBase, switchLayout, toggleInspector, explain, suggest, markAsResolved,
         applyEdit, cancelEdit,
         openFile, refresh, continueOperation,
         openRepository, openConflictedFile, keyboardShortcuts,

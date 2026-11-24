@@ -21,7 +21,7 @@ struct AgentSettingsView: View {
             }
             .foregroundStyle(viewModel.pluginOn ? Theme.Surfaces.text : Theme.Surfaces.textTertiary)
             Section {
-                Toggle("Explain conflicts with Claude Code", isOn: $viewModel.explainEnabled)
+                Toggle("Explain and suggest with Claude Code", isOn: $viewModel.explainEnabled)
                     .disabled(!viewModel.pluginOn)
             } header: {
                 Text("Explain")

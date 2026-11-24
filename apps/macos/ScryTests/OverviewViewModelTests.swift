@@ -200,18 +200,18 @@ struct OverviewViewModelTests {
         #expect(overview.rows.allSatisfy { $0.explanation == nil })
 
         source.explained = ExplainOverview(watching: true, files: [
-            FileExplanations(path: "A.swift", explained: 1, waiting: 1),
-            FileExplanations(path: "B.swift", explained: 2, waiting: 0),
+            FileExplanations(path: "A.swift", explained: 1, waiting: 1, suggesting: 0),
+            FileExplanations(path: "B.swift", explained: 2, waiting: 0, suggesting: 1),
         ])
         await overview.refreshExplanations()
         #expect(overview.watching == true)
-        #expect(overview.rows.map(\.explanation) == ["1 explained · 1 waiting", nil])
+        #expect(overview.rows.map(\.explanation) == ["1 explained · 1 waiting", "1 suggestion waiting"])
         source.explained = ExplainOverview(watching: false, files: [
-            FileExplanations(path: "A.swift", explained: 0, waiting: 2),
+            FileExplanations(path: "A.swift", explained: 0, waiting: 2, suggesting: 2),
         ])
         await overview.refreshExplanations()
         #expect(overview.watching == false)
-        #expect(overview.rows.map(\.explanation) == ["2 waiting", nil])
+        #expect(overview.rows.map(\.explanation) == ["2 waiting · 2 suggestions waiting", nil])
 
         defaults.set(false, forKey: InspectorViewModel.explainKey)
         #expect(overview.rows.allSatisfy { $0.explanation == nil })

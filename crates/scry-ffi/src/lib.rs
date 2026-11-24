@@ -4,6 +4,7 @@
 //! (portability rule 1). Types here are plain records converted from the
 //! core's, so the core stays free of UniFFI.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,7 @@ use scry_core::operation;
 use scry_core::overview;
 use scry_core::presentation;
 use scry_core::rebase_plan;
-use scry_core::records::{self, Ask, AskKind, Store};
+use scry_core::records::{self, Answer, Ask, AskKind, Record, Store};
 use scry_core::resolution::CandidateKind;
 use scry_core::review;
 use scry_core::session::{self, MergeSession, MergetoolFiles};
@@ -245,7 +246,7 @@ pub enum Row {
     },
 }
 
-#[derive(Debug, Clone, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum ParseStatus {
     NotChecked,
     Parses,
@@ -406,6 +407,11 @@ pub enum Command {
     Reopen {
         conflict: u32,
     },
+    /// Resolves a conflict with the agent's proposal, which the user
+    /// accepts (`suggest_state`).
+    AcceptProposal {
+        conflict: u32,
+    },
     Undo,
     Redo,
     /// Writes the merged file; with `overwrite`, even over a file changed
@@ -468,6 +474,48 @@ pub struct ExplainState {
     pub stale: bool,
 }
 
+/// A resolution the user asked for in Scry, as the agent proposed it.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AgentProposal {
+    /// Why, in the agent's words; with `failed`, the problem it met.
+    pub reason: String,
+    /// The agent's name, without its version ("Claude Code").
+    pub by: String,
+    /// Milliseconds since 1970.
+    pub at: u64,
+    /// The agent could not propose one: `reason` says why.
+    pub failed: bool,
+    /// The candidate proposed, by id ("theirs"); `None` for its own text.
+    pub pick: Option<String>,
+    /// The resolution's text.
+    pub text: String,
+    /// What of either side the text leaves out, as the agent said.
+    pub dropped: Option<String>,
+    /// Whether the file parses with it, the other conflicts as ours.
+    pub parse: ParseStatus,
+}
+
+/// Where Suggest stands on one conflict.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SuggestState {
+    /// The file is in a repository, where asks are kept.
+    pub available: bool,
+    /// When the user asked, in milliseconds since 1970, while the ask
+    /// waits for its answer.
+    pub asked_at: Option<u64>,
+    /// The last proposal, kept while a new ask waits.
+    pub proposal: Option<AgentProposal>,
+    /// A Claude Code session watches the repository.
+    pub watching: bool,
+    /// The proposal is about an earlier version of the conflict: the user
+    /// wrote other text by hand since it was asked.
+    pub stale: bool,
+}
+
+/// When an ask waits (`asked_at`), its last answer, whether a session
+/// watches, and whether the answer is stale.
+type AskState = (Option<u64>, Option<Answer>, bool, bool);
+
 /// Where a document's asks are kept: its repository's store for the stop
 /// it was opened at.
 struct Asking {
@@ -487,6 +535,8 @@ pub struct MergeDocument {
     // UniFFI shares the object with Swift behind an `Arc`, so methods take
     // `&self`; the mutex lets commands change the session safely.
     session: Mutex<MergeSession>,
+    /// Each proposal's parse check, by conflict and the proposal's time.
+    proposal_checks: Mutex<HashMap<(u32, u64), ParseStatus>>,
 }
 
 /// `path` in its repository: the root, and the path from it as git names
@@ -560,10 +610,82 @@ impl MergeDocument {
         self.header.clone()
     }
 
+    /// Where Suggest stands on conflict `conflict`: read from the
+    /// repository each time, since the agent answers from outside.
+    pub fn suggest_state(&self, conflict: u32) -> SuggestState {
+        let Some((asked_at, answer, watching, stale)) = self.ask_state(conflict, AskKind::Resolve)
+        else {
+            return SuggestState {
+                available: false,
+                asked_at: None,
+                proposal: None,
+                watching: false,
+                stale: false,
+            };
+        };
+        let proposal = answer.and_then(|answer| {
+            let parse = match &answer.proposal {
+                Some(proposal) => self.proposal_check(conflict, answer.at, &proposal.text),
+                None => ParseStatus::NotChecked,
+            };
+            let (pick, text, dropped) = match answer.proposal {
+                Some(proposal) => (
+                    proposal.pick.map(|kind| kind.id().to_string()),
+                    proposal.text,
+                    proposal.dropped,
+                ),
+                None if answer.failed => (None, String::new(), None),
+                None => return None,
+            };
+            Some(AgentProposal {
+                reason: answer.text,
+                by: records::agent_name(&answer.by),
+                at: answer.at,
+                failed: answer.failed,
+                pick,
+                text,
+                dropped,
+                parse,
+            })
+        });
+        SuggestState {
+            available: true,
+            asked_at,
+            proposal,
+            watching,
+            stale,
+        }
+    }
+
+    /// Asks the agent watching the repository to propose a resolution for
+    /// conflict `conflict`, again when it proposed one before.
+    pub fn ask_suggest(&self, conflict: u32) -> Result<(), ScryError> {
+        self.ask(conflict, AskKind::Resolve)
+    }
+
+    /// Takes back the Suggest ask about conflict `conflict`; its last
+    /// proposal stays.
+    pub fn cancel_suggest(&self, conflict: u32) -> Result<(), ScryError> {
+        self.cancel(conflict, AskKind::Resolve)
+    }
+
+    /// Forgets the agent's proposal for conflict `conflict`: the user
+    /// rejected it, and can ask again.
+    pub fn reject_proposal(&self, conflict: u32) -> Result<(), ScryError> {
+        let (asking, id) = self.asking(conflict)?;
+        asking
+            .store
+            .forget_answer(&asking.path, AskKind::Resolve, &id)
+            .map_err(|error| ScryError::Failed {
+                message: format!("The proposal could not be rejected: {error}"),
+            })
+    }
+
     /// Where Explain stands on conflict `conflict`: read from the
     /// repository each time, since the agent answers from outside.
     pub fn explain_state(&self, conflict: u32) -> ExplainState {
-        let Some(asking) = &self.asking else {
+        let Some((asked_at, answer, watching, stale)) = self.ask_state(conflict, AskKind::Explain)
+        else {
             return ExplainState {
                 available: false,
                 asked_at: None,
@@ -572,25 +694,6 @@ impl MergeDocument {
                 stale: false,
             };
         };
-        let id = self.conflict_id(conflict);
-        let open = id
-            .as_deref()
-            .is_some_and(|id| asking.store.is_open(&asking.path, AskKind::Explain, id));
-        let asked_at = id
-            .as_deref()
-            .and_then(|id| asking.store.asks(&asking.path, AskKind::Explain).remove(id))
-            .filter(|_| open)
-            .map(|ask| ask.at);
-        let answer = id.as_deref().and_then(|id| {
-            asking
-                .store
-                .answers(&asking.path, AskKind::Explain)
-                .remove(id)
-        });
-        let edited = self.edited(conflict);
-        let stale = answer
-            .as_ref()
-            .is_some_and(|answer| !answer.failed && edited.is_some() && edited != answer.edited);
         ExplainState {
             available: true,
             asked_at,
@@ -600,7 +703,7 @@ impl MergeDocument {
                 at: answer.at,
                 failed: answer.failed,
             }),
-            watching: asks::watching(&asking.git_dir, SystemTime::now()),
+            watching,
             stale,
         }
     }
@@ -608,36 +711,12 @@ impl MergeDocument {
     /// Asks the agent watching the repository to explain conflict
     /// `conflict`, again when it was explained before.
     pub fn ask_explain(&self, conflict: u32) -> Result<(), ScryError> {
-        let (asking, id) = self.asking(conflict)?;
-        let edited = self.edited(conflict);
-        let at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |time| time.as_millis() as u64);
-        asking
-            .store
-            .ask(
-                &asking.path,
-                Ask {
-                    conflict: id,
-                    kind: AskKind::Explain,
-                    at,
-                    edited,
-                },
-            )
-            .map_err(|error| ScryError::Failed {
-                message: format!("The ask could not be kept: {error}"),
-            })
+        self.ask(conflict, AskKind::Explain)
     }
 
     /// Takes back the ask about conflict `conflict`; its last answer stays.
     pub fn cancel_explain(&self, conflict: u32) -> Result<(), ScryError> {
-        let (asking, id) = self.asking(conflict)?;
-        asking
-            .store
-            .cancel_ask(&asking.path, AskKind::Explain, &id)
-            .map_err(|error| ScryError::Failed {
-                message: format!("The ask could not be taken back: {error}"),
-            })
+        self.cancel(conflict, AskKind::Explain)
     }
 
     /// `show_base` adds each conflict's base lines above its block.
@@ -666,7 +745,13 @@ impl MergeDocument {
     /// file changed on disk fails with `ChangedOnDisk`; the app asks, then
     /// sends `Save` with `overwrite`.
     pub fn apply(&self, command: Command) -> Result<Vec<Event>, ScryError> {
-        let command = core_command(command)?;
+        let command = match command {
+            Command::AcceptProposal { conflict } => core::Command::AcceptProposal {
+                conflict: conflict as usize,
+                proposal: self.accepted(conflict)?,
+            },
+            command => core_command(command)?,
+        };
         match self.lock().apply(command) {
             Ok(events) => Ok(events.into_iter().map(event).collect()),
             Err(error @ CommandError::Save(session::SaveError::ChangedOnDisk(_))) => {
@@ -761,6 +846,7 @@ impl MergeDocument {
             asking,
             commits,
             session: Mutex::new(session),
+            proposal_checks: Mutex::new(HashMap::new()),
         })
     }
 
@@ -793,6 +879,115 @@ impl MergeDocument {
             message: format!("There is no conflict {}.", index.saturating_add(1)),
         })?;
         Ok((asking, id))
+    }
+
+    /// Where asks of `kind` stand on conflict `conflict`: when it was asked
+    /// while the ask waits, the last answer, whether a session watches,
+    /// and whether the answer is about text the user rewrote since; `None`
+    /// outside a repository.
+    fn ask_state(&self, conflict: u32, kind: AskKind) -> Option<AskState> {
+        let asking = self.asking.as_ref()?;
+        let id = self.conflict_id(conflict);
+        let open = id
+            .as_deref()
+            .is_some_and(|id| asking.store.is_open(&asking.path, kind, id));
+        let asked_at = id
+            .as_deref()
+            .and_then(|id| asking.store.asks(&asking.path, kind).remove(id))
+            .filter(|_| open)
+            .map(|ask| ask.at);
+        let answer = id
+            .as_deref()
+            .and_then(|id| asking.store.answers(&asking.path, kind).remove(id));
+        let edited = self.edited(conflict);
+        let stale = answer
+            .as_ref()
+            .is_some_and(|answer| !answer.failed && edited.is_some() && edited != answer.edited);
+        let watching = asks::watching(&asking.git_dir, SystemTime::now());
+        Some((asked_at, answer, watching, stale))
+    }
+
+    /// Asks the agent about conflict `conflict`, with the text the user
+    /// wrote by hand for it, if any.
+    fn ask(&self, conflict: u32, kind: AskKind) -> Result<(), ScryError> {
+        let (asking, id) = self.asking(conflict)?;
+        let edited = self.edited(conflict);
+        let at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |time| time.as_millis() as u64);
+        asking
+            .store
+            .ask(
+                &asking.path,
+                Ask {
+                    conflict: id,
+                    kind,
+                    at,
+                    edited,
+                },
+            )
+            .map_err(|error| ScryError::Failed {
+                message: format!("The ask could not be kept: {error}"),
+            })
+    }
+
+    fn cancel(&self, conflict: u32, kind: AskKind) -> Result<(), ScryError> {
+        let (asking, id) = self.asking(conflict)?;
+        asking
+            .store
+            .cancel_ask(&asking.path, kind, &id)
+            .map_err(|error| ScryError::Failed {
+                message: format!("The ask could not be taken back: {error}"),
+            })
+    }
+
+    /// The agent's proposal for conflict `conflict`, as the record the
+    /// session keeps once the user accepts it.
+    fn accepted(&self, conflict: u32) -> Result<Record, ScryError> {
+        let (asking, id) = self.asking(conflict)?;
+        let answer = asking
+            .store
+            .answers(&asking.path, AskKind::Resolve)
+            .remove(&id)
+            .filter(|answer| !answer.failed);
+        let Some((answer, proposal)) =
+            answer.and_then(|answer| answer.proposal.clone().map(|proposal| (answer, proposal)))
+        else {
+            return Err(ScryError::Refused {
+                message: String::from("There is no proposal to accept for this conflict."),
+            });
+        };
+        Ok(Record {
+            conflict: id,
+            by: answer.by,
+            pick: proposal.pick,
+            text: proposal.text,
+            reason: answer.text,
+            dropped: proposal.dropped,
+            at: answer.at / 1000,
+        })
+    }
+
+    /// Whether the file parses with `text` resolving conflict `conflict`,
+    /// checked once per proposal (`at`): the inspector reads it every
+    /// second.
+    fn proposal_check(&self, conflict: u32, at: u64, text: &str) -> ParseStatus {
+        let key = (conflict, at);
+        let mut checks = self
+            .proposal_checks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(check) = checks.get(&key) {
+            return check.clone();
+        }
+        let session = self.lock();
+        let index = conflict as usize;
+        let check = match index < session.conflict_count() {
+            true => parse_status(session.check_text(index, text)),
+            false => ParseStatus::NotChecked,
+        };
+        checks.insert(key, check.clone());
+        check
     }
 
     fn lock(&self) -> MutexGuard<'_, MergeSession> {
@@ -1447,6 +1642,8 @@ pub struct FileExplanations {
     pub explained: u32,
     /// Conflicts asked about and not answered since.
     pub waiting: u32,
+    /// Conflicts whose resolution was asked for, not proposed since.
+    pub suggesting: u32,
 }
 
 /// The operation overview of one repository (S1).
@@ -1837,6 +2034,7 @@ impl RepositoryOverview {
                     path,
                     explained: counts.explained as u32,
                     waiting: counts.waiting as u32,
+                    suggesting: counts.suggesting as u32,
                 })
                 .collect(),
         })
@@ -1945,6 +2143,9 @@ fn core_command(command: Command) -> Result<core::Command, ScryError> {
             conflict: conflict as usize,
             text,
         },
+        Command::AcceptProposal { .. } => {
+            return Err(failed("a proposal is accepted through the document"));
+        }
         Command::ApplySuggestions => core::Command::ApplySuggestions,
         Command::MarkReviewed { conflict } => core::Command::MarkReviewed {
             conflict: conflict as usize,
@@ -1970,6 +2171,9 @@ fn command(command: core::Command) -> Command {
         core::Command::Edit { conflict, text } => Command::Edit {
             conflict: conflict as u32,
             text,
+        },
+        core::Command::AcceptProposal { conflict, .. } => Command::AcceptProposal {
+            conflict: conflict as u32,
         },
         core::Command::ApplySuggestions => Command::ApplySuggestions,
         core::Command::MarkReviewed { conflict } => Command::MarkReviewed {
@@ -2216,6 +2420,95 @@ mod tests {
         (dir, path)
     }
 
+    /// Suggest through the API the app uses: the ask waits, the agent's
+    /// proposal shows with its check, accepting it resolves the conflict
+    /// as the agent's (named after the candidate it is), and once written
+    /// the file opens again with the agent's record, reviewed. Rejected,
+    /// the proposal is gone; an Explain on the same conflict is untouched.
+    #[test]
+    fn a_proposal_is_accepted_or_rejected() {
+        let (dir, path) = merge_with_a_conflict();
+        let document = MergeDocument::open(path.display().to_string()).unwrap();
+        let store = Store::open(&GitCli::new(dir.path().to_path_buf())).unwrap();
+        let id = document.conflicts()[0].id.clone();
+        assert!(matches!(
+            document.apply(Command::AcceptProposal { conflict: 0 }),
+            Err(ScryError::Refused { .. })
+        ));
+
+        document.ask_suggest(0).unwrap();
+        document.ask_explain(0).unwrap();
+        let state = document.suggest_state(0);
+        assert!(state.available && state.asked_at.is_some() && state.proposal.is_none());
+        let propose = |pick: Option<CandidateKind>, text: &str| {
+            let answer = Answer {
+                conflict: id.clone(),
+                kind: AskKind::Resolve,
+                by: String::from("claude-code 2.1"),
+                text: String::from("Feature's line is the one main's callers expect."),
+                at: u64::MAX / 2,
+                edited: None,
+                failed: false,
+                proposal: Some(records::Proposal {
+                    pick,
+                    text: text.to_string(),
+                    dropped: None,
+                }),
+            };
+            store.answer("a.txt", answer).unwrap();
+        };
+        propose(Some(CandidateKind::Theirs), "feature\n");
+        let state = document.suggest_state(0);
+        assert_eq!(state.asked_at, None);
+        assert_eq!(
+            state.proposal,
+            Some(AgentProposal {
+                reason: String::from("Feature's line is the one main's callers expect."),
+                by: String::from("Claude Code"),
+                at: u64::MAX / 2,
+                failed: false,
+                pick: Some(String::from("theirs")),
+                text: String::from("feature\n"),
+                dropped: None,
+                parse: ParseStatus::NotChecked,
+            })
+        );
+        assert!(document.explain_state(0).asked_at.is_some());
+
+        document
+            .apply(Command::AcceptProposal { conflict: 0 })
+            .unwrap();
+        let chosen = document.conflicts()[0].chosen.clone().unwrap();
+        assert_eq!(chosen.id, "proposed");
+        assert_eq!(chosen.title, "Claude Code · Theirs");
+        assert!(matches!(chosen.provenance, Provenance::Agent));
+        save(&document, false).unwrap();
+        assert_eq!(store.records("a.txt")[&id].text, "feature\n");
+        let again = MergeDocument::open(path.display().to_string()).unwrap();
+        let outside = again.conflicts()[0].outside.clone().unwrap();
+        assert_eq!(outside.by.as_deref(), Some("Claude Code"));
+        assert!(outside.reviewed);
+
+        propose(None, "mine");
+        document
+            .apply(Command::AcceptProposal { conflict: 0 })
+            .unwrap();
+        let conflict = document.conflicts().remove(0);
+        assert_eq!(conflict.chosen.unwrap().title, "Claude Code · Own text");
+        assert_eq!(conflict.edit_text, "mine\n");
+        assert_eq!(document.edited(0), None);
+        // A pick whose text is not that candidate's is the agent's own.
+        propose(Some(CandidateKind::Theirs), "feature, changed\n");
+        document
+            .apply(Command::AcceptProposal { conflict: 0 })
+            .unwrap();
+        let chosen = document.conflicts()[0].chosen.clone().unwrap();
+        assert_eq!(chosen.title, "Claude Code · Own text");
+        document.reject_proposal(0).unwrap();
+        assert_eq!(document.suggest_state(0).proposal, None);
+        assert!(document.explain_state(0).asked_at.is_some());
+    }
+
     /// Resolved through `git mergetool`, then opened again from the
     /// overview, a file shows what the user chose, not a resolution from
     /// outside Scry.
@@ -2414,7 +2707,8 @@ mod tests {
                 files: vec![FileExplanations {
                     path: String::from("a.txt"),
                     explained: 0,
-                    waiting: 1
+                    waiting: 1,
+                    suggesting: 0
                 }]
             }
         );

@@ -270,8 +270,8 @@ final class AgentSettingsViewModel {
     var toolsWarning: Callout? {
         guard let setup, setup.state == .installed, !setup.toolsAllowed else { return nil }
         return Callout(
-            title: "Claude Code asks before each Explain",
-            text: "Claude Code asks before Scry's agent reads a conflict or answers an Explain. Allow Scry's tools so Explain is answered without a question; resolving still asks."
+            title: "Claude Code asks before each Explain or Suggest",
+            text: "Claude Code asks before Scry's agent reads a conflict, explains it or proposes a resolution. Allow Scry's tools so they are answered without a question; resolving in the file still asks."
         )
     }
 
@@ -368,8 +368,8 @@ final class AgentSettingsViewModel {
     var explainDetail: String {
         guard pluginOn else { return Self.unavailable }
         return explainEnabled
-            ? "Adds Explain to the conflict inspector (⌃⌘E). Read-only: it never changes a result. Uses your Claude Code plan."
-            : "Off: no Explain action anywhere in Scry. Explanations already received are hidden, not deleted."
+            ? "Adds Explain (⌃⌘E) and Suggest (⌃⌘G) to the conflict inspector. A proposal changes nothing until you accept it. Uses your Claude Code plan."
+            : "Off: no Explain or Suggest anywhere in Scry. Answers already received are hidden, not deleted."
     }
 }
 

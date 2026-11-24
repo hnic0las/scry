@@ -8,6 +8,7 @@ use serde::Serialize;
 use std::path::Path;
 
 use crate::operation::{Operation, Side, SideRole};
+use crate::records;
 use crate::resolution::{Analysis, CandidateKind};
 use crate::session::{Choice, MergeSession};
 use crate::syntax::ParseCheck;
@@ -19,6 +20,9 @@ pub const EDITED_ID: &str = "edited";
 /// The ID of text a conflict was resolved with outside Scry, when it is no
 /// candidate's.
 pub const OUTSIDE_ID: &str = "outside";
+
+/// The ID of an agent's proposal the user accepted, beside the candidates'.
+pub const PROPOSED_ID: &str = "proposed";
 
 /// How many lines of a candidate a preview shows.
 pub const PREVIEW_LINES: usize = 3;
@@ -221,6 +225,40 @@ impl MergeSession {
                     parse: outside.parse,
                     provenance,
                     ..base
+                })
+            }
+            Some(Choice::Proposed(proposed)) => {
+                let record = &proposed.record;
+                let (preview, truncated) = preview(&record.text);
+                // The candidate it names, while it still is that text.
+                let what = record
+                    .pick
+                    .filter(|kind| {
+                        self.analysis_so_far(index)
+                            .candidates
+                            .iter()
+                            .any(|candidate| {
+                                candidate.kind == *kind && candidate.text == record.text
+                            })
+                    })
+                    .and_then(|kind| {
+                        candidates
+                            .iter()
+                            .find(|candidate| candidate.id == kind.id())
+                    })
+                    .map_or(String::from("Own text"), |candidate| {
+                        candidate.title.clone()
+                    });
+                Some(CandidateView {
+                    id: PROPOSED_ID.to_string(),
+                    title: format!("{} · {what}", records::agent_name(&record.by)),
+                    subtitle: String::from("Proposed by your agent, accepted by you"),
+                    preview,
+                    truncated,
+                    parse: proposed.parse,
+                    provenance: Provenance::Agent,
+                    suggested: false,
+                    aliases: Vec::new(),
                 })
             }
             Some(Choice::Edited(edit)) => {

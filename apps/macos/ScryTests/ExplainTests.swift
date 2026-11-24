@@ -28,6 +28,43 @@ private final class FakeExplainer: Explainer {
         askedAt[index] = nil
     }
 
+    var suggestedAt: [Int: UInt64] = [:]
+    var proposals: [Int: AgentProposal] = [:]
+    private(set) var accepted: [Int] = []
+
+    func suggestState(_ index: Int) -> SuggestState {
+        SuggestState(
+            available: available, askedAt: suggestedAt[index], proposal: proposals[index], watching: watching,
+            stale: stale
+        )
+    }
+
+    func askSuggest(_ index: Int) throws {
+        if let failure { throw failure }
+        suggestedAt[index] = UInt64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    func cancelSuggest(_ index: Int) throws {
+        suggestedAt[index] = nil
+    }
+
+    func rejectProposal(_ index: Int) throws {
+        proposals[index] = nil
+    }
+
+    func acceptProposal(_ index: Int) {
+        accepted.append(index)
+    }
+
+    func propose(_ index: Int, pick: String?, text: String, failed: Bool = false) {
+        suggestedAt[index] = nil
+        proposals[index] = AgentProposal(
+            reason: failed ? "conflict found no conflict c7a9." : "Theirs keeps the rename that line 17 uses.",
+            by: "Claude Code", at: UInt64(Date().timeIntervalSince1970 * 1000), failed: failed, pick: pick,
+            text: text, dropped: nil, parse: .notChecked
+        )
+    }
+
     func answer(_ index: Int, _ text: String, failed: Bool = false) {
         askedAt[index] = nil
         answers[index] = Explanation(
@@ -194,6 +231,73 @@ struct ExplainTests {
         #expect(inspector.isExpanded)
         #expect(ExplainBlock.isLong(String(repeating: "x", count: 500)))
         #expect(!ExplainBlock.isLong("Short."))
+    }
+
+    /// Suggest asks, waits, then shows the proposal named after the
+    /// candidate it picks; Accept and Reject reach the agent's answer; a
+    /// failure shows the problem; nobody watching, the ask is queued.
+    /// Off, there is no Suggest and no ⌃⌘G in the ⌘/ sheet.
+    @Test func suggestProposesThenAcceptsOrRejects() throws {
+        let explainer = FakeExplainer()
+        let inspector = try inspector(explainer)
+        inspector.refreshExplain()
+        #expect(inspector.suggest == .notAsked)
+        #expect(inspector.canSuggest && !inspector.canAnswerProposal)
+
+        inspector.askSuggest()
+        guard case .waiting(let seconds) = inspector.suggest else {
+            Issue.record("not waiting: \(String(describing: inspector.suggest))")
+            return
+        }
+        #expect(seconds < 5)
+        inspector.cancelSuggest()
+        #expect(inspector.suggest == .notAsked)
+
+        explainer.propose(0, pick: "theirs", text: "theirs\n")
+        inspector.refreshExplain()
+        guard case .proposed(let proposal, accepted: false, stale: false) = inspector.suggest else {
+            Issue.record("not proposed: \(String(describing: inspector.suggest))")
+            return
+        }
+        let theirs = try #require(inspector.conflict?.candidates.first { $0.id == "theirs" })
+        #expect(inspector.proposalTitle(proposal) == theirs.title)
+        #expect(inspector.canAnswerProposal)
+        inspector.acceptProposal()
+        #expect(explainer.accepted == [0])
+        inspector.rejectProposal()
+        #expect(inspector.suggest == .notAsked)
+
+        explainer.propose(0, pick: nil, text: "mine\n")
+        inspector.refreshExplain()
+        if case .proposed(let own, _, _) = inspector.suggest {
+            #expect(inspector.proposalTitle(own) == "Own text")
+        } else {
+            Issue.record("own text not proposed")
+        }
+        explainer.stale = true
+        inspector.refreshExplain()
+        #expect({ if case .proposed(_, _, stale: true) = inspector.suggest { true } else { false } }())
+
+        explainer.propose(0, pick: nil, text: "", failed: true)
+        inspector.refreshExplain()
+        #expect({ if case .failed = inspector.suggest { true } else { false } }())
+        #expect(!inspector.canAnswerProposal)
+
+        explainer.watching = false
+        inspector.askSuggest()
+        #expect(inspector.suggest == .noSession)
+        explainer.watching = true
+        explainer.suggestedAt[0] = UInt64((Date().timeIntervalSince1970 - 61) * 1000)
+        inspector.refreshExplain()
+        #expect(inspector.suggest == .noAnswer)
+
+        let defaults = UserDefaults.isolated
+        defaults.set(false, forKey: InspectorViewModel.explainKey)
+        let off = try self.inspector(explainer, defaults: defaults)
+        off.refreshExplain()
+        #expect(off.suggest == nil && !off.canSuggest)
+        let sheet = KeyboardShortcutsViewModel(current: .editor, defaults: defaults)
+        #expect(!sheet.groups.flatMap(\.rows).contains { $0.id == Shortcut.suggest.id })
     }
 
     /// The Explain switch is kept per user, on by default.

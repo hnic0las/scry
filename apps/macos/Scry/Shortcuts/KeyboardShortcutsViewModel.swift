@@ -33,7 +33,7 @@ final class KeyboardShortcutsViewModel: Identifiable {
         self.current = current
         shortcuts = InspectorViewModel.explainEnabled(in: defaults)
             ? Shortcut.all
-            : Shortcut.all.filter { $0 != .explain }
+            : Shortcut.all.filter { $0 != .explain && $0 != .suggest }
     }
 
     var groups: [Group] {

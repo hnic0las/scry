@@ -322,6 +322,15 @@ struct MergeEditorView: View {
             }
             .keyboardShortcut(Shortcut.explain)
             .disabled(!viewModel.inspector.explainOn)
+            // ⌃⌘G asks Claude Code for a resolution of the focused
+            // conflict: the inspector shows the proposal.
+            Button("Suggest a resolution") {
+                showInspector = true
+                viewModel.inspector.refreshExplain()
+                viewModel.inspector.askSuggest()
+            }
+            .keyboardShortcut(Shortcut.suggest)
+            .disabled(!viewModel.inspector.explainOn)
             // Disabled while editing, so ↩ types a line break. Undo and
             // Redo are the Edit menu's (`UndoCommands`).
             Button("Edit by hand") { viewModel.startEditing() }

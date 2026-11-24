@@ -1,13 +1,20 @@
 import Foundation
 import Observation
 
-/// Explain's asks and answers for the conflicts of one file: the core,
-/// reading the repository, in the app; a fake in tests and previews.
+/// Explain's and Suggest's asks and answers for the conflicts of one
+/// file: the core, reading the repository, in the app; a fake in tests and
+/// previews.
 @MainActor
 protocol Explainer: AnyObject {
     func explainState(_ index: Int) -> ExplainState
     func askExplain(_ index: Int) throws
     func cancelExplain(_ index: Int) throws
+    func suggestState(_ index: Int) -> SuggestState
+    func askSuggest(_ index: Int) throws
+    func cancelSuggest(_ index: Int) throws
+    func rejectProposal(_ index: Int) throws
+    /// Resolves the conflict with the proposal, the user accepting it.
+    func acceptProposal(_ index: Int)
 }
 
 extension MergeModel: Explainer {}
@@ -33,7 +40,8 @@ final class InspectorViewModel {
 
     // MARK: Explain
 
-    /// Settings › Agent's switch: off, there is no Explain anywhere.
+    /// Settings › Agent's switch: off, there is no Explain nor Suggest
+    /// anywhere.
     static let explainKey = "explainConflicts"
 
     static func explainEnabled(in defaults: UserDefaults) -> Bool {
@@ -46,6 +54,8 @@ final class InspectorViewModel {
 
     /// Where Explain stands on the focused conflict, as last read.
     private(set) var explainState: ExplainState?
+    /// Where Suggest stands on the focused conflict, as last read.
+    private(set) var suggestState: SuggestState?
     /// The conflict `explainState` is about.
     private var explainedIndex: Int?
     /// When `explainState` was read: the waiting time counts from it.
@@ -113,6 +123,7 @@ final class InspectorViewModel {
         }
         now = Date()
         explainState = explainer.explainState(conflict.index)
+        suggestState = explainer.suggestState(conflict.index)
         explainedIndex = conflict.index
     }
 
@@ -142,6 +153,97 @@ final class InspectorViewModel {
             explainError = error.message
         }
         refreshExplain()
+    }
+
+    // MARK: Suggest
+
+    /// What the Suggest block and the agent's card show.
+    enum Suggest: Equatable {
+        /// Nothing asked: the Suggest button.
+        case notAsked
+        /// Asked, a session watching.
+        case waiting(seconds: Int)
+        /// Asked, nobody watching: the ask waits for a session.
+        case noSession
+        /// Asked a minute ago, a session watching, and nothing came back.
+        case noAnswer
+        /// The agent's proposal: `accepted` once it is the conflict's
+        /// choice; `stale` when the user wrote other text by hand since it
+        /// was asked.
+        case proposed(AgentProposal, accepted: Bool, stale: Bool)
+        /// Claude Code could not propose one: the problem it met.
+        case failed(AgentProposal)
+    }
+
+    /// The core's id for an accepted proposal (`PROPOSED_ID`).
+    static let proposedId = "proposed"
+
+    /// The Suggest block; `nil` when Explain and Suggest are off, the file
+    /// is in no repository, or nothing was read yet.
+    var suggest: Suggest? {
+        guard Self.explainEnabled(in: defaults),
+              let state = suggestState, state.available,
+              explainedIndex == conflict?.index
+        else { return nil }
+        guard let asked = state.askedAt else {
+            guard let proposal = state.proposal else { return .notAsked }
+            if proposal.failed { return .failed(proposal) }
+            let chosen = conflict?.chosen?.id == Self.proposedId
+            return .proposed(proposal, accepted: chosen, stale: state.stale)
+        }
+        guard state.watching else { return .noSession }
+        let waited = max(now.timeIntervalSince1970 - Double(asked) / 1000, 0)
+        if waited >= Self.answerPatience { return .noAnswer }
+        return .waiting(seconds: Int(waited))
+    }
+
+    /// ⌃⌘G and the block's button: asks, or asks again.
+    var canSuggest: Bool { suggest != nil }
+
+    func askSuggest() {
+        guard let conflict, canSuggest else { return }
+        run { try self.explainer.askSuggest(conflict.index) }
+    }
+
+    func cancelSuggest() {
+        guard let conflict else { return }
+        run { try self.explainer.cancelSuggest(conflict.index) }
+    }
+
+    /// Accepting, editing or rejecting the proposal changes the result:
+    /// not while a conflict is edited by hand.
+    var canAnswerProposal: Bool {
+        guard case .proposed = suggest else { return false }
+        return model.editing == nil
+    }
+
+    func acceptProposal() {
+        guard let conflict, canAnswerProposal else { return }
+        explainer.acceptProposal(conflict.index)
+        refreshExplain()
+    }
+
+    /// Accepts the proposal and opens it in the editor by hand: the text
+    /// the user then writes is theirs.
+    func editProposal() {
+        guard let conflict, canAnswerProposal else { return }
+        explainer.acceptProposal(conflict.index)
+        onEditByHand(conflict.index)
+        refreshExplain()
+    }
+
+    /// Forgets the proposal; an accepted one stays the conflict's choice
+    /// until the user undoes it or chooses another.
+    func rejectProposal() {
+        guard let conflict, canAnswerProposal else { return }
+        run { try self.explainer.rejectProposal(conflict.index) }
+    }
+
+    /// The candidate a proposal picks, as its card names it ("Theirs");
+    /// "Own text" for the agent's own.
+    func proposalTitle(_ proposal: AgentProposal) -> String {
+        guard let pick = proposal.pick else { return "Own text" }
+        return conflict?.candidates.first { $0.id == pick }?.title ?? "Own text"
     }
 
     /// Whether the focused conflict's long answer is open.

@@ -59,6 +59,19 @@ struct InspectorView: View {
             )
         }
 
+        if let suggest = viewModel.suggest {
+            switch suggest {
+            case .proposed:
+                EmptyView()
+            default:
+                SuggestBlock(
+                    suggest: suggest,
+                    ask: { viewModel.askSuggest() },
+                    cancel: { viewModel.cancelSuggest() }
+                )
+            }
+        }
+
         if let review = viewModel.review {
             ReviewCard(
                 review: review,
@@ -72,6 +85,21 @@ struct InspectorView: View {
         Text("Candidates")
             .font(Metrics.captionBold)
             .foregroundStyle(Theme.Surfaces.textSecondary)
+
+        if case .proposed(let proposal, let accepted, let stale) = viewModel.suggest {
+            ProposalCard(
+                proposal: proposal,
+                title: viewModel.proposalTitle(proposal),
+                accepted: accepted,
+                stale: stale,
+                language: viewModel.language,
+                enabled: viewModel.canAnswerProposal,
+                accept: { viewModel.acceptProposal() },
+                edit: { viewModel.editProposal() },
+                reject: { viewModel.rejectProposal() },
+                askAgain: { viewModel.askSuggest() }
+            )
+        }
 
         VStack(alignment: .leading, spacing: 12) {
             ForEach(viewModel.cards) { card in
@@ -346,14 +374,275 @@ struct ExplainBlock: View {
     /// More than eight lines in the inspector, about.
     static func isLong(_ text: String) -> Bool { text.count > 420 }
 
+    /// "2 minutes ago"; an answer stamped a moment after the app's clock
+    /// reads as now, not "in 0 seconds".
     static func relative(_ milliseconds: UInt64) -> String {
-        let date = Date(timeIntervalSince1970: Double(milliseconds) / 1000)
-        return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
+        let now = Date()
+        let date = min(Date(timeIntervalSince1970: Double(milliseconds) / 1000), now)
+        return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: now)
     }
 
     static func exact(_ milliseconds: UInt64) -> String {
         Date(timeIntervalSince1970: Double(milliseconds) / 1000)
             .formatted(date: .abbreviated, time: .standard)
+    }
+}
+
+/// Suggest: asking the user's Claude Code for a resolution, until it
+/// proposes one (then `ProposalCard`, among the candidates). Nothing here
+/// changes the result.
+struct SuggestBlock: View {
+    let suggest: InspectorViewModel.Suggest
+    let ask: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        Group {
+            switch suggest {
+            case .notAsked, .proposed:
+                VStack(alignment: .leading, spacing: 6) {
+                    Button(action: ask) {
+                        Label("Suggest a Resolution…", systemImage: "sparkles")
+                    }
+                    .help(Shortcut.suggest.help())
+                    detail("Claude Code proposes a resolution and says why. Nothing changes until you accept it.")
+                }
+            case .waiting(let seconds):
+                AgentBox(strip: .dashed) {
+                    HStack {
+                        ProgressView().controlSize(.small)
+                        Text("Asked Claude Code for a resolution…").font(Metrics.headline)
+                        Spacer()
+                        Text("\(seconds) s")
+                            .font(Metrics.callout)
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.Surfaces.textSecondary)
+                    }
+                    detail("A helper proposes one in the background of your session. Usually 10 to 30 seconds.")
+                    Button("Cancel", action: cancel)
+                }
+            case .noSession:
+                AgentBox(strip: nil) {
+                    HStack(spacing: 6) {
+                        PresenceDot(watching: false)
+                        Text("Waiting for Claude Code").font(Metrics.headline)
+                    }
+                    detail("Your ask is queued. Open Claude Code in this repository and it proposes one right away.")
+                    HStack {
+                        Button("Cancel", action: cancel)
+                        SettingsLink {
+                            Text("Plugin not set up? Settings › Agent…")
+                        }
+                        .buttonStyle(.link)
+                    }
+                }
+            case .noAnswer:
+                AgentBox(strip: nil) {
+                    Label {
+                        Text("No proposal from Claude Code").font(Metrics.headline)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle").foregroundStyle(Theme.Severity.warning)
+                    }
+                    detail("Nothing came back after a minute. Look at your Claude Code session: it may be busy or waiting for you.")
+                    HStack {
+                        Button("Ask Again", action: ask).help(Shortcut.suggest.help())
+                        Button("Cancel", action: cancel)
+                    }
+                }
+            case .failed(let failure):
+                AgentBox(strip: nil) {
+                    Label {
+                        Text("Claude Code could not propose one").font(Metrics.headline)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle").foregroundStyle(Theme.Severity.warning)
+                    }
+                    Text(failure.reason)
+                        .font(Metrics.code)
+                        .foregroundStyle(Theme.Surfaces.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                    Text("\(failure.by) · \(ExplainBlock.relative(failure.at))")
+                        .font(Metrics.caption)
+                        .foregroundStyle(Theme.Surfaces.textSecondary)
+                        .help(ExplainBlock.exact(failure.at))
+                    HStack {
+                        Spacer()
+                        Button("Ask Again", action: ask).help(Shortcut.suggest.help())
+                    }
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Suggest a resolution")
+    }
+
+    private func detail(_ text: String) -> some View {
+        Text(text)
+            .font(Metrics.callout)
+            .foregroundStyle(Theme.Surfaces.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// The agent's proposal, among the candidates (S3's agent candidate):
+/// dashed in the agent's colour until accepted, then solid and selected;
+/// its reason, what it leaves out, whether the file parses with it, and
+/// Accept, Edit, Reject. About text rewritten since, a grey strip says so.
+struct ProposalCard: View {
+    let proposal: AgentProposal
+    /// The candidate it picks ("Theirs"), or "Own text".
+    let title: String
+    let accepted: Bool
+    let stale: Bool
+    let language: String?
+    let enabled: Bool
+    let accept: () -> Void
+    let edit: () -> Void
+    let reject: () -> Void
+    let askAgain: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: accepted ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(accepted ? Theme.Provenance.agent : Theme.Surfaces.textTertiary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Suggested by \(proposal.by)").font(Metrics.headline)
+                    Text(title)
+                        .font(Metrics.caption)
+                        .foregroundStyle(Theme.Surfaces.textSecondary)
+                }
+                Spacer(minLength: 4)
+                Badge(text: Provenance.agent.name, symbol: Provenance.agent.symbol, color: Theme.Provenance.agent)
+            }
+            if stale {
+                Label("About an earlier version: you changed the conflict since.", systemImage: "clock")
+                    .font(Metrics.caption)
+                    .foregroundStyle(Theme.Surfaces.textSecondary)
+            }
+            preview
+            Text(proposal.reason)
+                .font(Metrics.callout)
+                .foregroundStyle(stale ? Theme.Surfaces.textSecondary : Theme.Surfaces.text)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            if let dropped = proposal.dropped {
+                Text("Left out: \(dropped)")
+                    .font(Metrics.caption)
+                    .foregroundStyle(Theme.Surfaces.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            verification
+            HStack {
+                if accepted {
+                    Label("Accepted · ⌘Z to undo", systemImage: "checkmark")
+                        .font(Metrics.caption)
+                        .foregroundStyle(Theme.States.resolved)
+                } else {
+                    Button("Accept", action: accept)
+                        .help("Resolve this conflict with Claude Code's proposal")
+                }
+                Button("Edit", action: edit)
+                    .help("Start from this proposal and write the result yourself")
+                Button("Reject", action: reject)
+                    .help("Forget this proposal")
+                Spacer(minLength: 4)
+                Button("Ask Again", action: askAgain)
+                    .buttonStyle(.link)
+                    .help(Shortcut.suggest.help())
+            }
+            .disabled(!enabled)
+            Text(ExplainBlock.relative(proposal.at))
+                .font(Metrics.caption)
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+                .help(ExplainBlock.exact(proposal.at))
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Metrics.cardCornerRadius)
+                .fill(Theme.Surfaces.pane)
+                .stroke(
+                    stale ? Theme.Sides.base : Theme.Provenance.agent,
+                    style: StrokeStyle(lineWidth: accepted ? 2 : 1, dash: accepted ? [] : [4, 3])
+                )
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Suggested by \(proposal.by), \(title)")
+        .accessibilityValue(accepted ? "accepted" : "")
+    }
+
+    private var preview: some View {
+        let lines = proposal.text.split(separator: "\n", omittingEmptySubsequences: false)
+            .dropLast(proposal.text.hasSuffix("\n") ? 1 : 0)
+        return VStack(alignment: .leading, spacing: 0) {
+            if lines.isEmpty {
+                Text("(nothing)")
+                    .italic()
+                    .foregroundStyle(Theme.Surfaces.textTertiary)
+            }
+            ForEach(Array(lines.prefix(6).enumerated()), id: \.offset) { _, line in
+                Text(String(line)).lineLimit(1).truncationMode(.tail)
+            }
+            if lines.count > 6 {
+                Text("…").foregroundStyle(Theme.Surfaces.textTertiary)
+            }
+        }
+        .font(Metrics.codeSmall)
+        .foregroundStyle(Theme.Surfaces.text)
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 5).fill(Theme.Surfaces.sidebar))
+        .textSelection(.enabled)
+    }
+
+    @ViewBuilder
+    private var verification: some View {
+        switch proposal.parse {
+        case .parses:
+            Label("Parses as \(language ?? "code")", systemImage: "checkmark")
+                .font(Metrics.caption)
+                .foregroundStyle(Theme.States.resolved)
+        case .doesNotParse(let line):
+            Label("Does not parse near line \(line) · still acceptable, then edit by hand", systemImage: "xmark")
+                .font(Metrics.caption)
+                .foregroundStyle(Theme.Severity.error)
+        case .notChecked:
+            EmptyView()
+        }
+    }
+}
+
+/// A box with the agent's provenance strip on its left edge: dashed while
+/// asked, none while nobody watches.
+private struct AgentBox<Content: View>: View {
+    enum Strip { case dashed }
+    let strip: Strip?
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) { content }
+            .padding(10)
+            .padding(.leading, strip == nil ? 0 : 3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: Metrics.cardCornerRadius)
+                    .fill(Theme.Surfaces.pane)
+                    .stroke(Theme.Surfaces.hairline)
+            )
+            .overlay(alignment: .leading) {
+                if strip != nil {
+                    VerticalLine()
+                        .stroke(
+                            Theme.Provenance.agent,
+                            style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: [4, 4])
+                        )
+                        .frame(width: 3)
+                        .padding(.vertical, 8)
+                        .padding(.leading, 5)
+                }
+            }
     }
 }
 
@@ -707,4 +996,34 @@ private struct ExplainPreview: View {
         .answered(previewExplanation, watching: true),
     ])
     .preferredColorScheme(.dark)
+}
+
+private let previewProposal = AgentProposal(
+    reason: "Keeps the rename's requestTimeout, which line 17 already uses, with main's 60 s for slow cellular links.",
+    by: "Claude Code",
+    at: UInt64(Date().addingTimeInterval(-40).timeIntervalSince1970 * 1000),
+    failed: false,
+    pick: nil,
+    text: "    /// How long a request may wait before it fails.\n    static let requestTimeout: TimeInterval = 60\n",
+    dropped: "nothing: only the old name timeout goes.",
+    parse: .parses
+)
+
+#Preview("Suggest states", traits: .fixedLayout(width: 320, height: 1100)) {
+    VStack(alignment: .leading, spacing: 16) {
+        SuggestBlock(suggest: .notAsked, ask: {}, cancel: {})
+        SuggestBlock(suggest: .waiting(seconds: 9), ask: {}, cancel: {})
+        SuggestBlock(suggest: .noAnswer, ask: {}, cancel: {})
+        ProposalCard(
+            proposal: previewProposal, title: "Own text", accepted: false, stale: false, language: "Swift",
+            enabled: true, accept: {}, edit: {}, reject: {}, askAgain: {}
+        )
+        ProposalCard(
+            proposal: previewProposal, title: "Own text", accepted: true, stale: false, language: "Swift",
+            enabled: true, accept: {}, edit: {}, reject: {}, askAgain: {}
+        )
+    }
+    .padding(12)
+    .frame(width: 320)
+    .background(Theme.Surfaces.sidebar)
 }

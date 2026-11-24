@@ -588,15 +588,21 @@ final class OverviewViewModel {
     }
 
     /// The line under a file's state while one of its conflicts waits for
-    /// an explanation; none with Explain off.
+    /// an explanation or a proposal; none with Explain and Suggest off.
     private func explanationLine(_ path: String) -> String? {
         guard InspectorViewModel.explainEnabled(in: defaults),
               let file = explanations?.files.first(where: { $0.path == path }),
-              file.waiting > 0
+              file.waiting + file.suggesting > 0
         else { return nil }
-        return file.explained > 0
-            ? "\(file.explained) explained · \(file.waiting) waiting"
-            : "\(file.waiting) waiting"
+        var parts: [String] = []
+        if file.waiting > 0 {
+            if file.explained > 0 { parts.append("\(file.explained) explained") }
+            parts.append("\(file.waiting) waiting")
+        }
+        if file.suggesting > 0 {
+            parts.append(file.suggesting == 1 ? "1 suggestion waiting" : "\(file.suggesting) suggestions waiting")
+        }
+        return parts.joined(separator: " · ")
     }
 
     // MARK: Row menu

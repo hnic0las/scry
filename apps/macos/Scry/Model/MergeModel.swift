@@ -137,6 +137,32 @@ final class MergeModel {
         try document.cancelExplain(conflict: UInt32(index))
     }
 
+    // MARK: Suggest
+
+    /// Where Suggest stands on a conflict, read from the repository: the
+    /// agent proposes from outside the app.
+    func suggestState(_ index: Int) -> SuggestState {
+        document.suggestState(conflict: UInt32(index))
+    }
+
+    func askSuggest(_ index: Int) throws {
+        try document.askSuggest(conflict: UInt32(index))
+    }
+
+    func cancelSuggest(_ index: Int) throws {
+        try document.cancelSuggest(conflict: UInt32(index))
+    }
+
+    func rejectProposal(_ index: Int) throws {
+        try document.rejectProposal(conflict: UInt32(index))
+    }
+
+    /// Resolves a conflict with the agent's proposal, the user accepting
+    /// it: one step of the history, as a choice.
+    func acceptProposal(_ index: Int) {
+        send(.acceptProposal(conflict: UInt32(index)))
+    }
+
     func redo() {
         send(.redo)
     }

@@ -12,6 +12,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::records::Record;
 use crate::resolution::CandidateKind;
 use crate::session::{ChooseError, SaveError};
 
@@ -29,6 +30,12 @@ pub enum Command {
     Edit {
         conflict: usize,
         text: String,
+    },
+    /// Resolves a conflict with what an agent proposed when the user asked
+    /// in Scry, which the user accepts: kept with who proposed it and why.
+    AcceptProposal {
+        conflict: usize,
+        proposal: Record,
     },
     /// Chooses the rule's suggestion for every open conflict that has one,
     /// as one step of the history.

@@ -74,6 +74,19 @@ pub enum Choice {
     /// What the file held when it was opened for review, resolved outside
     /// Scry: by the user's agent, another editor or a person.
     Outside(Outside),
+    /// What an agent proposed when the user asked in Scry, accepted by the
+    /// user.
+    Proposed(Proposed),
+}
+
+/// An agent's proposal the user accepted, with its check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proposed {
+    /// Who proposed it, the candidate or text, and why: kept as the
+    /// agent's record, so the file opened again shows it.
+    pub record: Record,
+    /// Checked like a candidate.
+    pub parse: ParseCheck,
 }
 
 /// A conflict resolved outside Scry, as the file holds it.
@@ -591,6 +604,7 @@ impl MergeSession {
                 .map(|candidate| candidate.text.as_str()),
             Choice::Edited(edit) => Some(edit.text.as_str()),
             Choice::Outside(outside) => Some(outside.text.as_str()),
+            Choice::Proposed(proposed) => Some(proposed.record.text.as_str()),
         }
     }
 
@@ -638,6 +652,9 @@ impl MergeSession {
                 candidate,
             } => self.choose(conflict, candidate)?,
             Command::Edit { conflict, text } => self.edit(conflict, &text)?,
+            Command::AcceptProposal { conflict, proposal } => {
+                self.accept_proposal(conflict, proposal)?
+            }
             Command::ApplySuggestions => self.apply_suggestions(),
             Command::MarkReviewed { conflict } => self.mark_reviewed(conflict)?,
             Command::Reopen { conflict } => self.reopen(conflict)?,
@@ -697,6 +714,13 @@ impl MergeSession {
         if let Some((store, path)) = &self.reviews {
             let _ = store.set_reviewed(path, &self.reviewed());
             let _ = store.set_chosen(path, &self.chosen());
+            // An accepted proposal is the agent's resolution: its record
+            // goes with the agents', as if it had written it.
+            for choice in self.choices.iter().flatten() {
+                if let Choice::Proposed(proposed) = choice {
+                    let _ = store.add_record(path, proposed.record.clone());
+                }
+            }
         }
     }
 
@@ -708,7 +732,7 @@ impl MergeSession {
                 let candidate = match self.choices[index].as_ref()? {
                     Choice::Candidate(kind) => Some(*kind),
                     Choice::Edited(_) => None,
-                    Choice::Outside(_) => return None,
+                    Choice::Outside(_) | Choice::Proposed(_) => return None,
                 };
                 let text = self.chosen_text(index)?.to_string();
                 Some((self.analyses[index].id.clone(), Chosen { candidate, text }))
@@ -1004,6 +1028,35 @@ impl MergeSession {
         Ok(self.record(
             command,
             vec![(index, Some(Choice::Edited(Edit { text, parse })))],
+        ))
+    }
+
+    /// Resolves conflict `index` with an agent's proposal the user accepts,
+    /// its text with the file's line breaks and a final one, as an edit.
+    fn accept_proposal(
+        &mut self,
+        index: usize,
+        mut record: Record,
+    ) -> Result<Vec<Event>, ChooseError> {
+        if index >= self.conflicts.len() {
+            return Err(ChooseError::NoSuchConflict(index.saturating_add(1)));
+        }
+        let mut text = record.text.replace("\r\n", "\n");
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        if self.line_break == "\r\n" {
+            text = text.replace('\n', "\r\n");
+        }
+        record.text = text;
+        let parse = self.check_in_place(index, &record.text);
+        let command = Command::AcceptProposal {
+            conflict: index,
+            proposal: record.clone(),
+        };
+        Ok(self.record(
+            command,
+            vec![(index, Some(Choice::Proposed(Proposed { record, parse })))],
         ))
     }
 
