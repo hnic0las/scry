@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "git-scry"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "clap",
  "scry-core",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "scry-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "serde",
@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "scry-ffi"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "scry-core",
  "tempfile",
@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "scry-mcp"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "scry-core",
  "serde_json",
