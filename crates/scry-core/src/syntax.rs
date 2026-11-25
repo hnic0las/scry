@@ -861,7 +861,9 @@ mod tests {
         assert_eq!(full, ParseCheck::DoesNotParse { line: 11 });
         let (quick, stopped) = base.check_with_stop(&broken);
         assert!(stopped);
-        assert!(matches!(quick, ParseCheck::DoesNotParse { .. }));
+        // The quick check names the line, counted from 1, where the parser
+        // gave up: further down than the error.
+        assert_eq!(quick, ParseCheck::DoesNotParse { line: 52 });
         assert_eq!(base.locate_with(&broken), full);
         // A check that ran to the end already has the full check's line.
         let whole = [(at..at + 6, "\"k3\" : ,")];

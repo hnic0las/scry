@@ -165,6 +165,11 @@ fn files_go_from_unresolved_to_staged_then_the_rebase_continues() {
     assert!(!snapshot.can_continue());
     assert!(snapshot.can_skip());
 
+    // Markers broken by hand: neither the merge editor nor a view of its
+    // own can open it.
+    fs::write(repo.path().join("a.txt"), "<<<<<<< HEAD\na both\n").unwrap();
+    assert!(!file(&mut overview, &git, "a.txt").can_open());
+
     // Resolved by hand, outside Scry: it needs review before staging.
     fs::write(repo.path().join("a.txt"), "a both\n").unwrap();
     assert_eq!(state(&mut overview, &git, "a.txt"), State::NeedsReview);
