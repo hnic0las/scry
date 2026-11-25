@@ -4,6 +4,7 @@ description = "Merge and review changes with git. Installed as `git-scry`, run a
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [dependencies]

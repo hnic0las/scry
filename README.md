@@ -9,15 +9,15 @@
   A local-first merge tool for git: a native macOS app and the <code>git scry</code> command.
 </p>
 
-Scry (`git-scry`) is a local-first tool, integrated with git, for merging and reviewing changes. It resolves conflicts through `git mergetool`, opens the whole operation in a native app, checks each choice by parsing the file, and works with your Claude Code: your agent resolves and explains conflicts through Scry's plugin, you review in Scry.
+Scry (`git-scry`) is a local-first tool, integrated with git, for merging and reviewing changes. It resolves conflicts through `git mergetool`, opens the whole operation in a native app, checks each choice by parsing the file, and works with your Claude Code: your agent resolves, explains and proposes resolutions through Scry's plugin, you review in Scry.
 
-Status: the merge tool (the macOS app and the `git-scry` CLI) and the Claude Code plugin are close to their first release. The diff tool and review come next (see [Roadmap](#roadmap)).
+Status: version 0.2.0, the first public release: the merge tool (the macOS app and the `git-scry` CLI) and the Claude Code plugin. The diff tool and review come next (see [Roadmap](#roadmap)).
 
 ![The merge editor: ours, the result and theirs, with the inspector and each candidate checked by parsing](.github/screenshots/editor-light.png)
 
 ## Install
 
-1. **The app.** Download Scry from the releases and move it to the Applications folder, or build it from this repository (`scripts/install-app.sh`, see [macOS app](#macos-app)). It needs macOS 15 or later.
+1. **The app.** Download Scry from the [releases](https://github.com/hnic0las/scry/releases/latest) and move it to the Applications folder, or build it from this repository (`scripts/install-app.sh`, see [macOS app](#macos-app)). It needs macOS 15 or later on a Mac with Apple silicon.
 2. **The `git scry` command.** Scry › Settings › CLI › **Install git scry** links the app's `git-scry` into a folder of your terminal's `PATH` (the first of `~/.local/bin`, `/opt/homebrew/bin` or `/usr/local/bin` it can write to), or shows the commands to run when it cannot. The link follows the app's updates.
 3. **git's merge tool** (optional). Scry › Settings › CLI › **Use Scry as git's Merge Tool** sets `merge.tool`, `mergetool.scry.cmd` and `mergetool.scry.trustExitCode` in your global git configuration, and keeps the merge tool it replaces, to put it back with **Stop Using Scry**.
 4. **Claude Code** (optional). Scry › Settings › Agent › **Install Scry's Plugin**, or in a terminal:
@@ -42,16 +42,17 @@ In a repository with a merge, rebase, cherry-pick or revert in progress:
 | Terminal | `git scry highlight <file>` | Prints a file with the app's syntax colours (`--spans` to list them) |
 | Claude Code | `/git-scry:resolve [path]` | Your agent resolves the conflicts, each with its reason, and stages nothing |
 | Scry | ⌃⌘E on a conflict | Explain: your Claude Code session open in the repository says what each side meant |
+| Scry | ⌃⌘G on a conflict | Suggest: that session proposes a resolution, for you to accept, edit or reject |
 | Scry | ⌘/ | Every keyboard shortcut |
 
-Two more commands are for the plugin, not for you to run: `git scry mcp` (Scry's MCP server) and `git scry wait` (prints each Explain you ask for in Scry).
+Two more commands are for the plugin, not for you to run: `git scry mcp` (Scry's MCP server) and `git scry wait` (prints each Explain or Suggest you ask for in Scry).
 
 ## Settings
 
 - **CLI**: the `git scry` command (Install git scry), and Scry as git's merge tool (Use Scry as git's Merge Tool, Stop Using Scry), with the command git runs for each file.
 - **Agent**:
-  - **Claude Code**: whether Claude Code and Scry's plugin are installed, with Install Scry's Plugin, Turn On Scry's Plugin, Uninstall from Claude Code, and the two commands to copy. Installing also adds to Claude Code's user settings (`~/.claude/settings.json`) the rules that let the plugin's read tools and `explain` run without asking, so Explain is never stopped by a question; `resolve`, which writes your files, still asks. Uninstalling removes those rules. Warnings, each with its button: an earlier Scry's `scry` server, registered with `claude mcp add`, which made Claude Code show Scry twice (Remove the Earlier Server); the plugin's tools not allowed yet (Allow Scry's Tools); the plugin unable to find Scry (move Scry to Applications, or install the `git scry` command).
-  - **Explain**: the switch "Explain conflicts with Claude Code", on by default. Off, there is no Explain anywhere in Scry; explanations already received are hidden, not deleted.
+  - **Claude Code**: whether Claude Code and Scry's plugin are installed, with Install Scry's Plugin, Turn On Scry's Plugin, Uninstall from Claude Code, and the two commands to copy. Installing also adds to Claude Code's user settings (`~/.claude/settings.json`) the rules that let the plugin's read tools, `explain` and `suggest` run without asking, so Explain and Suggest are never stopped by a question; `resolve`, which writes your files, still asks. Uninstalling removes those rules. Warnings, each with its button: an earlier Scry's `scry` server, registered with `claude mcp add`, which made Claude Code show Scry twice (Remove the Earlier Server); the plugin's tools not allowed yet (Allow Scry's Tools); the plugin unable to find Scry (move Scry to Applications, or install the `git scry` command).
+  - **Explain and Suggest**: the switch "Explain and suggest with Claude Code", on by default. Off, there is no Explain or Suggest anywhere in Scry; answers already received are hidden, not deleted.
 - **Appearance**: the merge editor's layout, three columns or the sides above the result.
 
 <p align="center"><img src=".github/screenshots/settings-agent-light.png" width="520" alt="Scry › Settings › Agent: Scry's plugin installed in Claude Code, and the Explain switch"></p>
@@ -71,6 +72,7 @@ Two more commands are for the plugin, not for you to run: `git scry mcp` (Scry's
 
 - **One key per choice**: ours, theirs, both in either order, base or none, from the keyboard, the lens row's menu, the › ‹ buttons beside each conflict or the inspector.
 - **Edit the result by hand**, conflict by conflict, with undo and redo throughout.
+- **Your choices are kept**: a file resolved in Scry, in the app or through `git mergetool`, opens again with the candidate or the text you chose for each conflict, as long as the file still holds it.
 - **Word-level differences** and **syntax highlighting** in the three panes.
 - **Show the base** (⌥⌘B) under each conflict, to see what both sides changed from.
 - **Two layouts**: three columns, or both sides above the result (⌥⌘L). The second is chosen automatically in a narrow window.
@@ -100,6 +102,7 @@ Scry works with Claude Code through its plugin, `git-scry`, and through your own
 
 - **Your agent resolves, you review.** Scry's MCP server gives your agent the operation, each conflict's sides, base, candidates checked by parsing and the commits behind each side (`overview`, `conflicts`, `conflict`), instead of whole files and `git log`. Its `resolve` writes one conflict's lines with the agent's reason, never a resolution someone else made, and stages nothing. Type `/git-scry:resolve` in Claude Code, then review each resolution in Scry: the inspector shows who resolved it and why, with Mark Reviewed and Reopen, and staging a file not fully reviewed asks first.
 - **Explain** (⌃⌘E) a conflict in Scry: what each side meant, the risk of each candidate, and which one looks safe. Keep a Claude Code session open in the repository: the plugin watches for Scry's asks (a monitor running `git scry wait --follow`) and hands each to a helper agent in the background, so your conversation goes on; the answer shows in the inspector within seconds, with who wrote it. The status bar says whether a session is there ("Claude Code is here"); an ask made while none is waits for one. The helper runs on your session's model, can read and search the repository, and writes only its answer, under the git folder; it never changes the result. Your session writes one short line when it starts the helper, and one when the answer is ready.
+- **Suggest** (⌃⌘G) a resolution for a conflict, asked the same way and answered by a second helper agent. The proposal shows in the inspector as the agent's card: one of the candidates or its own text, its reason, what it leaves out of either side, and whether the file parses with it. Accept it (⌘Z undoes), Edit it by hand, Reject it or Ask Again. The agent writes nothing to your file: the proposal is written with your other choices when you mark the file resolved, and the file then reopens as resolved by Claude Code, reviewed by you.
 - Everything an agent did is marked with its source; nothing is staged, committed or pushed by an agent.
 
 ![Explain: Claude Code's explanation of a conflict in the inspector, and "Claude Code is here" in the status bar](.github/screenshots/explain-light.png)
@@ -120,7 +123,8 @@ Scry's merges are checked against `git merge-file` on generated conflicts, line 
 
 ## Roadmap
 
-- **Suggest** and **Ask** on a conflict, and Explain with other models: your own Claude API key, a local model, Apple's on-device model. Every proposal keeps its source, is checked by code and is accepted by you; no agent stages, commits, pushes or posts.
+- **Suggest for a whole file** and **Ask** on a conflict, and Explain and Suggest with other models: your own Claude API key, a local model, Apple's on-device model. Every proposal keeps its source, is checked by code and is accepted by you; no agent stages, commits, pushes or posts.
+- **Installing with Homebrew.**
 - **More files merged well**: storyboards and `.xib` files; migrations both sides added (Django, Alembic, Rails `schema.rb`), which leave two heads without any text conflict; Jupyter notebooks, `.strings` in UTF-16, Android `strings.xml`, `.po`, `.resx`; `CHANGELOG.md`, where both sides add at the top; running `npm install` or `yarn install` directly to repair their lockfiles.
 - **A diff tool**: `git difftool` and `git scry diff [ref..ref]`, with a side-by-side view and the list of changed files.
 - **Review of branches and pull requests**, with built-in checks such as secret scanning.
@@ -141,7 +145,7 @@ export PATH="/opt/homebrew/opt/rustup/bin:$PATH"   # rustup is keg-only
 rustup default stable
 ```
 
-Check, lint and test before each commit, as the CI does on macOS, Linux and Windows. The CI runs only when a tag is pushed (`git tag v0.1.0 && git push origin v0.1.0`):
+Check, lint and test before each commit, as the CI does on macOS, Linux and Windows. The CI runs only when a tag is pushed (`git tag 0.2.0 && git push origin 0.2.0`):
 
 ```sh
 cargo fmt --all --check
@@ -254,6 +258,14 @@ The CI's `app` job does the same on GitHub's `xcode-27` image, after `scripts/bu
 - `crates/scry-core`: all state and logic, shared by every front end. No platform-specific code.
 - `crates/git-scry`: the `git-scry` command-line binary.
 - `crates/scry-mcp`: the MCP server `git-scry mcp` runs, its protocol written by hand.
-- `.claude-plugin/marketplace.json` and `plugins/git-scry`: the Claude Code plugin (the server through `bin/git-scry-mcp`, which finds the app's `git-scry`; the `resolve` skill; the `asks` monitor, `git-scry wait --follow` through `bin/git-scry-watch`, and the `scry-explainer` agent that answers it in the background).
+- `.claude-plugin/marketplace.json` and `plugins/git-scry`: the Claude Code plugin (the server through `bin/git-scry-mcp`, which finds the app's `git-scry`; the `resolve` skill; the `asks` monitor, `git-scry wait --follow` through `bin/git-scry-watch`, and the `scry-explainer` and `scry-resolver` agents that answer it in the background).
 - `crates/scry-ffi`: the core exposed to Swift through UniFFI.
 - `apps/macos`: the SwiftUI app (standard Xcode project).
+
+## License
+
+Scry is free software: you can redistribute it and modify it under the terms of the [GNU General Public License](LICENSE), version 3 or, at your option, any later version (`GPL-3.0-or-later`). It comes without any warranty.
+
+Copyright © 2026 Nicolas Hoareau.
+
+Contributions are welcome. A first pull request asks you to sign a contributor licence agreement, so that Scry can also be published under other terms, such as a Mac App Store version.

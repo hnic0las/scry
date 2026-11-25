@@ -6,7 +6,8 @@ members = ["crates/*"]
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.99"
-# Not published until the licence and the distribution model are decided.
+license = "GPL-3.0-or-later"
+# Not on crates.io: Scry is distributed as the app, which embeds git-scry.
 publish = false
 
 [workspace.lints.rust]

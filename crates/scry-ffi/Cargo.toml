@@ -4,6 +4,7 @@ description = "The Scry core exposed to Swift through UniFFI, for the macOS app.
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [lib]
