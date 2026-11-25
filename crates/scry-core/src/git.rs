@@ -313,19 +313,22 @@ mod tests {
     /// the relative path would name the wrong repository or none.
     #[test]
     fn relative_repository_paths_become_absolute() {
+        // An absolute path names its drive on Windows.
+        let root = Path::new(if cfg!(windows) { "C:\\repo" } else { "/repo" });
+        let index = root.join("index");
         let variables = [
             ("GIT_DIR", ".git"),
-            ("GIT_INDEX_FILE", "/tmp/index"),
+            ("GIT_INDEX_FILE", index.to_str().unwrap()),
             ("GIT_WORK_TREE", "home"),
             ("HOME", "relative"),
         ]
         .map(|(key, value)| (key.into(), value.into()));
-        let paths = absolute_git_paths(variables.into_iter(), Some(Path::new("/repo")));
+        let paths = absolute_git_paths(variables.into_iter(), Some(root));
         assert_eq!(
             paths,
             [
-                ("GIT_DIR".into(), PathBuf::from("/repo/.git")),
-                ("GIT_WORK_TREE".into(), PathBuf::from("/repo/home")),
+                ("GIT_DIR".into(), root.join(".git")),
+                ("GIT_WORK_TREE".into(), root.join("home")),
             ]
         );
     }

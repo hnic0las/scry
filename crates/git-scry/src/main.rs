@@ -200,11 +200,24 @@ fn quiet_on_closed_pipe() {
             .map(String::as_str)
             .or_else(|| payload.downcast_ref::<&str>().copied())
             .unwrap_or("");
-        if message.contains("Broken pipe") {
+        if is_closed_pipe(message) {
             std::process::exit(CLOSED_PIPE);
         }
         default(info);
     }));
+}
+
+/// Whether a panic's message is `println!` or `eprintln!` failing because
+/// the reader is gone. The system's code is read, not its text, which
+/// Windows writes in the user's language: `EPIPE` on Unix; on Windows
+/// "the pipe is being closed" (232) or "the pipe has been ended" (109).
+fn is_closed_pipe(message: &str) -> bool {
+    const CODES: &[&str] = if cfg!(windows) {
+        &["(os error 232)", "(os error 109)"]
+    } else {
+        &["(os error 32)"]
+    };
+    message.starts_with("failed printing to ") && CODES.iter().any(|code| message.contains(code))
 }
 
 fn serve_mcp() -> ExitCode {

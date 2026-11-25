@@ -1,11 +1,13 @@
 name: CI
 
-# Only when a tag is pushed (decided on 2026-11-13): run the checks
+# Only when a tag is pushed (decided on 2026-11-13), or started by hand
+# (Actions › CI › Run workflow, or `gh workflow run CI`): run the checks
 # locally before each commit, as the README says.
 on:
   push:
     tags:
       - "*"
+  workflow_dispatch:
 
 jobs:
   rust:
@@ -21,7 +23,8 @@ jobs:
       - run: rustup show active-toolchain || rustup toolchain install
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo test --locked --workspace
+      # Every failing test in one run, not only the first package's.
+      - run: cargo test --locked --workspace --no-fail-fast
 
   app:
     # The macOS app: the Swift bindings generated from the core, then the
