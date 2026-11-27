@@ -4,6 +4,7 @@
 //! binary is also available as `git scry`.
 
 mod diff;
+mod difftool;
 mod highlight;
 mod open;
 mod resolve;
@@ -35,8 +36,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Open the Scry app on the repository's merge, rebase, cherry-pick or
-    /// revert in progress, from any folder in it. `git scry` alone does
+    /// Open the Scry app on the repository, from any folder in it: on its
+    /// merge, rebase, cherry-pick or revert in progress, or else on what
+    /// is not committed, as `git scry diff` does. `git scry` alone does
     /// the same.
     ///
     /// Exits with 0 once the app is open, 2 outside a repository or when
@@ -91,18 +93,19 @@ enum Command {
         #[arg(long)]
         follow: bool,
     },
-    /// Read a change: the files that differ, and each one whole with its
-    /// added and removed lines.
+    /// Read a change in the Scry app: the files that differ, and each one
+    /// whole with its added and removed lines.
     ///
-    ///   git scry diff --print               everything not committed
-    ///   git scry diff --print --staged      what the next commit holds
-    ///   git scry diff --print main          the working copy against main
-    ///   git scry diff --print main..topic   topic against main
-    ///   git scry diff --print main...topic  what topic changed on its own
+    ///   git scry diff               everything not committed
+    ///   git scry diff --staged      what the next commit holds
+    ///   git scry diff main          the working copy against main
+    ///   git scry diff main..topic   topic against main
+    ///   git scry diff main...topic  what topic changed on its own
     ///
     /// Unlike `git diff`, no revision means everything not committed:
-    /// staged, not staged and new files that are not ignored. Exits with
-    /// 0, or 2 when git cannot answer.
+    /// staged, not staged and new files that are not ignored. With
+    /// --print, the change is printed in the terminal instead. Exits with
+    /// 0, or 2 when git cannot answer or the app cannot be found.
     #[command(verbatim_doc_comment)]
     Diff {
         /// A commit to compare the working copy with, or a range: a..b,
@@ -122,9 +125,42 @@ enum Command {
             default_missing_value = "list"
         )]
         print: Option<diff::Layout>,
+        /// The app, when not $SCRY_APP, the bundle this git-scry belongs
+        /// to, /Applications/Scry.app or ~/Applications/Scry.app.
+        #[arg(
+            long,
+            value_name = "PATH",
+            require_equals = true,
+            conflicts_with = "print"
+        )]
+        app: Option<PathBuf>,
         /// Only these files or folders, after `--`.
         #[arg(last = true)]
         paths: Vec<String>,
+    },
+    /// Show two files, or two folders, in the Scry app, as the diff tool
+    /// `git difftool` runs:
+    ///
+    ///   git config diff.tool scry
+    ///   git config difftool.scry.cmd 'git-scry difftool -- "$LOCAL" "$REMOTE" "$MERGED"'
+    ///   git config difftool.prompt false
+    ///
+    /// Git gives a diff tool two files and nothing else, so the window
+    /// shows the diff alone, and git opens one window per file, one after
+    /// the other; with `git difftool --dir-diff`, one window lists every
+    /// file. `git scry diff` needs no setting and shows the whole change.
+    /// Waits for the window to close. Exits with 0, or 2 when the app
+    /// cannot be found.
+    #[command(verbatim_doc_comment)]
+    Difftool {
+        local: PathBuf,
+        remote: PathBuf,
+        /// The file's path in the repository, for the window's title.
+        merged: Option<String>,
+        /// The app, when not $SCRY_APP, the bundle this git-scry belongs
+        /// to, /Applications/Scry.app or ~/Applications/Scry.app.
+        #[arg(long, value_name = "PATH", require_equals = true)]
+        app: Option<PathBuf>,
     },
     /// Print a file with the syntax highlighting the app shows.
     ///
@@ -192,16 +228,29 @@ fn main() -> ExitCode {
         Command::Mcp => serve_mcp(),
         Command::Wait { follow } => wait::run(follow),
         Command::Highlight { file, spans } => highlight::run(&file, spans),
+        Command::Difftool {
+            local,
+            remote,
+            merged,
+            app,
+        } => difftool::run(difftool::Options {
+            local,
+            remote,
+            name: merged,
+            app,
+        }),
         Command::Diff {
             revisions,
             staged,
             print,
+            app,
             paths,
         } => diff::run(diff::Options {
             staged,
             revisions,
             paths,
             print,
+            app,
         }),
         Command::Resolve {
             base,

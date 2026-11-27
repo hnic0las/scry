@@ -302,6 +302,32 @@ fn git_scry_alone_opens_the_app_on_the_repository() {
     assert_eq!(arguments.trim(), root.display().to_string());
 }
 
+/// The overview is also what opens once every file is resolved and staged
+/// while the operation waits to be continued: there is still an operation
+/// to drive, not a change to read.
+#[cfg(unix)]
+#[test]
+fn git_scry_alone_opens_the_overview_while_an_operation_waits() {
+    let apps = tempfile::tempdir().unwrap();
+    let (app, arguments) = fake_app(apps.path(), true);
+    let repo = Repo::stopped_rebase("merge", "");
+    fs::write(repo.path().join("file.txt"), "resolved\nend\n").unwrap();
+    assert!(repo.git(&["add", "file.txt"]).status.success());
+    assert_eq!(repo.unmerged(), "");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_git-scry"))
+        .current_dir(repo.path())
+        .env("SCRY_APP", &app)
+        .env("GIT_CONFIG_GLOBAL", repo.root.path().join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let arguments = fs::read_to_string(arguments).unwrap();
+    let root = fs::canonicalize(repo.path()).unwrap();
+    assert_eq!(arguments.trim(), root.display().to_string());
+}
+
 /// Outside a repository there is nothing to show: it says so and exits 2
 /// without starting the app.
 #[cfg(unix)]

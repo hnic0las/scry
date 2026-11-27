@@ -835,3 +835,233 @@ fn a_large_untracked_file_is_listed_without_counts() {
     assert_eq!(named(&files, "small.log").added, Some(1));
     assert_eq!(text(repo.diff(&comparison, big)).rows.len(), 200_000);
 }
+
+/// What is asked is named for the window: what is read, what it is
+/// compared with, and each side's label for the bar above the file; the
+/// branch is given while the working copy or the index is read.
+#[test]
+fn a_scope_names_what_is_compared() {
+    let repo = Repo::new();
+    repo.stage("a.txt", "one\n");
+    repo.commit("base");
+    repo.git(&["switch", "--quiet", "-c", "feature"]);
+    repo.stage("b.txt", "two\n");
+    repo.commit("feature");
+    let git = repo.scry_git();
+    let words = |staged: bool, revisions: Option<&str>| {
+        let scope = diff::Scope::of(&git, staged, revisions).unwrap();
+        (
+            scope.sentence(),
+            scope.old_label.clone(),
+            scope.new_label.clone(),
+            scope.branch.clone(),
+        )
+    };
+    let text = |a: &str, b: &str, c: &str, branch: Option<&str>| {
+        (
+            a.to_string(),
+            b.to_string(),
+            c.to_string(),
+            branch.map(str::to_string),
+        )
+    };
+
+    assert_eq!(
+        words(false, None),
+        text(
+            "Not committed, against HEAD",
+            "HEAD",
+            "Working copy",
+            Some("feature")
+        )
+    );
+    assert_eq!(
+        words(true, None),
+        text("Staged, against HEAD", "HEAD", "Index", Some("feature"))
+    );
+    assert_eq!(
+        words(false, Some("main")),
+        text(
+            "Working copy, against main",
+            "main",
+            "Working copy",
+            Some("feature")
+        )
+    );
+    assert_eq!(
+        words(true, Some("main")),
+        text("Staged, against main", "main", "Index", Some("feature"))
+    );
+    assert_eq!(
+        words(false, Some("main..feature")),
+        text("feature, against main", "main", "feature", None)
+    );
+    // A missing end of a range is HEAD.
+    assert_eq!(
+        words(false, Some("main..")),
+        text("HEAD, against main", "main", "HEAD", None)
+    );
+
+    // Three dots: the merge base, by its short id.
+    let scope = diff::Scope::of(&git, false, Some("main...feature")).unwrap();
+    let base = scope.old_label.clone();
+    let main = Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args(["rev-parse", "--short", "main"])
+        .output()
+        .unwrap();
+    assert_eq!(base, String::from_utf8(main.stdout).unwrap().trim());
+    assert_eq!(
+        scope.sentence(),
+        format!("feature, against its merge base with main ({base})")
+    );
+    assert_eq!(
+        summary(&repo.files(&scope.comparison)),
+        ["b.txt Added None +Some(1) -Some(0)"]
+    );
+
+    // The index has one commit to be compared with.
+    for range in ["main..feature", "main...feature"] {
+        let refused = diff::Scope::of(&git, true, Some(range)).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "--staged takes one commit, not a range"
+        );
+    }
+    assert!(diff::Scope::of(&git, false, Some("no-such...feature")).is_err());
+
+    // Detached, there is no branch to name.
+    repo.git(&["switch", "--quiet", "--detach", "HEAD"]);
+    assert_eq!(words(false, None).3, None);
+}
+
+/// Before the first commit, what is not committed is compared with
+/// nothing, and the window says so rather than naming a HEAD that does
+/// not exist.
+#[test]
+fn a_scope_without_a_commit_is_compared_with_nothing() {
+    let repo = Repo::new();
+    repo.write("a.txt", "one\n");
+    let scope = diff::Scope::of(&repo.scry_git(), false, None).unwrap();
+    assert_eq!(
+        scope.sentence(),
+        "Not committed, against nothing: no commit yet"
+    );
+    assert_eq!(scope.old_label, "nothing: no commit yet");
+    assert_eq!(repo.files(&scope.comparison).len(), 1);
+}
+
+/// A git that runs outside any repository, in `dir`, with the user's
+/// configuration left out.
+fn plain_git(dir: &std::path::Path) -> GitCli {
+    fs::write(dir.join("gitconfig"), "").unwrap();
+    GitCli::new(dir.to_path_buf())
+        .with_env(
+            "GIT_CONFIG_GLOBAL",
+            &dir.join("gitconfig").display().to_string(),
+        )
+        .with_env("GIT_CONFIG_NOSYSTEM", "1")
+}
+
+/// Two folders, as `git difftool --dir-diff` hands them over: the files
+/// that differ are listed by their path with their counts, a file in one
+/// folder only is added or deleted, a file that is the same is left out,
+/// and each one's rows are read from the two folders.
+#[test]
+fn two_folders_list_the_files_that_differ() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = plain_git(dir.path());
+    let (left, right) = (dir.path().join("left"), dir.path().join("right"));
+    let write = |folder: &std::path::Path, path: &str, content: &[u8]| {
+        let path = folder.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    };
+    write(&left, "src/a.txt", b"one\ntwo\n");
+    write(&right, "src/a.txt", b"one\n2\nthree\n");
+    write(&left, "same.txt", b"same\n");
+    write(&right, "same.txt", b"same\n");
+    write(&left, "gone.txt", b"x\ny\n");
+    write(&right, "docs/new.md", b"new\n");
+    write(&left, "icon.png", &[0, 1]);
+    write(&right, "icon.png", &[0, 1, 2]);
+    // Binary on one side is enough: there are no lines to count.
+    write(&left, "became.bin", b"text\n");
+    write(&right, "became.bin", &[7, 0, 7]);
+    write(&left, "was.bin", &[7, 0, 7]);
+    write(&right, "was.bin", b"text\n");
+
+    let files = diff::folder_files(&git, &left, &right).unwrap();
+    assert_eq!(
+        summary(&files),
+        [
+            "became.bin Modified None +None -None",
+            "docs/new.md Added None +Some(1) -Some(0)",
+            "gone.txt Deleted None +Some(0) -Some(2)",
+            "icon.png Modified None +None -None",
+            "src/a.txt Modified None +Some(2) -Some(1)",
+            "was.bin Modified None +None -None",
+        ]
+    );
+    for path in ["icon.png", "became.bin", "was.bin"] {
+        assert!(named(&files, path).binary, "{path}");
+    }
+
+    let rows = |path: &str| {
+        diff::folder_file_diff(&git, &left, &right, named(&files, path), Marks::Auto).unwrap()
+    };
+    assert_eq!(
+        shape(&text(rows("src/a.txt"))),
+        ["1|1 Unchanged", "2|2 Changed", "-|3 Added"]
+    );
+    assert_eq!(shape(&text(rows("docs/new.md"))), ["-|1 Added"]);
+    assert_eq!(
+        shape(&text(rows("gone.txt"))),
+        ["1|- Removed", "2|- Removed"]
+    );
+    assert_eq!(
+        rows("icon.png"),
+        FileDiff::Binary {
+            old_size: Some(2),
+            new_size: Some(3)
+        }
+    );
+    assert!(diff::folder_files(&git, &left, &dir.path().join("missing")).is_err());
+}
+
+/// With `--dir-diff`, git puts links to the working copy's files in the
+/// right-hand folder: the file a link points to is compared, not the
+/// link's own text, in the list and in the rows.
+#[cfg(unix)]
+#[test]
+fn links_in_a_folder_are_followed_to_their_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = plain_git(dir.path());
+    let (left, right) = (dir.path().join("left"), dir.path().join("right"));
+    let working = dir.path().join("working");
+    for folder in [&left, &right, &working] {
+        fs::create_dir_all(folder.join("sub")).unwrap();
+    }
+    fs::write(left.join("sub/a.txt"), "one\n").unwrap();
+    fs::write(working.join("sub/a.txt"), "one\ntwo\n").unwrap();
+    std::os::unix::fs::symlink(working.join("sub/a.txt"), right.join("sub/a.txt")).unwrap();
+    // A link whose file is gone is not a file to compare.
+    std::os::unix::fs::symlink(working.join("gone.txt"), right.join("gone.txt")).unwrap();
+
+    let files = diff::folder_files(&git, &left, &right).unwrap();
+    assert_eq!(
+        summary(&files),
+        ["sub/a.txt Modified None +Some(1) -Some(0)"]
+    );
+    let rows = diff::folder_file_diff(&git, &left, &right, &files[0], Marks::Auto).unwrap();
+    assert_eq!(text(rows).new_lines, ["one", "two"]);
+
+    let linked = diff::plain_files(
+        &git,
+        &left.join("sub/a.txt"),
+        &right.join("sub/a.txt"),
+        Marks::Auto,
+    );
+    assert_eq!(text(linked.unwrap()).counts(), (1, 0));
+}

@@ -14,6 +14,7 @@ pub mod commit_changes;
 pub mod commit_message;
 pub mod conflict;
 pub mod diff;
+pub mod difftool;
 pub mod git;
 pub mod highlight;
 pub mod indent;

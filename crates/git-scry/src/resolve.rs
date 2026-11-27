@@ -215,7 +215,10 @@ pub fn run_in_app(app: Option<PathBuf>, files: MergetoolFiles) -> ExitCode {
 /// to the front: started as a plain process from the terminal, macOS keeps
 /// the terminal active and the window opens behind it. `open` does not
 /// pass the app's exit code on, so the app writes its answer to a file.
-fn run_bundle(app: &Path, mut arguments: Vec<std::ffi::OsString>) -> std::io::Result<Option<i32>> {
+pub fn run_bundle(
+    app: &Path,
+    mut arguments: Vec<std::ffi::OsString>,
+) -> std::io::Result<Option<i32>> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
@@ -239,7 +242,7 @@ fn run_bundle(app: &Path, mut arguments: Vec<std::ffi::OsString>) -> std::io::Re
     Ok(answer.and_then(|answer| answer.trim().parse().ok()))
 }
 
-fn run_executable(
+pub fn run_executable(
     program: &Path,
     arguments: Vec<std::ffi::OsString>,
 ) -> std::io::Result<Option<i32>> {

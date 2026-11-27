@@ -15,6 +15,7 @@ use scry_core::asks;
 use scry_core::blame;
 use scry_core::command::{self as core, CommandError};
 use scry_core::commit_changes;
+use scry_core::difftool;
 use scry_core::git::{GitCli, GitError};
 use scry_core::highlight;
 use scry_core::layout;
@@ -34,10 +35,16 @@ use scry_core::words;
 uniffi::setup_scaffolding!();
 
 mod agent;
+mod changes;
 mod cli_command;
 pub use agent::{
     AgentSetup, AgentSetupState, agent_setup, allow_plugin_tools, install_plugin,
     remove_old_server, uninstall_plugin,
+};
+pub use changes::{
+    ChangeGroup, ChangeSet, ChangeState, ChangesFile, ChangesHeader, DiffChange, DiffLine, DiffRow,
+    DiffRowKind, FileDiffInfo, RepositoryWaiting, TextDiffInfo, UnifiedDiffLine, UnifiedKind,
+    repository_waiting,
 };
 pub use cli_command::{CliCommandState, cli_command_state, install_cli_command};
 
@@ -167,7 +174,7 @@ pub enum CellKind {
 }
 
 /// The design's syntax colour roles; text without a span is plain.
-#[derive(Debug, Clone, Copy, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, uniffi::Enum)]
 pub enum SyntaxRole {
     Keyword,
     String,
@@ -184,7 +191,7 @@ pub enum SyntaxRole {
 
 /// A run of one role in a cell's text, in UTF-8 bytes from its start, end
 /// excluded.
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct Span {
     pub start: u32,
     pub end: u32,
@@ -192,7 +199,7 @@ pub struct Span {
 }
 
 /// A part of a cell's text, in UTF-8 bytes from its start, end excluded.
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ByteRange {
     pub start: u32,
     pub end: u32,
@@ -2121,6 +2128,53 @@ pub fn mergetool_previous() -> Result<Option<String>, ScryError> {
 #[uniffi::export]
 pub fn uninstall_mergetool() -> Result<(), ScryError> {
     mergetool::uninstall(&global_git()).map_err(failed)
+}
+
+/// The diff tool command that runs `cli` (the app's `git-scry`) to open
+/// `app` (the app bundle).
+#[uniffi::export]
+pub fn difftool_command(cli: String, app: String) -> String {
+    difftool::command(Path::new(&cli), Path::new(&app))
+}
+
+/// Reads the diff tool from git's global configuration.
+#[uniffi::export]
+pub fn difftool_setup(cli: String, app: String) -> Result<MergetoolSetup, ScryError> {
+    let command = difftool_command(cli, app);
+    Ok(
+        match difftool::setup(&global_git(), &command).map_err(failed)? {
+            mergetool::Setup::NotSet => MergetoolSetup::NotSet,
+            mergetool::Setup::Other { tool } => MergetoolSetup::Other { tool },
+            mergetool::Setup::Scry { current } => MergetoolSetup::Scry { current },
+        },
+    )
+}
+
+/// Makes Scry git's diff tool for every repository, in git's global
+/// configuration.
+#[uniffi::export]
+pub fn install_difftool(cli: String, app: String) -> Result<(), ScryError> {
+    if mergetool::translocated(Path::new(&app)) {
+        return Err(ScryError::Refused {
+            message: String::from(
+                "macOS runs Scry from a temporary copy, which git could not find once Scry quits. Move Scry to the Applications folder, open it from there, then try again.",
+            ),
+        });
+    }
+    let command = difftool_command(cli, app);
+    difftool::install(&global_git(), &command).map_err(failed)
+}
+
+/// The diff tool Scry replaced, put back when it stops being git's.
+#[uniffi::export]
+pub fn difftool_previous() -> Result<Option<String>, ScryError> {
+    difftool::previous_tool(&global_git()).map_err(failed)
+}
+
+/// Stops using Scry as git's diff tool, putting back the one it replaced.
+#[uniffi::export]
+pub fn uninstall_difftool() -> Result<(), ScryError> {
+    difftool::uninstall(&global_git()).map_err(failed)
 }
 
 /// Git for the global configuration, run from the home folder.

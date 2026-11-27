@@ -129,16 +129,18 @@ fn line(
 }
 
 /// A line with its tabs expanded, and where each original byte went.
-struct Shown {
-    text: String,
-    columns: usize,
+pub struct Shown {
+    pub text: String,
+    /// Its width in columns of a monospaced font: wide characters count
+    /// two.
+    pub columns: usize,
     /// Byte offset of each tab in the original line, with the bytes
     /// inserted for it (its spaces minus the tab itself).
     tabs: Vec<(usize, usize)>,
 }
 
 impl Shown {
-    fn new(line: &str) -> Shown {
+    pub fn new(line: &str) -> Shown {
         let mut text = String::with_capacity(line.len());
         let mut columns = 0;
         let mut tabs = Vec::new();
@@ -162,7 +164,7 @@ impl Shown {
 
     /// Where byte `offset` of the original line is in the shown text: after
     /// the spaces of every tab before it.
-    fn offset(&self, offset: usize) -> usize {
+    pub fn offset(&self, offset: usize) -> usize {
         let inserted: usize = self
             .tabs
             .iter()
@@ -172,7 +174,7 @@ impl Shown {
         offset + inserted
     }
 
-    fn range(&self, range: Range<usize>) -> Range<usize> {
+    pub fn range(&self, range: Range<usize>) -> Range<usize> {
         self.offset(range.start)..self.offset(range.end)
     }
 }

@@ -395,7 +395,7 @@ fn diff_print_reads_revisions_ranges_and_staged() {
     );
     let (_, stdout) = print(&["main..."]);
     assert!(
-        stdout.starts_with("HEAD, against its merge base with main\n"),
+        stdout.starts_with("HEAD, against its merge base with main ("),
         "{stdout}"
     );
     let (_, stdout) = print(&["--staged"]);
@@ -405,22 +405,86 @@ fn diff_print_reads_revisions_ranges_and_staged() {
     assert_eq!((code, stdout.as_str()), (Some(2), ""));
 }
 
-/// Without `--print`, `diff` says the window is not built yet instead of
-/// doing nothing, and outside a repository it reports git's error: both
-/// exit with 2.
+/// An executable standing for the app: it writes its arguments, one per
+/// line, to the file returned.
+#[cfg(unix)]
+fn fake_app(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let app = dir.join("fake-scry");
+    let arguments = dir.join("arguments");
+    fs::write(
+        &app,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            arguments.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&app, fs::Permissions::from_mode(0o755)).unwrap();
+    (app, arguments)
+}
+
+/// Without `--print`, `diff` opens the app's Changes window: the app gets
+/// the repository's root after `--diff`, then what was asked, each path
+/// from the root after `--path`, whatever folder the command ran in.
+#[cfg(unix)]
 #[test]
-fn diff_fails_clearly_without_print_or_without_a_repository() {
+fn diff_opens_the_app_on_what_was_asked() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repository(root.path(), &[("src/a.txt", "one\n")]);
+    let (app, arguments) = fake_app(root.path());
+    let app = format!("--app={}", app.display());
+    let canonical = fs::canonicalize(&repo).unwrap().display().to_string();
+
+    let output = git_scry_in(root.path(), &repo.join("src"), &["diff", &app]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(&arguments).unwrap(),
+        format!("--diff\n{canonical}\n")
+    );
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .starts_with("Opening ")
+    );
+
+    let asked = ["diff", &app, "--staged", "main", "--", "a.txt", "b c.txt"];
+    let output = git_scry_in(root.path(), &repo.join("src"), &asked);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(&arguments).unwrap(),
+        format!(
+            "--diff\n{canonical}\n--staged\n--revisions\nmain\n\
+             --path\nsrc/a.txt\n--path\nsrc/b c.txt\n"
+        )
+    );
+}
+
+/// A revision git does not know, a range with `--staged` and a folder
+/// outside any repository are reported in the terminal with exit code 2,
+/// and the app is not opened on something it could not show.
+#[cfg(unix)]
+#[test]
+fn diff_reports_what_it_cannot_read_without_opening_the_app() {
     let root = tempfile::tempdir().unwrap();
     let repo = repository(root.path(), &[("a.txt", "one\n")]);
-    let output = git_scry_in(root.path(), &repo, &["diff"]);
-    assert_eq!(output.status.code(), Some(2));
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("Use --print"), "{stderr}");
+    let (app, arguments) = fake_app(root.path());
+    let app = format!("--app={}", app.display());
+
+    for asked in [&["no-such-branch"][..], &["--staged", "main..HEAD"]] {
+        let mut all = vec!["diff", app.as_str()];
+        all.extend_from_slice(asked);
+        let output = git_scry_in(root.path(), &repo, &all);
+        assert_eq!(output.status.code(), Some(2), "{asked:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.starts_with("git-scry: "), "{stderr}");
+        assert!(!arguments.exists(), "{asked:?}");
+    }
 
     let outside = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_git-scry"))
         .current_dir(outside.path())
-        .args(["diff", "--print"])
+        .args(["diff", &app])
         .env("GIT_CEILING_DIRECTORIES", outside.path().parent().unwrap())
         .output()
         .unwrap();
@@ -429,6 +493,31 @@ fn diff_fails_clearly_without_print_or_without_a_repository() {
         String::from_utf8(output.stderr)
             .unwrap()
             .starts_with("git-scry: ")
+    );
+    assert!(!arguments.exists());
+}
+
+/// `git scry` alone, with no merge, rebase, cherry-pick or revert in
+/// progress, opens the Changes window on what is not committed instead of
+/// an overview with nothing to show.
+#[cfg(unix)]
+#[test]
+fn git_scry_alone_opens_the_changes_outside_an_operation() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repository(root.path(), &[("a.txt", "one\n")]);
+    let (app, arguments) = fake_app(root.path());
+    let output = Command::new(env!("CARGO_BIN_EXE_git-scry"))
+        .current_dir(&repo)
+        .env("SCRY_APP", &app)
+        .env("GIT_CONFIG_GLOBAL", root.path().join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let canonical = fs::canonicalize(&repo).unwrap().display().to_string();
+    assert_eq!(
+        fs::read_to_string(&arguments).unwrap(),
+        format!("--diff\n{canonical}\n")
     );
 }
 
@@ -493,4 +582,112 @@ fn diff_print_says_what_has_no_lines_to_show() {
          \n== icon.png\nBinary file, nothing → 3 bytes\n\
          \n== vendor\nA repository of its own.\n"
     );
+}
+
+/// Run by `git difftool`, once per file, `difftool` opens the app on the
+/// two files git hands over, by absolute paths, with the file's name in
+/// the repository; with `--dir-diff`, once on the two folders, with no
+/// name. A file one side does not have stays `/dev/null`.
+#[cfg(unix)]
+#[test]
+fn git_difftool_opens_the_app_on_each_file_or_on_the_folders() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repository(root.path(), &[("src/a.txt", "one\n")]);
+    fs::write(repo.join("src/a.txt"), "two\n").unwrap();
+    fs::write(repo.join("new.txt"), "new\n").unwrap();
+    let (app, arguments) = fake_app(root.path());
+    // The fake app keeps every call, one line per argument.
+    fs::write(
+        &app,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{0}'\necho == >> '{0}'\n",
+            arguments.display()
+        ),
+    )
+    .unwrap();
+    let command = format!(
+        "'{}' difftool --app='{}' -- \"$LOCAL\" \"$REMOTE\" \"$MERGED\"",
+        env!("CARGO_BIN_EXE_git-scry"),
+        app.display()
+    );
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(&repo)
+            .args(["-c", &format!("difftool.scry.cmd={command}")])
+            .args(["-c", "difftool.prompt=false", "-c", "diff.tool=scry"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", root.path().join("gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    };
+
+    git(&["add", "new.txt"]);
+    git(&["difftool", "HEAD"]);
+    let calls = fs::read_to_string(&arguments).unwrap();
+    let calls: Vec<Vec<&str>> = calls
+        .trim_end()
+        .split("\n==")
+        .map(|call| call.trim().lines().collect())
+        .filter(|call: &Vec<&str>| !call.is_empty())
+        .collect();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    let added = &calls[0];
+    assert_eq!(added[0], "--difftool");
+    assert_eq!((added[1], added[2]), ("--old", "/dev/null"));
+    assert_eq!(added[3], "--new");
+    assert!(
+        added[4].starts_with('/') && added[4].ends_with("/new.txt"),
+        "{added:?}"
+    );
+    assert_eq!((added[5], added[6]), ("--name", "new.txt"));
+    let modified = &calls[1];
+    assert!(
+        modified[2].starts_with('/') && modified[2].ends_with("/a.txt"),
+        "{modified:?}"
+    );
+    assert!(modified[4].ends_with("/src/a.txt"), "{modified:?}");
+    assert_eq!((modified[5], modified[6]), ("--name", "src/a.txt"));
+
+    // Each call knows its place among the files git opens in turn.
+    assert_eq!(added[7..], ["--place", "1", "--of", "2"]);
+    assert_eq!(modified[7..], ["--place", "2", "--of", "2"]);
+
+    fs::remove_file(&arguments).unwrap();
+    git(&["difftool", "--dir-diff", "HEAD"]);
+    let call = fs::read_to_string(&arguments).unwrap();
+    let call: Vec<&str> = call.lines().collect();
+    assert_eq!(call.len(), 6, "{call:?}");
+    assert!(
+        call[2].ends_with("/left/") || call[2].ends_with("/left"),
+        "{call:?}"
+    );
+    assert!(
+        call[4].ends_with("/right/") || call[4].ends_with("/right"),
+        "{call:?}"
+    );
+    assert_eq!(call[5], "==");
+
+    // The app answers 1 for Stop: git opens no other file.
+    fs::write(
+        &app,
+        format!(
+            "#!/bin/sh\necho call >> '{}'\nexit 1\n",
+            arguments.display()
+        ),
+    )
+    .unwrap();
+    fs::remove_file(&arguments).unwrap();
+    let stopped = Command::new("git")
+        .current_dir(&repo)
+        .args(["-c", &format!("difftool.scry.cmd={command}")])
+        .args(["-c", "difftool.prompt=false", "-c", "diff.tool=scry"])
+        .args(["difftool", "HEAD"])
+        .env("GIT_CONFIG_GLOBAL", root.path().join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(!stopped.status.success(), "{stopped:?}");
+    assert_eq!(fs::read_to_string(&arguments).unwrap(), "call\n");
 }

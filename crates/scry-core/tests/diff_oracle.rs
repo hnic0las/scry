@@ -188,6 +188,20 @@ fn check(text: &TextDiff, old: &[String], new: &[String]) -> Result<(), String> 
     }
     for change in &changes {
         let rows = &text.rows[change.first_row..change.first_row + change.row_count];
+        // The same block in the unified view: its removed and added
+        // lines, and nothing else, from `first_line` on.
+        let lines = &unified[change.first_line..change.first_line + change.removed + change.added];
+        if lines.iter().any(|line| line.kind == LineKind::Unchanged)
+            || unified
+                .get(change.first_line + lines.len())
+                .is_some_and(|line| line.kind != LineKind::Unchanged)
+            || change
+                .first_line
+                .checked_sub(1)
+                .is_some_and(|at| unified[at].kind != LineKind::Unchanged)
+        {
+            return Err(format!("change {change:?} is not a whole unified block"));
+        }
         let before = change.first_row.checked_sub(1).map(|at| text.rows[at].kind);
         let after = text
             .rows

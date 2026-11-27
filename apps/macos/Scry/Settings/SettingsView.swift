@@ -13,7 +13,9 @@ struct SettingsView: View {
     }
 
     init(
-        viewModel: SettingsViewModel = SettingsViewModel(installer: AppMergetoolInstaller()),
+        viewModel: SettingsViewModel = SettingsViewModel(
+            installer: AppMergetoolInstaller(), diffInstaller: AppDifftoolInstaller()
+        ),
         agent: AgentSettingsViewModel = AgentSettingsViewModel(registrar: AppAgentRegistrar()),
         tab: SettingsTab = .cli
     ) {
@@ -136,9 +138,59 @@ struct SettingsView: View {
                     .font(Metrics.caption)
                     .foregroundStyle(Theme.Surfaces.textSecondary)
             }
+            if viewModel.offersDiffTool {
+                diffTool
+            }
         }
         .formStyle(.grouped)
         .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+extension SettingsView {
+    /// Scry as `git difftool`'s tool: a second switch, beside the merge
+    /// tool's.
+    @ViewBuilder
+    fileprivate var diffTool: some View {
+        Section {
+            Label {
+                Text(viewModel.diffStatus)
+            } icon: {
+                Image(systemName: viewModel.isDiffToolInstalled ? "checkmark.circle.fill" : "plus.forwardslash.minus")
+                    .foregroundStyle(
+                        viewModel.isDiffToolInstalled ? Theme.States.resolved : Theme.Surfaces.textSecondary
+                    )
+            }
+            HStack {
+                if !viewModel.isDiffToolInstalled {
+                    Button(viewModel.diffButtonTitle) { viewModel.installDiffTool() }
+                        .disabled(!viewModel.canInstallDiffTool)
+                }
+                if viewModel.canUninstallDiffTool {
+                    Button("Stop Using Scry") { viewModel.uninstallDiffTool() }
+                }
+            }
+            if let error = viewModel.diffError {
+                Text(error)
+                    .font(Metrics.callout)
+                    .foregroundStyle(Theme.Severity.error)
+            }
+        } header: {
+            Text("Diff Tool")
+        } footer: {
+            Text("Sets diff.tool and difftool.scry.cmd in your global git configuration, turns off git's question before each file unless you chose otherwise, and keeps the diff tool it replaces to put it back. git difftool gives Scry two files and nothing else, so its window has no history and no blame: git scry diff shows the whole change and needs no setting.")
+                .font(Metrics.caption)
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+        }
+        Section {
+            CodeLine(text: viewModel.diffCommand)
+        } header: {
+            Text("Diff tool command")
+        } footer: {
+            Text("What git runs for each file, or once for all of them with git difftool --dir-diff.")
+                .font(Metrics.caption)
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+        }
     }
 }
 

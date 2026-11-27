@@ -226,4 +226,140 @@ struct RootViewModelTests {
         await mergetool.open(mergetool: try ConflictFile.mergetool())
         #expect(!mergetool.canOpen)
     }
+
+    /// `git scry diff` passes what to compare after `--diff`: the
+    /// repository, then its options, each path after `--path`. Without
+    /// `--diff` the window is not asked for changes.
+    @Test func readsWhatGitScryDiffAsks() {
+        let all = [
+            "Scry", "--diff", "/r", "--staged", "--revisions", "main...topic", "--path", "src/a b.swift",
+            "--path", "docs",
+        ]
+        #expect(RootViewModel.changesRequest(in: all) == RootViewModel.ChangesRequest(
+            root: "/r", staged: true, revisions: "main...topic", paths: ["src/a b.swift", "docs"]
+        ))
+        #expect(RootViewModel.changesRequest(in: ["Scry", "--diff", "/r"]) == RootViewModel.ChangesRequest(root: "/r"))
+        #expect(RootViewModel.changesRequest(in: ["Scry", "/r"]) == nil)
+        #expect(RootViewModel.changesRequest(in: ["Scry", "--diff"]) == nil)
+    }
+
+    /// The window shows the changes it is given, and a folder that is not
+    /// a repository leaves it empty with the reason.
+    @Test func opensTheChangesOrSaysWhy() async {
+        let root = RootViewModel()
+        await root.openChanges(RootViewModel.ChangesRequest(root: "/no/such/folder"))
+        #expect(root.changes == nil)
+        #expect(root.openError != nil)
+
+        root.open(changes: FakeChanges(files: []))
+        #expect(root.changes != nil)
+        #expect(root.editor == nil)
+        #expect(root.overview == nil)
+    }
+
+    /// `git difftool` hands two files, or two folders, each after its
+    /// option, with the file's name in the repository when there is one;
+    /// the window then shows them, with nothing to resolve or to go back
+    /// to.
+    @Test func readsGitDifftoolsFiles() async throws {
+        let arguments = ["Scry", "--difftool", "--old", "/tmp/a", "--new", "/r/src/a.swift", "--name", "src/a.swift"]
+        #expect(RootViewModel.difftoolFiles(in: arguments) == RootViewModel.DifftoolFiles(
+            old: "/tmp/a", new: "/r/src/a.swift", name: "src/a.swift"
+        ))
+        #expect(RootViewModel.difftoolFiles(in: ["Scry", "--difftool", "--old", "/l/", "--new", "/r/"])?.name == "")
+        #expect(RootViewModel.difftoolFiles(in: ["Scry", "--old", "/a", "--new", "/b"]) == nil)
+        #expect(RootViewModel.difftoolFiles(in: ["Scry", "--difftool", "--old", "/a"]) == nil)
+        // Its place among the files git opens in turn, when it gives one.
+        let queued = ["Scry", "--difftool", "--old", "/a", "--new", "/b", "--place", "2", "--of", "13"]
+        #expect(RootViewModel.difftoolFiles(in: queued)?.queue == ChangesViewModel.Queue(place: 2, total: 13))
+        for (place, total) in [("1", "1"), ("0", "3"), ("4", "3"), ("x", "3")] {
+            let arguments = ["Scry", "--difftool", "--old", "/a", "--new", "/b", "--place", place, "--of", total]
+            #expect(RootViewModel.difftoolFiles(in: arguments)?.queue == nil)
+        }
+
+        let directory = FileManager.default.temporaryDirectory.appending(path: "ScryTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let old = directory.appending(path: "old.swift")
+        let new = directory.appending(path: "new.swift")
+        try "let a = 1\n".write(to: old, atomically: true, encoding: .utf8)
+        try "let a = 2\n".write(to: new, atomically: true, encoding: .utf8)
+
+        let root = RootViewModel()
+        await root.openLaunchFile(arguments: [
+            "Scry", "--difftool", "--old", old.path, "--new", new.path, "--name", "src/a.swift",
+        ])
+        let changes = try #require(root.changes)
+        #expect(changes.header.reduced)
+        #expect(changes.header.singleFile)
+        await changes.load()
+        #expect(changes.selected?.path == "src/a.swift")
+        #expect(changes.status == "1 change · +1 −1")
+        #expect(root.exitStatus == 0)
+        #expect(changes.queue == nil)
+        #expect(!root.finished)
+    }
+
+    /// Among several files, Next File closes the window and answers 0, so
+    /// git opens the next one; Stop answers 1, and git opens none.
+    @Test func leavesGitDifftoolsFilesByNextOrStop() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let old = directory.appending(path: "old.swift")
+        let new = directory.appending(path: "new.swift")
+        try "let a = 1\n".write(to: old, atomically: true, encoding: .utf8)
+        try "let a = 2\n".write(to: new, atomically: true, encoding: .utf8)
+        let arguments = [
+            "Scry", "--difftool", "--old", old.path, "--new", new.path, "--name", "a.swift", "--place", "1", "--of", "3",
+        ]
+
+        let next = RootViewModel()
+        await next.openLaunchFile(arguments: arguments)
+        #expect(next.changes?.queueLabel == "File 1 of 3")
+        next.changes?.nextInQueue()
+        #expect(next.finished)
+        #expect(next.exitStatus == 0)
+
+        let stop = RootViewModel()
+        await stop.openLaunchFile(arguments: arguments)
+        stop.changes?.stopQueue()
+        #expect(stop.finished)
+        #expect(stop.exitStatus == 1)
+    }
+
+    /// A repository opens on what waits in it: the overview while
+    /// conflicts are left, otherwise what is not committed; and it is
+    /// remembered among the recent ones, most recent first.
+    @Test func opensARepositoryOnWhatWaitsInIt() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "ScryTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let git = Process()
+        git.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        git.arguments = ["git", "-C", directory.path, "init", "--quiet"]
+        try git.run()
+        git.waitUntilExit()
+        try #require(git.terminationStatus == 0)
+        try "x\n".write(to: directory.appending(path: "a.txt"), atomically: true, encoding: .utf8)
+
+        let defaults = UserDefaults.isolated
+        let changes = RootViewModel(defaults: defaults, waiting: { _ in .notCommitted(files: 1) })
+        await changes.openRepository(directory.path)
+        #expect(changes.changes != nil)
+        #expect(changes.overview == nil)
+        await changes.changes?.load()
+        #expect(changes.changes?.files.map(\.path) == ["a.txt"])
+
+        let resolving = RootViewModel(
+            defaults: defaults, waiting: { _ in .resolving(headline: "Merging", unresolved: 1) }
+        )
+        await resolving.openRepository(directory.path)
+        #expect(resolving.overview != nil)
+        #expect(resolving.changes == nil)
+
+        let recent = RecentRepositories(defaults: defaults).paths
+        #expect(recent.count == 1)
+        #expect(recent.first.map { URL(fileURLWithPath: $0).lastPathComponent } == directory.lastPathComponent)
+    }
 }

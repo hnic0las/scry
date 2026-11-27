@@ -10,6 +10,7 @@ struct Shortcut: Identifiable, Equatable, Sendable {
         case editor = "Editor"
         case editing = "Editing by hand"
         case overview = "Overview"
+        case changes = "Changes window"
         case app = "App"
         case sheets = "Special file sheets"
     }
@@ -154,6 +155,31 @@ extension Shortcut {
         note: "Once every file is staged and, on a reword, the message is not empty", hint: "Continue"
     )
 
+    // MARK: Changes window
+
+    static let previousChange = Shortcut(
+        id: "previousChange", title: "Previous change", section: .changes, key: .upArrow, modifiers: [.option, .command],
+        note: "Before the first one, press again for the previous file", hint: "Previous"
+    )
+    static let nextChange = Shortcut(
+        id: "nextChange", title: "Next change", section: .changes, key: .downArrow, modifiers: [.option, .command],
+        note: "After the last one, press again for the next file", hint: "Next"
+    )
+    static let previousFile = Shortcut(
+        id: "previousFile", title: "Previous file", section: .changes, key: .upArrow, modifiers: [.control, .command]
+    )
+    static let nextFile = Shortcut(
+        id: "nextFile", title: "Next file", section: .changes, key: .downArrow, modifiers: [.control, .command]
+    )
+    static let changesLayout = Shortcut(
+        id: "changesLayout", title: "Unified or split", section: .changes, key: .character("l"),
+        modifiers: [.option, .command], note: "One column, or the old side beside the new", hint: "Layout"
+    )
+    static let refreshChanges = Shortcut(
+        id: "refreshChanges", title: "Read the files again", section: .changes, key: .character("r"),
+        modifiers: [.command], hint: "Read again"
+    )
+
     // MARK: App
 
     static let openRepository = Shortcut(
@@ -182,6 +208,7 @@ extension Shortcut {
         undo, redo, toggleBase, switchLayout, toggleInspector, explain, suggest, markAsResolved,
         applyEdit, cancelEdit,
         openFile, refresh, continueOperation,
+        previousChange, nextChange, previousFile, nextFile, changesLayout, refreshChanges,
         openRepository, openConflictedFile, keyboardShortcuts,
         confirmSheet, cancelSheet,
     ]

@@ -1,12 +1,14 @@
-//! `git-scry diff --print`: the changed files and their rows as text, to
-//! read a change, or check the core's diff, without the app.
+//! `git-scry diff`: opens the app's Changes window on a change, or with
+//! `--print` gives the changed files and their rows as text, to read a
+//! change, or check the core's diff, without the app.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::ValueEnum;
 use scry_core::diff::{
-    self, ChangedFile, Comparison, FileDiff, FileState, Group, LineKind, Marks, TextDiff,
+    self, ChangedFile, FileDiff, FileState, Group, LineKind, Marks, Scope, TextDiff,
 };
 use scry_core::git::{Git, GitCli};
 
@@ -27,17 +29,21 @@ pub struct Options {
     pub revisions: Option<String>,
     pub paths: Vec<String>,
     pub print: Option<Layout>,
+    pub app: Option<PathBuf>,
 }
 
 pub fn run(options: Options) -> ExitCode {
-    let Some(layout) = options.print else {
-        eprintln!(
-            "git-scry: the Changes window is not built yet. \
-             Use --print to read the change in the terminal."
-        );
-        return ExitCode::from(2);
+    let read = match Read::new(&options) {
+        Ok(read) => read,
+        Err(message) => {
+            eprintln!("git-scry: {message}");
+            return ExitCode::from(2);
+        }
     };
-    match print(&options, layout) {
+    let Some(layout) = options.print else {
+        return open(options, read);
+    };
+    match print(&read, layout) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("git-scry: {message}");
@@ -46,27 +52,73 @@ pub fn run(options: Options) -> ExitCode {
     }
 }
 
-fn print(options: &Options, layout: Layout) -> Result<(), String> {
-    let here = GitCli::discover(PathBuf::from("."));
-    let text = |error: scry_core::git::GitError| error.to_string();
-    let root = PathBuf::from(
-        here.run(&["rev-parse", "--show-toplevel"])
-            .map_err(text)?
-            .trim_end_matches(['\n', '\r']),
-    );
-    // Paths are given from the current folder, and git lists them from
-    // the root.
-    let prefix = here.run(&["rev-parse", "--show-prefix"]).map_err(text)?;
-    let prefix = prefix.trim_end_matches(['\n', '\r']);
-    let paths: Vec<String> = options
-        .paths
-        .iter()
-        .map(|path| format!("{prefix}{path}"))
-        .collect();
-    let git = here.in_dir(root.clone());
+/// What was asked, read once: a wrong revision or a folder outside any
+/// repository is reported in the terminal, before the app is opened.
+struct Read {
+    git: GitCli,
+    root: PathBuf,
+    /// The paths asked, from the repository's root.
+    paths: Vec<String>,
+    scope: Scope,
+    files: Vec<ChangedFile>,
+}
 
-    let (comparison, title) = comparison(&git, options)?;
-    let files = diff::changed_files(&git, &root, &comparison, &paths).map_err(text)?;
+impl Read {
+    fn new(options: &Options) -> Result<Read, String> {
+        let here = GitCli::discover(PathBuf::from("."));
+        let text = |error: scry_core::git::GitError| error.to_string();
+        let root = PathBuf::from(
+            here.run(&["rev-parse", "--show-toplevel"])
+                .map_err(text)?
+                .trim_end_matches(['\n', '\r']),
+        );
+        // Paths are given from the current folder, and git lists them
+        // from the root.
+        let prefix = here.run(&["rev-parse", "--show-prefix"]).map_err(text)?;
+        let prefix = prefix.trim_end_matches(['\n', '\r']);
+        let paths: Vec<String> = options
+            .paths
+            .iter()
+            .map(|path| format!("{prefix}{path}"))
+            .collect();
+        let git = here.in_dir(root.clone());
+        let scope = Scope::of(&git, options.staged, options.revisions.as_deref())
+            .map_err(|error| error.to_string())?;
+        let files = diff::changed_files(&git, &root, &scope.comparison, &paths).map_err(text)?;
+        Ok(Read {
+            git,
+            root,
+            paths,
+            scope,
+            files,
+        })
+    }
+}
+
+/// Opens the app's Changes window on what was asked: the repository's
+/// root, then the same options, each path after `--path`.
+fn open(options: Options, read: Read) -> ExitCode {
+    let mut arguments: Vec<OsString> =
+        vec![crate::open::DIFF.into(), read.root.clone().into_os_string()];
+    if options.staged {
+        arguments.push("--staged".into());
+    }
+    if let Some(revisions) = options.revisions {
+        arguments.push("--revisions".into());
+        arguments.push(revisions.into());
+    }
+    for path in read.paths {
+        arguments.push("--path".into());
+        arguments.push(path.into());
+    }
+    crate::open::open_app(options.app, &read.root, arguments)
+}
+
+fn print(read: &Read, layout: Layout) -> Result<(), String> {
+    let Read {
+        git, root, files, ..
+    } = read;
+    let (comparison, title) = (&read.scope.comparison, read.scope.sentence());
     if files.is_empty() {
         println!("{title}");
         println!("Nothing to show: no file differs.");
@@ -79,7 +131,7 @@ fn print(options: &Options, layout: Layout) -> Result<(), String> {
         count(files.len(), "file")
     );
     let mut group = None;
-    for file in &files {
+    for file in files {
         if file.group != group {
             group = file.group;
             match group {
@@ -94,10 +146,10 @@ fn print(options: &Options, layout: Layout) -> Result<(), String> {
     if layout == Layout::List {
         return Ok(());
     }
-    for file in &files {
+    for file in files {
         println!();
         println!("== {}", file.path);
-        match diff::file_diff(&git, &root, &comparison, file, Marks::Auto)
+        match diff::file_diff(git, root, comparison, file, Marks::Auto)
             .map_err(|error| error.to_string())?
         {
             FileDiff::Text(text) if layout == Layout::Unified => print_unified(&text),
@@ -112,54 +164,6 @@ fn print(options: &Options, layout: Layout) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// What `--staged` and the revisions ask to compare, and its title.
-fn comparison(git: &dyn Git, options: &Options) -> Result<(Comparison, String), String> {
-    let text = |error: scry_core::git::GitError| error.to_string();
-    let or_head = |name: &str| if name.is_empty() { "HEAD" } else { name }.to_string();
-    let revisions = options.revisions.as_deref();
-    if let Some((old, new)) = revisions.and_then(|revisions| revisions.split_once("...")) {
-        if options.staged {
-            return Err(String::from("--staged takes one commit, not a range"));
-        }
-        let (old, new) = (or_head(old), or_head(new));
-        let comparison = Comparison::since_merge_base(git, &old, &new).map_err(text)?;
-        return Ok((
-            comparison,
-            format!("{new}, against its merge base with {old}"),
-        ));
-    }
-    if let Some((old, new)) = revisions.and_then(|revisions| revisions.split_once("..")) {
-        if options.staged {
-            return Err(String::from("--staged takes one commit, not a range"));
-        }
-        let (old, new) = (or_head(old), or_head(new));
-        let title = format!("{new}, against {old}");
-        return Ok((Comparison::Commits { old, new }, title));
-    }
-    match (options.staged, revisions) {
-        (true, None) => Ok((
-            Comparison::staged(git).map_err(text)?,
-            String::from("Staged, against HEAD"),
-        )),
-        (true, Some(base)) => Ok((
-            Comparison::Staged {
-                base: base.to_string(),
-            },
-            format!("Staged, against {base}"),
-        )),
-        (false, None) => Ok((
-            Comparison::uncommitted(git).map_err(text)?,
-            String::from("Not committed, against HEAD"),
-        )),
-        (false, Some(base)) => Ok((
-            Comparison::WorkingCopy {
-                base: base.to_string(),
-            },
-            format!("Working copy, against {base}"),
-        )),
-    }
 }
 
 /// "M  src/a.rs  +3 −1 · partly staged"

@@ -125,6 +125,9 @@ struct EditorLayoutActions {
 /// editor.
 struct LayoutCommands: View {
     @FocusedValue(\.editorLayoutActions) private var actions
+    /// The Changes window's own layouts, unified or split: the same item
+    /// and the same keys switch them.
+    @FocusedValue(\.changesActions) private var changes
 
     var body: some View {
         Button(actions?.showsBase == true ? "Hide Base" : "Show Base") { actions?.toggleBase() }
@@ -139,9 +142,11 @@ struct LayoutCommands: View {
             Text("Stacked: Sides Above the Result").tag(MergeEditorViewModel.EditorLayout.stacked)
         }
         .disabled(actions?.enabled != true)
-        Button("Switch Layout") { actions?.toggle() }
-            .keyboardShortcut(Shortcut.switchLayout)
-            .disabled(actions?.enabled != true)
+        Button("Switch Layout") {
+            if let changes { changes.toggleLayout() } else { actions?.toggle() }
+        }
+        .keyboardShortcut(Shortcut.switchLayout)
+        .disabled(actions?.enabled != true && changes == nil)
     }
 }
 
@@ -222,7 +227,15 @@ struct OpenCommands: View {
 
 /// Opens the file given on the command line, or asks for one.
 struct RootView: View {
-    @State private var viewModel = RootViewModel()
+    @State private var viewModel: RootViewModel
+    /// The recent repositories, for the window with nothing open.
+    @State private var repositories: OpenRepositoryViewModel
+
+    init() {
+        let viewModel = RootViewModel()
+        _viewModel = State(initialValue: viewModel)
+        _repositories = State(initialValue: viewModel.openRepositoryList())
+    }
     /// ⌘ held alone, for the shortcut hints.
     @State private var commandHold = CommandHold()
     @Environment(\.controlActiveState) private var activeState
@@ -236,9 +249,20 @@ struct RootView: View {
                     .id(ObjectIdentifier(editor))
             } else if let opening = viewModel.opening {
                 OpeningView(fileName: opening)
+            } else if let changes = viewModel.changes {
+                ChangesView(viewModel: changes)
             } else if let overview = viewModel.overview {
                 OverviewView(viewModel: overview)
+            } else if viewModel.canOpen {
+                OpenRepositoryView(
+                    viewModel: repositories,
+                    error: viewModel.openError,
+                    chooseRepository: chooseRepository,
+                    chooseFile: chooseFile,
+                    openFolder: { path in Task { await viewModel.openRepository(path) } }
+                )
             } else {
+                // Under git mergetool, whose file could not be opened.
                 EmptyStateView(
                     message: viewModel.emptyMessage,
                     error: viewModel.openError,
@@ -302,7 +326,7 @@ struct RootView: View {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.message = "Choose a repository with a merge, rebase, cherry-pick or revert in progress"
+        panel.message = "Choose a repository: Scry shows its operation in progress, or what is not committed"
         if panel.runModal() == .OK, let url = panel.url {
             Task { await viewModel.openRepository(url.path) }
         }

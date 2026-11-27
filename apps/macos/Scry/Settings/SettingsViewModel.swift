@@ -24,6 +24,19 @@ protocol MergetoolInstaller {
     func installCommand(link: String) throws
 }
 
+/// Reads and writes git's diff tool: the core in the app, a fake in tests
+/// and previews.
+@MainActor
+protocol DifftoolInstaller {
+    /// The command git would run, to show it.
+    var command: String { get }
+    func setup() throws -> MergetoolSetup
+    func install() throws
+    /// The diff tool Scry replaced, put back by `uninstall`.
+    func previousTool() throws -> String?
+    func uninstall() throws
+}
+
 /// The app's settings: making Scry git's merge tool, so `git mergetool`
 /// opens conflicts in the app.
 @MainActor
@@ -35,6 +48,12 @@ final class SettingsViewModel {
     private(set) var previousTool: String?
     /// Why git's configuration could not be read or written.
     private(set) var error: String?
+    /// What git's configuration says about the diff tool, once read.
+    private(set) var diffSetup: MergetoolSetup?
+    /// The diff tool Scry replaced, if any.
+    private(set) var diffPreviousTool: String?
+    /// Why git's configuration could not be read or written for it.
+    private(set) var diffError: String?
     /// What `git scry` runs, once read.
     private(set) var commandState: CliCommandState?
     /// Why the `git scry` link could not be made.
@@ -50,12 +69,18 @@ final class SettingsViewModel {
     }
 
     @ObservationIgnored private let installer: MergetoolInstaller
+    /// `nil` hides the diff tool: tests and previews of the merge tool
+    /// alone.
+    @ObservationIgnored private let diffInstaller: DifftoolInstaller?
     @ObservationIgnored private var commandWork: Task<Void, Never>?
     @ObservationIgnored private let defaults: UserDefaults
 
     /// `defaults` keeps the layout choice; tests pass their own suite.
-    init(installer: MergetoolInstaller, defaults: UserDefaults = .standard) {
+    init(
+        installer: MergetoolInstaller, diffInstaller: DifftoolInstaller? = nil, defaults: UserDefaults = .standard
+    ) {
         self.installer = installer
+        self.diffInstaller = diffInstaller
         self.defaults = defaults
         editorLayout = Self.storedLayout(in: defaults)
     }
@@ -118,8 +143,83 @@ final class SettingsViewModel {
             setup = nil
             self.error = error.message
         }
+        refreshDiffTool()
         commandWork?.cancel()
         commandWork = Task { [weak self] in await self?.refreshCommand() }
+    }
+
+    // MARK: The diff tool
+
+    /// Whether the settings offer the diff tool at all.
+    var offersDiffTool: Bool { diffInstaller != nil }
+
+    /// The command git will run for each file, or once with `--dir-diff`.
+    var diffCommand: String { diffInstaller?.command ?? "" }
+
+    private func refreshDiffTool() {
+        guard let diffInstaller else { return }
+        do {
+            diffSetup = try diffInstaller.setup()
+            diffPreviousTool = try diffInstaller.previousTool()
+            diffError = nil
+        } catch {
+            diffSetup = nil
+            diffError = error.message
+        }
+    }
+
+    var diffStatus: String {
+        guard installer.isAvailable else {
+            return "This build of Scry has no git-scry inside: build the app with Xcode."
+        }
+        switch diffSetup {
+        case nil:
+            return "Cannot read git's configuration."
+        case .notSet:
+            return "git has no diff tool set: git difftool asks for one."
+        case .other(let tool):
+            return "git's diff tool is \(tool). Scry will replace it."
+        case .scry(current: true):
+            return "Scry is git's diff tool: git difftool opens files here."
+                + (diffPreviousTool.map { " Stop Using Scry puts \($0) back." } ?? "")
+        case .scry(current: false):
+            return "git runs Scry from another place, moved or deleted since."
+        }
+    }
+
+    var isDiffToolInstalled: Bool { diffSetup == .scry(current: true) }
+
+    var canInstallDiffTool: Bool { installer.isAvailable && diffInstaller != nil && !isDiffToolInstalled }
+
+    /// Scry is git's diff tool, from here or from an app moved since.
+    var canUninstallDiffTool: Bool {
+        if case .scry = diffSetup { return true }
+        return false
+    }
+
+    var diffButtonTitle: String {
+        diffSetup == .scry(current: false) ? "Update Diff Tool" : "Use Scry as git's Diff Tool"
+    }
+
+    func installDiffTool() {
+        guard canInstallDiffTool, let diffInstaller else { return }
+        do {
+            try diffInstaller.install()
+            refreshDiffTool()
+        } catch {
+            diffError = error.message
+        }
+    }
+
+    /// Puts back the diff tool Scry replaced, or none.
+    func uninstallDiffTool() {
+        guard canUninstallDiffTool, let diffInstaller else { return }
+        do {
+            try diffInstaller.uninstall()
+            refreshDiffTool()
+        } catch {
+            diffError = error.message
+        }
     }
 
     // MARK: The git scry command
@@ -268,5 +368,35 @@ struct AppMergetoolInstaller: MergetoolInstaller {
 
     func installCommand(link: String) throws {
         try installCliCommand(cli: cli, link: link)
+    }
+}
+
+/// Git's diff tool for the app's own `git-scry` and bundle, through the
+/// core.
+struct AppDifftoolInstaller: DifftoolInstaller {
+    let cli: String
+    let app: String
+
+    init(bundle: Bundle = .main) {
+        app = bundle.bundlePath
+        cli = bundle.bundleURL.appending(path: "Contents/Helpers/git-scry").path
+    }
+
+    var command: String { difftoolCommand(cli: cli, app: app) }
+
+    func setup() throws -> MergetoolSetup {
+        try difftoolSetup(cli: cli, app: app)
+    }
+
+    func install() throws {
+        try installDifftool(cli: cli, app: app)
+    }
+
+    func previousTool() throws -> String? {
+        try difftoolPrevious()
+    }
+
+    func uninstall() throws {
+        try uninstallDifftool()
     }
 }

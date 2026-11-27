@@ -231,4 +231,72 @@ struct SettingsViewModelTests {
         settings.refresh()
         #expect(settings.editorLayout == .columns)
     }
+
+    /// The diff tool has its own switch: it replaces the tool git had and
+    /// says so, puts it back when turned off, and shows why git refused.
+    /// Without it (the merge tool's own tests), nothing is offered.
+    @Test func switchesTheDiffToolOnAndOff() {
+        let diff = FakeDiffInstaller(.other(tool: "opendiff"))
+        let settings = SettingsViewModel(
+            installer: FakeInstaller(.notSet), diffInstaller: diff, defaults: .isolated
+        )
+        #expect(settings.offersDiffTool)
+        settings.refresh()
+        #expect(settings.diffStatus == "git's diff tool is opendiff. Scry will replace it.")
+        #expect(settings.canInstallDiffTool)
+        #expect(!settings.canUninstallDiffTool)
+        #expect(settings.diffButtonTitle == "Use Scry as git's Diff Tool")
+
+        settings.installDiffTool()
+        #expect(settings.isDiffToolInstalled)
+        #expect(!settings.canInstallDiffTool)
+        #expect(settings.diffStatus == "Scry is git's diff tool: git difftool opens files here. Stop Using Scry puts opendiff back.")
+
+        settings.uninstallDiffTool()
+        #expect(!settings.isDiffToolInstalled)
+        #expect(diff.state == .other(tool: "opendiff"))
+
+        diff.failure = .Git(message: "Could not lock the config file.")
+        settings.installDiffTool()
+        #expect(settings.diffError == "Could not lock the config file.")
+        #expect(!settings.isDiffToolInstalled)
+
+        diff.failure = nil
+        diff.state = .scry(current: false)
+        settings.refresh()
+        #expect(settings.diffButtonTitle == "Update Diff Tool")
+        #expect(settings.canUninstallDiffTool)
+        #expect(settings.diffError == nil)
+
+        let without = SettingsViewModel(installer: FakeInstaller(.notSet), defaults: .isolated)
+        #expect(!without.offersDiffTool)
+        #expect(!without.canInstallDiffTool)
+    }
+}
+
+/// Git's diff tool in memory.
+private final class FakeDiffInstaller: DifftoolInstaller {
+    var state: MergetoolSetup
+    var failure: ScryError?
+    var previous: String?
+    let command = "\"/A/git-scry\" difftool --app=\"/A/Scry.app\" -- \"$LOCAL\" \"$REMOTE\" \"$MERGED\""
+
+    init(_ state: MergetoolSetup) {
+        self.state = state
+    }
+
+    func setup() throws -> MergetoolSetup { state }
+
+    func install() throws {
+        if let failure { throw failure }
+        if case .other(let tool) = state { previous = tool }
+        state = .scry(current: true)
+    }
+
+    func previousTool() throws -> String? { previous }
+
+    func uninstall() throws {
+        state = previous.map { .other(tool: $0) } ?? .notSet
+        previous = nil
+    }
 }

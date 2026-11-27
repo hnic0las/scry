@@ -9,13 +9,16 @@ final class RootViewModel {
     private(set) var editor: MergeEditorViewModel?
     /// The repository's operation (S1); the editor goes back to it.
     private(set) var overview: OverviewViewModel?
+    /// What differs between two versions of the repository (S17), outside
+    /// an operation; a conflicted file opens in the editor and comes back.
+    private(set) var changes: ChangesViewModel?
     /// Why the last file could not be opened.
     private(set) var openError: String?
     /// What could not be opened over the overview, shown as an alert
     /// until dismissed: the empty window, which shows `openError`, is
     /// not on display then.
     var failedOverOverview: Bool {
-        overview != nil && editor == nil && opening == nil && openError != nil
+        (overview != nil || changes != nil) && editor == nil && opening == nil && openError != nil
     }
     /// The name of the file being opened, while it is.
     private(set) var opening: String?
@@ -27,16 +30,46 @@ final class RootViewModel {
     /// The Keyboard Shortcuts sheet, while it is shown.
     private(set) var shortcuts: KeyboardShortcutsViewModel?
 
+    /// Under `git difftool`, the user asked for no other file.
+    private(set) var difftoolStopped = false
+    /// Under `git difftool`, the window's Next File or Stop was pressed:
+    /// the window closes.
+    private(set) var difftoolLeft = false
+
     /// The user agreed to lose the unwritten choices.
     @ObservationIgnored private var closeConfirmed = false
     /// The editor `git mergetool` gave the window: only its file being
     /// written answers 0.
     @ObservationIgnored private var mergetoolEditor: MergeEditorViewModel?
 
+    /// The repositories opened lately, for the window with nothing open.
+    @ObservationIgnored let recents: RecentRepositories
+    /// What waits in a repository: decides between the overview and the
+    /// changes.
+    @ObservationIgnored private let waiting: @Sendable (String) -> RepositoryWaiting
+
+    /// `defaults` keeps the recent repositories; tests pass their own.
+    init(
+        defaults: UserDefaults = .standard,
+        waiting: @escaping @Sendable (String) -> RepositoryWaiting = { repositoryWaiting(path: $0) }
+    ) {
+        recents = RecentRepositories(defaults: defaults)
+        self.waiting = waiting
+    }
+
+    /// The list of recent repositories, for the window with nothing open.
+    func openRepositoryList() -> OpenRepositoryViewModel {
+        OpenRepositoryViewModel(recents: recents, waiting: waiting) { [weak self] path in
+            Task { await self?.openRepository(path) }
+        }
+    }
+
     /// Shows every shortcut, those of the screen on display first.
     func showShortcuts() {
         let current: Shortcut.Section? = if let editor {
             editor.isEditing ? .editing : .editor
+        } else if changes != nil {
+            .changes
         } else if overview != nil {
             .overview
         } else {
@@ -52,21 +85,39 @@ final class RootViewModel {
     /// Opens what the command line gives: the files of `git mergetool`, a
     /// repository's folder, or a file.
     func openLaunchFile(arguments: [String] = CommandLine.arguments) async {
-        guard editor == nil, overview == nil else { return }
+        guard editor == nil, overview == nil, changes == nil else { return }
         if let files = Self.mergetoolFiles(in: arguments) {
             await open(mergetool: files)
+        } else if let files = Self.difftoolFiles(in: arguments) {
+            open(changes: ChangeSet.openDifftool(old: files.old, new: files.new, name: files.name), queue: files.queue)
+        } else if let request = Self.changesRequest(in: arguments) {
+            await openChanges(request)
         } else if let path = Self.launchPath(in: arguments) {
             var isDirectory: ObjCBool = false
             if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue {
-                await openRepository(path)
+                // `git scry` passes the root alone for an operation.
+                await openOverview(path)
             } else {
                 await open(path)
             }
         }
     }
 
-    /// Shows the operation in progress in the repository holding `path`.
+    /// Shows the repository holding `path`: its merge, rebase,
+    /// cherry-pick or revert in progress, or files left with conflicts;
+    /// otherwise what is not committed, as `git scry` does.
     func openRepository(_ path: String) async {
+        guard opening == nil else { return }
+        let waiting = waiting
+        if case .resolving = await Task.detached(operation: { waiting(path) }).value {
+            await openOverview(path)
+        } else {
+            await openChanges(ChangesRequest(root: path))
+        }
+    }
+
+    /// Shows the operation in progress in the repository holding `path`.
+    func openOverview(_ path: String) async {
         guard opening == nil else { return }
         opening = URL(fileURLWithPath: path).lastPathComponent
         defer { opening = nil }
@@ -77,6 +128,7 @@ final class RootViewModel {
             }.value
             await open(overview: repository, snapshot: snapshot)
             openError = nil
+            recents.add(snapshot.root)
         } catch {
             openError = error.message
         }
@@ -92,6 +144,104 @@ final class RootViewModel {
         OpenRepository.path = overview?.snapshot?.root
     }
 
+    /// What `git scry diff` asks the window to show.
+    struct ChangesRequest: Equatable, Sendable {
+        /// The repository, by any folder in it.
+        var root: String
+        /// The index in place of the working copy.
+        var staged = false
+        /// A commit, `a..b` or `a...b`; everything not committed without.
+        var revisions: String?
+        /// Only these files or folders, from the repository's root.
+        var paths: [String] = []
+    }
+
+    /// `--diff <root> [--staged] [--revisions <r>] [--path <p>]…`, as
+    /// `git-scry diff` passes them: each value after its option, since
+    /// AppKit takes a bare path for a file to open.
+    static func changesRequest(in arguments: [String]) -> ChangesRequest? {
+        guard let root = value(of: "--diff", in: arguments) else { return nil }
+        var request = ChangesRequest(root: root)
+        request.staged = arguments.contains("--staged")
+        request.revisions = value(of: "--revisions", in: arguments)
+        request.paths = arguments.indices
+            .filter { arguments[$0] == "--path" && $0 + 1 < arguments.count }
+            .map { arguments[$0 + 1] }
+        return request
+    }
+
+    /// The two files, or two folders, `git difftool` hands over.
+    struct DifftoolFiles: Equatable, Sendable {
+        var old: String
+        var new: String
+        /// The file's path in the repository; empty when git gave none.
+        var name = ""
+        /// The file's place among those git opens one after the other,
+        /// when there are several.
+        var queue: ChangesViewModel.Queue?
+    }
+
+    /// `--difftool --old <o> --new <n> [--name <path>]`, as `git-scry
+    /// difftool` passes them.
+    static func difftoolFiles(in arguments: [String]) -> DifftoolFiles? {
+        guard arguments.contains("--difftool"),
+              let old = value(of: "--old", in: arguments),
+              let new = value(of: "--new", in: arguments)
+        else { return nil }
+        var queue: ChangesViewModel.Queue?
+        if let place = value(of: "--place", in: arguments).flatMap(Int.init),
+           let total = value(of: "--of", in: arguments).flatMap(Int.init),
+           total > 1, (1...total).contains(place) {
+            queue = ChangesViewModel.Queue(place: place, total: total)
+        }
+        return DifftoolFiles(old: old, new: new, name: value(of: "--name", in: arguments) ?? "", queue: queue)
+    }
+
+    /// Shows what `request` compares in its repository.
+    func openChanges(_ request: ChangesRequest) async {
+        guard opening == nil else { return }
+        opening = URL(fileURLWithPath: request.root).lastPathComponent
+        defer { opening = nil }
+        do {
+            let source = try await Task.detached {
+                try ChangeSet.open(
+                    path: request.root, staged: request.staged, revisions: request.revisions, paths: request.paths
+                )
+            }.value
+            open(changes: source)
+            openError = nil
+            recents.add(source.header().root)
+        } catch {
+            openError = error.message
+        }
+    }
+
+    /// Shows the changes read from `source`.
+    func open(changes source: ChangesSource, queue: ChangesViewModel.Queue? = nil) {
+        editor = nil
+        overview = nil
+        let root = source.header().root
+        changes = ChangesViewModel(
+            source: source,
+            queue: queue,
+            leaveQueue: { [weak self] stop in
+                self?.difftoolStopped = stop
+                self?.difftoolLeft = true
+            },
+            openConflicted: { [weak self] path in
+                Task { await self?.open(fromChanges: URL(fileURLWithPath: root).appendingPathComponent(path).path) }
+            }
+        )
+        OpenRepository.path = root.isEmpty ? nil : root
+    }
+
+    /// Opens a conflicted file of the changes in the editor, with a way
+    /// back.
+    private func open(fromChanges path: String) async {
+        await open(path)
+        editor?.onBack = { [weak self] in self?.leaveEditor() }
+    }
+
     func dismissOpenError() {
         openError = nil
     }
@@ -102,16 +252,19 @@ final class RootViewModel {
         editor?.onBack = { [weak self] in self?.leaveEditor() }
     }
 
-    /// Back from the editor to the overview, read again.
+    /// Back from the editor to the overview or the changes, read again.
     func leaveEditor() {
-        guard overview != nil else { return }
+        guard overview != nil || changes != nil else { return }
         editor = nil
         overview?.refresh()
+        if let changes {
+            Task { await changes.load() }
+        }
     }
 
     /// The file opened from the overview is written: back to the list.
     var returnsToOverview: Bool {
-        overview != nil && !isMergetool && editor?.written == true
+        (overview != nil || changes != nil) && !isMergetool && editor?.written == true
     }
 
     func open(_ path: String) async {
@@ -134,7 +287,7 @@ final class RootViewModel {
         do {
             editor = MergeEditorViewModel(model: try await load())
             openError = nil
-            if overview == nil { OpenRepository.path = path }
+            if overview == nil, changes == nil { OpenRepository.path = path }
         } catch {
             openError = error.message
         }
@@ -146,6 +299,8 @@ final class RootViewModel {
     /// written, so git stages it, 1 when it is left conflicted. Outside the
     /// merge tool, 0.
     var exitStatus: Int32 {
+        // `git-scry difftool` reads 1 as Stop, and opens no other file.
+        if difftoolStopped { return 1 }
         guard isMergetool else { return 0 }
         return mergetoolEditor?.everWritten == true ? 0 : 1
     }
@@ -157,10 +312,10 @@ final class RootViewModel {
         !isMergetool && editor == nil && opening == nil
     }
 
-    /// The merge tool's file is written: the window closes, and `git
-    /// mergetool` moves on to the next file.
+    /// The merge tool's file is written, or the diff tool's window was
+    /// left by its own buttons: the window closes, and git moves on.
     var finished: Bool {
-        isMergetool && editor?.written == true
+        (isMergetool && editor?.written == true) || difftoolLeft
     }
 
     /// `--base B --local L --remote R --merged M`, as `git-scry resolve

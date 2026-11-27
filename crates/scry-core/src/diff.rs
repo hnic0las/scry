@@ -19,6 +19,9 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::git::{Git, GitError};
+use crate::highlight::{Highlighter, Span};
+use crate::layout::Shown;
+use crate::syntax::Language;
 use crate::words;
 
 /// What is compared: the old side and the new side.
@@ -86,6 +89,155 @@ impl Comparison {
             Comparison::Commits { new, .. } => Some(format!("{new}:{path}")),
         }
     }
+}
+
+/// A comparison with the words that name it: what the window's header and
+/// the bar above the file say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scope {
+    pub comparison: Comparison,
+    /// What is read: "Not committed", "Staged", a branch or a commit.
+    pub title: String,
+    /// What it is compared with: "Against HEAD".
+    pub detail: String,
+    /// The branch checked out, when the working copy or the index is
+    /// read; `None` on a detached HEAD.
+    pub branch: Option<String>,
+    /// The old side's name, for the bar above the file: "HEAD".
+    pub old_label: String,
+    /// The new side's name: "Working copy".
+    pub new_label: String,
+}
+
+/// Why what was asked cannot be compared.
+#[derive(Debug)]
+pub enum ScopeError {
+    Git(GitError),
+    /// `--staged` with `a..b`: the index is compared with one commit.
+    StagedRange,
+}
+
+impl fmt::Display for ScopeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ScopeError::Git(error) => error.fmt(f),
+            ScopeError::StagedRange => f.write_str("--staged takes one commit, not a range"),
+        }
+    }
+}
+
+impl std::error::Error for ScopeError {}
+
+impl From<GitError> for ScopeError {
+    fn from(error: GitError) -> ScopeError {
+        ScopeError::Git(error)
+    }
+}
+
+impl Scope {
+    /// What `git scry diff` compares, from its arguments: nothing for
+    /// everything not committed, a commit for the working copy against
+    /// it, `a..b` for two commits, `a...b` for b against its merge base
+    /// with a; `staged` reads the index in place of the working copy. A
+    /// missing end of a range is HEAD, as for git.
+    pub fn of(git: &dyn Git, staged: bool, revisions: Option<&str>) -> Result<Scope, ScopeError> {
+        let or_head = |name: &str| if name.is_empty() { "HEAD" } else { name }.to_string();
+        if let Some((old, new)) = revisions.and_then(|revisions| revisions.split_once("...")) {
+            if staged {
+                return Err(ScopeError::StagedRange);
+            }
+            let (old, new) = (or_head(old), or_head(new));
+            let comparison = Comparison::since_merge_base(git, &old, &new)?;
+            let base = match &comparison {
+                Comparison::Commits { old, .. } => short_id(git, old),
+                _ => String::new(),
+            };
+            return Ok(Scope {
+                comparison,
+                detail: format!("Against its merge base with {old} ({base})"),
+                branch: None,
+                old_label: base,
+                new_label: new.clone(),
+                title: new,
+            });
+        }
+        if let Some((old, new)) = revisions.and_then(|revisions| revisions.split_once("..")) {
+            if staged {
+                return Err(ScopeError::StagedRange);
+            }
+            let (old, new) = (or_head(old), or_head(new));
+            return Ok(Scope {
+                comparison: Comparison::Commits {
+                    old: old.clone(),
+                    new: new.clone(),
+                },
+                detail: format!("Against {old}"),
+                branch: None,
+                old_label: old,
+                new_label: new.clone(),
+                title: new,
+            });
+        }
+        // The working copy or the index, against one commit.
+        let (base, name) = match revisions {
+            Some(base) => (base.to_string(), base.to_string()),
+            None => {
+                let base = head(git)?;
+                let name = if base == "HEAD" {
+                    base.clone()
+                } else {
+                    String::from("nothing: no commit yet")
+                };
+                (base, name)
+            }
+        };
+        let branch = git
+            .run(&["branch", "--show-current"])
+            .ok()
+            .map(|branch| branch.trim().to_string())
+            .filter(|branch| !branch.is_empty());
+        let (comparison, title, new_label) = if staged {
+            (Comparison::Staged { base }, "Staged", "Index")
+        } else if revisions.is_none() {
+            (
+                Comparison::WorkingCopy { base },
+                "Not committed",
+                "Working copy",
+            )
+        } else {
+            (
+                Comparison::WorkingCopy { base },
+                "Working copy",
+                "Working copy",
+            )
+        };
+        Ok(Scope {
+            comparison,
+            title: title.to_string(),
+            detail: format!("Against {name}"),
+            branch,
+            old_label: name,
+            new_label: new_label.to_string(),
+        })
+    }
+
+    /// The title and the detail in one line: "Not committed, against
+    /// HEAD".
+    pub fn sentence(&self) -> String {
+        let mut detail = self.detail.chars();
+        let lowered: String = match detail.next() {
+            Some(first) => first.to_lowercase().chain(detail).collect(),
+            None => String::new(),
+        };
+        format!("{}, {lowered}", self.title)
+    }
+}
+
+/// A commit's abbreviated id, or its name as given when git cannot tell.
+fn short_id(git: &dyn Git, commit: &str) -> String {
+    git.run(&["rev-parse", "--short", commit])
+        .map(|id| id.trim().to_string())
+        .unwrap_or_else(|_| commit.to_string())
 }
 
 /// HEAD, or the empty tree while the repository has no commit: everything
@@ -494,6 +646,9 @@ pub struct Change {
     /// Index of its first row in `TextDiff::rows`.
     pub first_row: usize,
     pub row_count: usize,
+    /// Index of its first line in `TextDiff::unified`, where it has
+    /// `removed + added` lines.
+    pub first_line: usize,
     pub added: usize,
     pub removed: usize,
 }
@@ -670,6 +825,10 @@ pub fn plain_files(
     new: &Path,
     marks: Marks,
 ) -> Result<FileDiff, DiffError> {
+    // git would compare a symbolic link's target path, not the file it
+    // points to: `git difftool --dir-diff` hands over links to the working
+    // copy's files.
+    let (old, new) = (&followed(old), &followed(new));
     let (old_text, new_text) = (old.to_string_lossy(), new.to_string_lossy());
     let arguments = [
         "diff",
@@ -710,6 +869,139 @@ pub fn plain_files(
         return Ok(FileDiff::Text(TextDiff::unchanged(Text::of(&bytes))));
     }
     Ok(FileDiff::Text(TextDiff::from_patch(patch, marks)))
+}
+
+/// `path` with its symbolic links followed, or as it is when it cannot be
+/// read: git then says why.
+fn followed(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// What stands for a file that one side does not have, for `git diff
+/// --no-index`: every line of the other side is then added or removed.
+const NO_FILE: &str = "/dev/null";
+
+/// The files that differ between two folders, as `git difftool
+/// --dir-diff` hands them over: by path from the folders, in order. A
+/// file in one folder only is added or deleted; symbolic links are
+/// followed.
+pub fn folder_files(git: &dyn Git, old: &Path, new: &Path) -> Result<Vec<ChangedFile>, DiffError> {
+    let mut paths = Vec::new();
+    for folder in [old, new] {
+        files_under(folder, "", &mut paths)?;
+    }
+    paths.sort();
+    paths.dedup();
+    let mut files = Vec::new();
+    for path in paths {
+        let (old_file, new_file) = (old.join(&path), new.join(&path));
+        let state = match (old_file.exists(), new_file.exists()) {
+            (true, true) => FileState::Modified,
+            (false, true) => FileState::Added,
+            _ => FileState::Deleted,
+        };
+        let old_bytes = if state == FileState::Added {
+            Vec::new()
+        } else {
+            read(&old_file)?
+        };
+        let new_bytes = if state == FileState::Deleted {
+            Vec::new()
+        } else {
+            read(&new_file)?
+        };
+        if state == FileState::Modified && old_bytes == new_bytes {
+            continue;
+        }
+        let mut file = changed_file(&path, state);
+        if is_binary(&old_bytes) || is_binary(&new_bytes) {
+            file.binary = true;
+        } else {
+            // git counts, so the list agrees with the file's rows.
+            let (old_text, new_text) = (
+                followed(&old_file).to_string_lossy().into_owned(),
+                followed(&new_file).to_string_lossy().into_owned(),
+            );
+            let side = |text: &'_ str, missing: bool| {
+                if missing {
+                    NO_FILE.to_string()
+                } else {
+                    text.to_string()
+                }
+            };
+            let (old_argument, new_argument) = (
+                side(&old_text, state == FileState::Added),
+                side(&new_text, state == FileState::Deleted),
+            );
+            let output = git.output(&[
+                "diff",
+                "--no-index",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--numstat",
+                "--",
+                &old_argument,
+                &new_argument,
+            ])?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            let mut counts = text.split('\t').map(|count| count.trim().parse().ok());
+            file.added = counts.next().flatten();
+            file.removed = counts.next().flatten();
+        }
+        files.push(file);
+    }
+    Ok(files)
+}
+
+/// The diff of `file`, a file of `folder_files(old, new)`.
+pub fn folder_file_diff(
+    git: &dyn Git,
+    old: &Path,
+    new: &Path,
+    file: &ChangedFile,
+    marks: Marks,
+) -> Result<FileDiff, DiffError> {
+    let none = Path::new(NO_FILE);
+    let (old_file, new_file) = (old.join(&file.path), new.join(&file.path));
+    plain_files(
+        git,
+        if file.state == FileState::Added {
+            none
+        } else {
+            &old_file
+        },
+        if file.state == FileState::Deleted {
+            none
+        } else {
+            &new_file
+        },
+        marks,
+    )
+}
+
+/// The files under `folder`, by their path from it with `/` between
+/// folders, links to files and folders followed.
+fn files_under(folder: &Path, prefix: &str, paths: &mut Vec<String>) -> Result<(), DiffError> {
+    let failed = |error| DiffError::Read {
+        path: folder.to_path_buf(),
+        error,
+    };
+    for entry in fs::read_dir(folder).map_err(failed)? {
+        let entry = entry.map_err(failed)?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = format!("{prefix}{name}");
+        // `metadata` follows links, where the entry's own type does not.
+        match fs::metadata(entry.path()) {
+            Ok(metadata) if metadata.is_dir() => {
+                files_under(&entry.path(), &format!("{path}/"), paths)?;
+            }
+            Ok(_) => paths.push(path),
+            // A link to a file that is gone: nothing to compare.
+            Err(_) => {}
+        }
+    }
+    Ok(())
 }
 
 /// A blob's size in bytes, when git has it.
@@ -951,20 +1243,26 @@ impl TextDiff {
     pub fn changes(&self) -> Vec<Change> {
         let mut changes: Vec<Change> = Vec::new();
         let mut open = false;
+        // A row is one unified line, or two when it has both sides.
+        let mut line = 0;
         for (index, row) in self.rows.iter().enumerate() {
+            let lines = usize::from(row.old.is_some()) + usize::from(row.new.is_some());
             if row.kind == RowKind::Unchanged {
                 open = false;
+                line += 1;
                 continue;
             }
             if !open {
                 changes.push(Change {
                     first_row: index,
                     row_count: 0,
+                    first_line: line,
                     added: 0,
                     removed: 0,
                 });
                 open = true;
             }
+            line += lines;
             if let Some(change) = changes.last_mut() {
                 change.row_count += 1;
                 change.removed += usize::from(row.old.is_some());
@@ -1022,9 +1320,174 @@ impl TextDiff {
     }
 }
 
+/// A line as a front end draws it: tabs expanded, measured, coloured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ShownLine {
+    pub text: String,
+    /// Its width in columns of a monospaced font.
+    pub columns: usize,
+    /// Syntax colours, in UTF-8 bytes of `text`. Empty for a language
+    /// Scry has no grammar for, and in a large file.
+    pub spans: Vec<Span>,
+}
+
+/// A text diff ready to draw: every offset is in the shown lines, where a
+/// tab takes the columns up to its stop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ShownDiff {
+    pub old_lines: Vec<ShownLine>,
+    pub new_lines: Vec<ShownLine>,
+    /// The split view's rows.
+    pub rows: Vec<Row>,
+    /// The unified view's lines.
+    pub unified: Vec<UnifiedLine>,
+    pub changes: Vec<Change>,
+    /// The widest line of either side, in columns: how far the view
+    /// scrolls sideways.
+    pub longest_line: usize,
+}
+
+impl TextDiff {
+    /// The diff as a front end draws it, with the syntax colours of
+    /// `path`'s language. A large file opened without its marks gets no
+    /// colours either: parsing both sides is what would make it slow.
+    pub fn shown(&self, path: &Path) -> ShownDiff {
+        let highlighter = Language::from_path(path)
+            .filter(|_| !self.marks_skipped)
+            .and_then(Highlighter::new);
+        let side = |lines: &[String]| -> (Vec<ShownLine>, Vec<Shown>) {
+            let spans = highlighter
+                .as_ref()
+                .map(|highlighter| highlighter.lines(&lines.join("\n")))
+                // One list per line, or the colours would sit on the
+                // wrong lines.
+                .filter(|spans| spans.len() == lines.len());
+            let shown: Vec<Shown> = lines.iter().map(|line| Shown::new(line)).collect();
+            let drawn = shown
+                .iter()
+                .enumerate()
+                .map(|(index, line)| ShownLine {
+                    text: line.text.clone(),
+                    columns: line.columns,
+                    spans: spans
+                        .as_ref()
+                        .map(|spans| {
+                            spans[index]
+                                .iter()
+                                .map(|span| Span {
+                                    start: line.offset(span.start),
+                                    end: line.offset(span.end),
+                                    role: span.role,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect();
+            (drawn, shown)
+        };
+        let (old_lines, old_shown) = side(&self.old_lines);
+        let (new_lines, new_shown) = side(&self.new_lines);
+        let moved = |words: &[Range<usize>], number: Option<usize>, shown: &[Shown]| match number {
+            Some(number) => words
+                .iter()
+                .map(|word| shown[number - 1].range(word.clone()))
+                .collect(),
+            None => Vec::new(),
+        };
+        let rows: Vec<Row> = self
+            .rows
+            .iter()
+            .map(|row| Row {
+                old_words: moved(&row.old_words, row.old, &old_shown),
+                new_words: moved(&row.new_words, row.new, &new_shown),
+                ..row.clone()
+            })
+            .collect();
+        let unified = self
+            .unified()
+            .into_iter()
+            .map(|line| UnifiedLine {
+                words: match line.kind {
+                    LineKind::Removed => moved(&line.words, line.old, &old_shown),
+                    _ => moved(&line.words, line.new, &new_shown),
+                },
+                ..line
+            })
+            .collect();
+        let longest_line = old_lines
+            .iter()
+            .chain(&new_lines)
+            .map(|line| line.columns)
+            .max()
+            .unwrap_or(0);
+        ShownDiff {
+            old_lines,
+            new_lines,
+            rows,
+            unified,
+            changes: self.changes(),
+            longest_line,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What is drawn has its tabs expanded, so every offset moves with
+    /// them: the changed word and the syntax colours sit on the same
+    /// text as before, in the split rows and in the unified lines, and
+    /// the widest line counts the expanded columns.
+    #[test]
+    fn a_shown_diff_moves_marks_and_colours_past_expanded_tabs() {
+        let patch = parse_patch(
+            "@@ -1,2 +1,2 @@\n fn main() {\n-\tlet timeout = 30;\n+\tlet timeout = 60;\n",
+        );
+        let diff = TextDiff::from_patch(patch, Marks::Auto);
+        assert_eq!(diff.rows[1].new_words.first(), Some(&(15..17)));
+        let shown = diff.shown(Path::new("src/main.rs"));
+
+        assert_eq!(shown.new_lines[1].text, "    let timeout = 60;");
+        assert_eq!(shown.longest_line, 21);
+        let word = shown.rows[1].new_words[0].clone();
+        assert_eq!(&shown.new_lines[1].text[word], "60");
+        let word = shown.rows[1].old_words[0].clone();
+        assert_eq!(&shown.old_lines[1].text[word], "30");
+        // Unified: line 2 removed, then line 2 added, each with its mark.
+        let removed = &shown.unified[1];
+        assert_eq!(&shown.old_lines[1].text[removed.words[0].clone()], "30");
+        let added = &shown.unified[2];
+        assert_eq!(&shown.new_lines[1].text[added.words[0].clone()], "60");
+
+        let keyword = shown.new_lines[1]
+            .spans
+            .iter()
+            .find(|span| span.role == crate::highlight::SyntaxRole::Keyword)
+            .expect("a keyword on the line");
+        assert_eq!(&shown.new_lines[1].text[keyword.start..keyword.end], "let");
+        assert_eq!(shown.changes, diff.changes());
+    }
+
+    /// A file in a language without a grammar is drawn plain, and so is a
+    /// large file opened without its marks: no colours rather than slow
+    /// ones.
+    #[test]
+    fn a_shown_diff_is_plain_without_a_grammar_or_in_a_large_file() {
+        let patch = || parse_patch("@@ -1 +1 @@\n-let a = 1;\n+let a = 2;\n");
+        let text = TextDiff::from_patch(patch(), Marks::Auto);
+        assert!(
+            text.shown(Path::new("notes.unknown")).new_lines[0]
+                .spans
+                .is_empty()
+        );
+        assert!(!text.shown(Path::new("a.rs")).new_lines[0].spans.is_empty());
+
+        let mut large = TextDiff::from_patch(patch(), Marks::Auto);
+        large.marks_skipped = true;
+        assert!(large.shown(Path::new("a.rs")).new_lines[0].spans.is_empty());
+    }
 
     /// The list is read from git's raw records and counts: a renamed file
     /// keeps its old path and takes its counts from the entry with two

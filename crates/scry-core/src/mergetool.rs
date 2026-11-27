@@ -34,7 +34,7 @@ pub fn command(cli: &Path, app: &Path) -> String {
 
 /// `text` in double quotes, with the characters the shell still reads
 /// inside them escaped.
-fn quote(text: &str) -> String {
+pub(crate) fn quote(text: &str) -> String {
     let mut quoted = String::from("\"");
     for character in text.chars() {
         if matches!(character, '"' | '\\' | '$' | '`') {
@@ -113,7 +113,7 @@ pub fn translocated(app: &Path) -> bool {
 }
 
 /// A global setting; `None` when unset (git exits with 1).
-fn global(git: &dyn Git, key: &str) -> Result<Option<String>, GitError> {
+pub(crate) fn global(git: &dyn Git, key: &str) -> Result<Option<String>, GitError> {
     let args = ["config", "--global", "--get", key];
     let output = git.output(&args)?;
     match output.status {
@@ -129,7 +129,7 @@ fn global(git: &dyn Git, key: &str) -> Result<Option<String>, GitError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
 
@@ -139,8 +139,8 @@ mod tests {
     /// Git's global configuration in memory: `git config --global` reads
     /// and writes it, so tests never touch the user's.
     #[derive(Default)]
-    struct FakeConfig {
-        values: RefCell<BTreeMap<String, String>>,
+    pub(crate) struct FakeConfig {
+        pub(crate) values: RefCell<BTreeMap<String, String>>,
     }
 
     impl Git for FakeConfig {

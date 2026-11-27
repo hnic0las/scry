@@ -18,19 +18,14 @@ extension SyntaxRole {
     }
 }
 
-extension Cell {
-    /// The changed words of an edited line; none otherwise.
-    var changedWords: [ByteRange] {
-        if case .edited(let words) = change { return words }
-        return []
-    }
-
-    /// The cell's text coloured by the core's spans, with changed words on
-    /// `wordTint`. Offsets are UTF-8 bytes, so the text is cut through its
-    /// UTF-8 view, at every span and word boundary.
-    func highlighted(wordTint: Color?) -> AttributedString {
+/// Code coloured by the core's spans, with its changed words on a tint.
+enum CodeText {
+    /// `text` coloured by `spans`, with `words` on `wordTint`. Offsets are
+    /// UTF-8 bytes, so the text is cut through its UTF-8 view, at every
+    /// span and word boundary.
+    static func highlighted(text: String, spans: [Span], words: [ByteRange], wordTint: Color?) -> AttributedString {
         let utf8 = text.utf8
-        let words = wordTint == nil ? [] : changedWords
+        let words = wordTint == nil ? [] : words
         var cuts: Set<Int> = [0, utf8.count]
         for span in spans {
             cuts.insert(Int(span.start))
@@ -61,5 +56,19 @@ extension Cell {
             result.append(run)
         }
         return result
+    }
+}
+
+extension Cell {
+    /// The changed words of an edited line; none otherwise.
+    var changedWords: [ByteRange] {
+        if case .edited(let words) = change { return words }
+        return []
+    }
+
+    /// The cell's text coloured by the core's spans, with changed words on
+    /// `wordTint`.
+    func highlighted(wordTint: Color?) -> AttributedString {
+        CodeText.highlighted(text: text, spans: spans, words: changedWords, wordTint: wordTint)
     }
 }
