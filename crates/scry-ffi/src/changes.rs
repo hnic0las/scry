@@ -5,12 +5,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use scry_core::diff::{self, Comparison, Marks};
+use scry_core::file_blame::Target;
 use scry_core::git::{GitCli, GitError};
+use scry_core::history;
 use scry_core::operation;
 use scry_core::overview;
 use scry_core::syntax::Language;
 use scry_core::viewed::{self, Viewed};
 
+use crate::file_blame::FileBlame;
 use crate::{ByteRange, ScryError, Span, failed, span};
 
 /// What the window says it compares.
@@ -44,6 +47,11 @@ pub struct ChangesHeader {
     /// The repository's git folder, to watch with `root` when `live`;
     /// empty without a repository.
     pub git_dir: String,
+    /// A file's history can be opened from this window.
+    pub has_history: bool,
+    /// The commit a file's history goes back from; `None` for HEAD, with
+    /// what is not committed before it.
+    pub history_from: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -275,6 +283,14 @@ enum Source {
         old: PathBuf,
         new: PathBuf,
     },
+    /// One file at a point of its history.
+    Point {
+        git: GitCli,
+        root: PathBuf,
+        /// `None` when the point is the pin: nothing differs.
+        sides: Option<history::Sides>,
+        header: ChangesHeader,
+    },
 }
 
 /// What differs between two versions of one repository, or between the
@@ -347,6 +363,26 @@ impl ChangeSet {
         }))
     }
 
+    /// One commit of the repository holding `path`, against its parent:
+    /// what "Show the Whole Commit" opens.
+    #[uniffi::constructor]
+    pub fn open_commit(path: String, commit: String) -> Result<Arc<ChangeSet>, ScryError> {
+        let probe = GitCli::discover(PathBuf::from(&path));
+        let root = overview::root(&probe)?;
+        let git = GitCli::discover(root.clone());
+        let scope = diff::Scope::commit(&git, &commit)?;
+        Ok(Arc::new(ChangeSet {
+            source: Source::Repository {
+                git_dir: scry_core::asks::git_dir(&git).unwrap_or_default(),
+                git,
+                root,
+                scope,
+                paths: Vec::new(),
+            },
+            files: Mutex::new(Vec::new()),
+        }))
+    }
+
     /// The two files `git difftool` hands over, or its two folders with
     /// `--dir-diff`; `name` is the file's path in the repository
     /// (`$MERGED`), empty when git gave none.
@@ -404,7 +440,13 @@ impl ChangeSet {
                 live: !matches!(scope.comparison, Comparison::Commits { .. }),
                 reduced: false,
                 single_file: false,
+                has_history: true,
+                history_from: match &scope.comparison {
+                    Comparison::Commits { new, .. } => Some(new.clone()),
+                    _ => None,
+                },
             },
+            Source::Point { header, .. } => header.clone(),
             Source::Files { old, new, name, .. } => ChangesHeader {
                 repository: Path::new(name)
                     .file_name()
@@ -423,6 +465,8 @@ impl ChangeSet {
                 reduced: true,
                 single_file: true,
                 git_dir: String::new(),
+                has_history: false,
+                history_from: None,
             },
             Source::Folders { .. } => ChangesHeader {
                 repository: String::from("git difftool"),
@@ -438,6 +482,8 @@ impl ChangeSet {
                 reduced: true,
                 single_file: false,
                 git_dir: String::new(),
+                has_history: false,
+                history_from: None,
             },
         }
     }
@@ -495,6 +541,12 @@ impl ChangeSet {
             Source::Folders { git, old, new } => {
                 diff::folder_files(git, old, new).map_err(diff_error)?
             }
+            Source::Point {
+                git, root, sides, ..
+            } => match sides {
+                Some(sides) => history::sides_file(git, root, sides)?.into_iter().collect(),
+                None => Vec::new(),
+            },
         };
         let marks = self.marks();
         let listed: Vec<Listed> = files
@@ -579,13 +631,96 @@ impl ChangeSet {
             Source::Folders { git, old, new } => {
                 diff::folder_file_diff(git, old, new, &file, marks)
             }
+            Source::Point {
+                git,
+                root,
+                sides: Some(sides),
+                ..
+            } => history::sides_diff(git, root, sides, &file, marks),
+            Source::Point { .. } => {
+                return Err(ScryError::Refused {
+                    message: String::from("This file is no longer in the list."),
+                });
+            }
         }
         .map_err(diff_error)?;
         Ok(file_diff(read, Path::new(&file.path)))
     }
 }
 
+#[uniffi::export]
 impl ChangeSet {
+    /// The blame of the new side of the file at `index` of the last
+    /// list, not read yet. Refused where there is nothing to blame: no
+    /// repository (`git difftool`), or a file with no new side.
+    pub fn blame(&self, index: u32) -> Result<Arc<FileBlame>, ScryError> {
+        let nothing = || ScryError::Refused {
+            message: String::from("There is no history to read for this file."),
+        };
+        let file = self
+            .lock()
+            .get(index as usize)
+            .map(|listed| listed.file.clone())
+            .ok_or_else(nothing)?;
+        if file.state == diff::FileState::Deleted {
+            return Err(nothing());
+        }
+        let (git, target, path) = match &self.source {
+            Source::Repository { git, scope, .. } => {
+                (git, Target::of(&scope.comparison), file.path.clone())
+            }
+            Source::Point {
+                git,
+                sides: Some(sides),
+                ..
+            } => match sides {
+                history::Sides::Compared { comparison, .. } => {
+                    (git, Target::of(comparison), file.path.clone())
+                }
+                history::Sides::Blobs {
+                    new: None,
+                    new_path,
+                    ..
+                } => (git, Target::WorkingCopy, new_path.clone()),
+                history::Sides::Blobs {
+                    new: Some(blob),
+                    new_path,
+                    ..
+                } => {
+                    // `commit:path`: the commit is what comes before the
+                    // path.
+                    let commit = blob
+                        .strip_suffix(new_path.as_str())
+                        .and_then(|commit| commit.strip_suffix(':'))
+                        .ok_or_else(nothing)?;
+                    (git, Target::Commit(commit.to_string()), new_path.clone())
+                }
+            },
+            _ => return Err(nothing()),
+        };
+        Ok(FileBlame::new(git.clone(), target, path))
+    }
+}
+
+impl ChangeSet {
+    /// One file at a point of its history, read as `sides` says.
+    pub(crate) fn point(
+        git: GitCli,
+        root: PathBuf,
+        sides: Option<history::Sides>,
+        header: ChangesHeader,
+    ) -> Arc<ChangeSet> {
+        Arc::new(ChangeSet {
+            source: Source::Point {
+                git,
+                root,
+                sides,
+                header,
+            },
+            files: Mutex::new(Vec::new()),
+        })
+    }
+
     /// This change's "Viewed" marks, read again; `None` without a
     /// repository.
     fn marks(&self) -> Option<Viewed> {

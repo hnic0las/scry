@@ -691,3 +691,82 @@ fn git_difftool_opens_the_app_on_each_file_or_on_the_folders() {
     assert!(!stopped.status.success(), "{stopped:?}");
     assert_eq!(fs::read_to_string(&arguments).unwrap(), "call\n");
 }
+
+/// `log --print` lists a file's points, newest first: what is not
+/// committed, then its commits with their day, author, subject and
+/// counts, followed through a rename; a file with no history is
+/// reported with exit code 2.
+#[test]
+fn log_print_lists_a_files_points_through_its_rename() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repository(root.path(), &[("src/old.txt", "one\ntwo\nthree\nfour\n")]);
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", root.path().join("gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Scry Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_AUTHOR_DATE", "2026-11-27T12:00:00+0000")
+            .env("GIT_COMMITTER_NAME", "Scry Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["mv", "src/old.txt", "src/new.txt"]);
+    git(&["commit", "--quiet", "-m", "Rename it"]);
+    fs::write(repo.join("src/new.txt"), "one\ntwo\nthree\nfour\nfive\n").unwrap();
+
+    let output = git_scry_in(
+        root.path(),
+        &repo.join("src"),
+        &["log", "--print", "new.txt"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines[0],
+        "History of src/new.txt · 2 commits · renames followed"
+    );
+    assert_eq!(lines[1], "  Not committed  +1 −0");
+    assert!(
+        lines[2].ends_with("  2026-11-27  Scry Test  Rename it  +0 −0  HEAD"),
+        "{stdout}"
+    );
+    assert_eq!(lines[3], "    renamed from src/old.txt");
+    assert!(lines[4].ends_with("  Scry Test  base  +4 −0"), "{stdout}");
+    assert_eq!(lines.len(), 5);
+
+    let output = git_scry_in(root.path(), &repo, &["log", "--print", "nothing.txt"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("has no history")
+    );
+}
+
+/// Without `--print`, `log` opens the app on the file's history: the
+/// app gets the repository's root after `--history`, then the file from
+/// the root after `--path`.
+#[cfg(unix)]
+#[test]
+fn log_opens_the_app_on_the_files_history() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repository(root.path(), &[("src/a.txt", "one\n")]);
+    let (app, arguments) = fake_app(root.path());
+    let app = format!("--app={}", app.display());
+    let canonical = fs::canonicalize(&repo).unwrap().display().to_string();
+
+    let output = git_scry_in(root.path(), &repo.join("src"), &["log", &app, "a.txt"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(&arguments).unwrap(),
+        format!("--history\n{canonical}\n--path\nsrc/a.txt\n")
+    );
+    let output = git_scry_in(root.path(), &repo, &["log", &app, "nothing.txt"]);
+    assert_eq!(output.status.code(), Some(2));
+}

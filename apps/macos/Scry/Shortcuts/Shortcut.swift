@@ -19,6 +19,8 @@ struct Shortcut: Identifiable, Equatable, Sendable {
         case character(Character)
         case upArrow
         case downArrow
+        case leftArrow
+        case rightArrow
         case `return`
         case escape
     }
@@ -56,6 +58,8 @@ struct Shortcut: Identifiable, Equatable, Sendable {
         case .character(let character): text += character.uppercased()
         case .upArrow: text += "↑"
         case .downArrow: text += "↓"
+        case .leftArrow: text += "←"
+        case .rightArrow: text += "→"
         case .return: text += "↩"
         case .escape: text += "esc"
         }
@@ -183,6 +187,33 @@ extension Shortcut {
         id: "refreshChanges", title: "Read the files again", section: .changes, key: .character("r"),
         modifiers: [.command], hint: "Read again"
     )
+    static let blame = Shortcut(
+        id: "blame", title: "Show or hide blame", section: .changes, key: .character("b"),
+        modifiers: [.option, .command], note: "Who last wrote each line; click a line for its commit", hint: "Blame"
+    )
+    static let history = Shortcut(
+        id: "history", title: "History of the file", section: .changes, key: .character("y"),
+        modifiers: [.command], note: "Again for the changed files", hint: "History"
+    )
+    static let olderPoint = Shortcut(
+        id: "olderPoint", title: "Older point of the history", section: .changes, key: .leftArrow,
+        modifiers: [.option, .command], hint: "Older"
+    )
+    static let newerPoint = Shortcut(
+        id: "newerPoint", title: "Newer point of the history", section: .changes, key: .rightArrow,
+        modifiers: [.option, .command], hint: "Newer"
+    )
+    static let pinPoint = Shortcut(
+        id: "pinPoint", title: "Pin the selected point", section: .changes, key: .character("p"),
+        modifiers: [.option, .command], note: "Every point is then compared with it; again to unpin", hint: "Pin"
+    )
+    static let goBack = Shortcut(
+        id: "goBack", title: "Back", section: .changes, key: .character("["), modifiers: [.command],
+        note: "To the change, the history or the commit shown before"
+    )
+    static let goForward = Shortcut(
+        id: "goForward", title: "Forward", section: .changes, key: .character("]"), modifiers: [.command]
+    )
 
     // MARK: App
 
@@ -213,6 +244,7 @@ extension Shortcut {
         applyEdit, cancelEdit,
         openFile, refresh, continueOperation,
         previousChange, nextChange, previousFile, nextFile, changesLayout, viewed, refreshChanges,
+        blame, history, olderPoint, newerPoint, pinPoint, goBack, goForward,
         openRepository, openConflictedFile, keyboardShortcuts,
         confirmSheet, cancelSheet,
     ]

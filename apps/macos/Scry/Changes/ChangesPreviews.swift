@@ -122,6 +122,64 @@ enum PreviewChanges {
         return try? ChangeSet.open(path: root.path, staged: false, revisions: nil, paths: [])
     }
 
+    /// The history of a file renamed once, with a change not committed.
+    static func history(
+        _ layout: ChangesViewModel.Layout = .unified, select place: Int = 1, pinned: Bool = false, blame: Bool = false
+    ) -> some View {
+        let shown = BlameSwitch()
+        shown.isOn = blame
+        let viewModel = historyRepository().map { HistoryViewModel(source: $0, defaults: .preview, blame: shown) }
+        viewModel?.loadNow(select: place, pinned: pinned)
+        viewModel?.file?.layout = layout
+        return Group {
+            if let viewModel {
+                HistoryView(viewModel: viewModel, loads: false)
+            } else {
+                Text("git could not build the sample repository")
+            }
+        }
+    }
+
+    static func historyRepository() -> FileHistory? {
+        let root = FileManager.default.temporaryDirectory.appending(path: "ScryPreview-\(UUID().uuidString)")
+        let manager = "Sources/Sync/SyncManager.swift"
+        let engine = "Sources/Sync/SyncEngine.swift"
+        let write: (String, String) -> Bool = { path, text in
+            let url = root.appending(path: path)
+            return (try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+            )) != nil && (try? text.write(to: url, atomically: true, encoding: .utf8)) != nil
+        }
+        let commit: (String, String) -> Bool = { author, message in
+            git(root, "add", ".") && git(
+                root, "-c", "user.name=\(author)", "-c", "user.email=scry@example.com", "-c", "commit.gpgsign=false",
+                "commit", "--quiet", "-m", message
+            )
+        }
+        let first = old.replacingOccurrences(of: "SyncEngine", with: "SyncManager")
+            .replacingOccurrences(of: "    func cancelAll() {\n        outbox.removeAll()\n    }\n\n", with: "")
+        let renamed = old.replacingOccurrences(of: "prefix(20)", with: "prefix(10)")
+        let queued = new.replacingOccurrences(of: "    private let monitor = NetworkMonitor()\n", with: "")
+            .replacingOccurrences(of: "            guard monitor.isOnline else { return }\n", with: "")
+            .replacingOccurrences(of: "        guard monitor.isOnline else {\n            outbox.enqueue(item)\n            return\n        }\n", with: "")
+        guard write(manager, first),
+              git(root, "init", "--quiet"),
+              git(root, "config", "user.name", "Alex Martin"),
+              commit("Sam Lee", "Add the sync manager"),
+              write(manager, first.replacingOccurrences(of: "prefix(20)", with: "prefix(10)")),
+              commit("Sam Lee", "Send smaller batches"),
+              git(root, "mv", manager, engine),
+              write(engine, renamed),
+              commit("Alex Martin", "Rename SyncManager to SyncEngine, add cancelAll"),
+              write(engine, old),
+              commit("Sam Lee", "Back to batches of 20"),
+              write(engine, queued),
+              commit("Alex Martin", "Retry uploads with a backoff, queue in SyncQueue"),
+              write(engine, new)
+        else { return nil }
+        return try? FileHistory.open(path: root.path, file: engine, from: nil)
+    }
+
     private static func git(_ root: URL, _ arguments: String...) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -153,4 +211,22 @@ enum PreviewChanges {
 
 #Preview("Changes, files viewed", traits: .fixedLayout(width: 1300, height: 760)) {
     PreviewChanges.window(.unified, viewed: true)
+}
+
+#Preview("History, each change", traits: .fixedLayout(width: 1300, height: 760)) {
+    PreviewChanges.history()
+}
+
+#Preview("History, pinned, split, dark", traits: .fixedLayout(width: 1300, height: 760)) {
+    PreviewChanges.history(.split, select: 3, pinned: true)
+        .preferredColorScheme(.dark)
+}
+
+#Preview("Blame, unified", traits: .fixedLayout(width: 1300, height: 760)) {
+    PreviewChanges.history(select: 0, blame: true)
+}
+
+#Preview("Blame, split, dark", traits: .fixedLayout(width: 1300, height: 760)) {
+    PreviewChanges.history(.split, select: 0, blame: true)
+        .preferredColorScheme(.dark)
 }

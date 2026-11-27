@@ -7,13 +7,24 @@ struct DiffMetrics: Equatable {
     let width: CGFloat
     /// One line-number column.
     let number: CGFloat
+    /// The blame gutter, left of the new side's numbers; 0 when hidden.
+    let blame: CGFloat
     static let sign: CGFloat = 16
     static let divider: CGFloat = 1
+    /// The blame gutter with the age and the author's name.
+    static let blameFull: CGFloat = 128
+    /// With the age and the author's initials: in split, and where the
+    /// file area is too narrow for names.
+    static let blameCompact: CGFloat = 80
+    /// The file area's width from which unified has room for names: a
+    /// 1,280 pt window with its sidebar.
+    static let blameFullFrom: CGFloat = 900
 
     /// `digits` is the longest line number of either side.
-    init(layout: ChangesViewModel.Layout, width: CGFloat, digits: Int) {
+    init(layout: ChangesViewModel.Layout, width: CGFloat, digits: Int, blame: Bool = false) {
         self.layout = layout
         self.width = max(width, 0)
+        self.blame = !blame ? 0 : layout == .unified && width >= Self.blameFullFrom ? Self.blameFull : Self.blameCompact
         number = CGFloat(digits) * Self.digitWidth + 2 * Metrics.lineNumberPadding
     }
 
@@ -32,10 +43,14 @@ struct DiffMetrics: Equatable {
         layout == .unified ? 2 * number + Self.sign : number + Self.sign
     }
 
-    /// The width the code is shown in.
+    /// The width the code is shown in: the new side's, the narrower one
+    /// in split when blame is shown.
     var code: CGFloat {
-        max((layout == .unified ? width : pane) - gutter, 0)
+        max((layout == .unified ? width : pane) - gutter - blame, 0)
     }
+
+    /// The blame gutter has no room for names.
+    var compactBlame: Bool { blame < Self.blameFull }
 
     /// How far the longest line, of `columns` columns, can scroll sideways.
     func maximumScroll(columns: Int) -> CGFloat {
@@ -59,7 +74,8 @@ struct DiffFileView: View {
             let metrics = DiffMetrics(
                 layout: viewModel.layout,
                 width: geometry.size.width - ChangeMapView.width,
-                digits: viewModel.numberDigits
+                digits: viewModel.numberDigits,
+                blame: viewModel.blame != nil
             )
             VStack(spacing: 0) {
                 CompareBar(
@@ -84,6 +100,11 @@ struct DiffFileView: View {
         }
     }
 
+    /// The blame and what a click on one of its lines does.
+    private var blameGutter: BlameGutter? {
+        viewModel.blame.map { blame in BlameGutter(reading: blame) { viewModel.showBlamed($0) } }
+    }
+
     private func rows(metrics: DiffMetrics) -> some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical) {
@@ -93,7 +114,7 @@ struct DiffFileView: View {
                         ForEach(diff.unified.indices, id: \.self) { index in
                             UnifiedRowView(
                                 line: diff.unified[index], diff: diff, metrics: metrics, scroll: scroll,
-                                current: current.contains(index)
+                                current: current.contains(index), blame: blameGutter
                             )
                             .id(index)
                         }
@@ -101,7 +122,7 @@ struct DiffFileView: View {
                         ForEach(diff.rows.indices, id: \.self) { index in
                             SplitRowView(
                                 row: diff.rows[index], diff: diff, metrics: metrics, scroll: scroll,
-                                current: current.contains(index)
+                                current: current.contains(index), blame: blameGutter
                             )
                             .id(index)
                         }
@@ -306,9 +327,13 @@ struct UnifiedRowView: View {
     let metrics: DiffMetrics
     let scroll: SideScroll
     let current: Bool
+    var blame: BlameGutter?
 
     var body: some View {
         HStack(spacing: 0) {
+            if let blame {
+                BlameCellView(gutter: blame, line: line.new, width: metrics.blame, compact: metrics.compactBlame)
+            }
             DiffNumber(number: line.old, width: metrics.number)
             DiffNumber(number: line.new, width: metrics.number)
             DiffSign(kind: sign)
@@ -374,6 +399,7 @@ struct SplitRowView: View {
     let metrics: DiffMetrics
     let scroll: SideScroll
     let current: Bool
+    var blame: BlameGutter?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -382,6 +408,9 @@ struct SplitRowView: View {
                 words: row.oldWords, changed: row.kind == .removed || row.kind == .changed, added: false
             )
             Rectangle().fill(Theme.Surfaces.hairline).frame(width: DiffMetrics.divider)
+            if let blame {
+                BlameCellView(gutter: blame, line: row.new, width: metrics.blame, compact: metrics.compactBlame)
+            }
             side(
                 number: row.new, line: row.new.flatMap { diff.newLines[safe: Int($0) - 1] },
                 words: row.newWords, changed: row.kind == .added || row.kind == .changed, added: true
@@ -401,10 +430,10 @@ struct SplitRowView: View {
                 DiffCodeCell(
                     line: line, words: words,
                     wordTint: !changed ? nil : added ? Theme.Diff.addedWord : Theme.Diff.removedWord,
-                    scroll: scroll, width: metrics.code
+                    scroll: scroll, width: metrics.code + (added ? 0 : metrics.blame)
                 )
             }
-            .frame(width: metrics.pane, alignment: .leading)
+            .frame(width: metrics.pane - (added ? metrics.blame : 0), alignment: .leading)
             .frame(maxHeight: .infinity)
             .background(!changed ? Theme.Surfaces.pane : added ? Theme.Diff.added : Theme.Diff.removed)
             .accessibilityElement(children: .combine)
@@ -413,7 +442,7 @@ struct SplitRowView: View {
             )
         } else {
             Hatch()
-                .frame(width: metrics.pane)
+                .frame(width: metrics.pane - (added ? metrics.blame : 0))
                 .accessibilityHidden(true)
         }
     }
@@ -428,10 +457,10 @@ struct DiffScrollBars: View {
     var body: some View {
         if scroll.canScroll {
             HStack(spacing: 0) {
-                bar
+                bar(new: metrics.layout == .unified)
                 if metrics.layout == .split {
                     Rectangle().fill(Theme.Surfaces.hairline).frame(width: DiffMetrics.divider)
-                    bar
+                    bar(new: true)
                 }
                 Spacer(minLength: 0)
             }
@@ -441,9 +470,11 @@ struct DiffScrollBars: View {
         }
     }
 
-    private var bar: some View {
+    /// The bar under one side; the new side has the blame gutter before
+    /// its numbers.
+    private func bar(new: Bool) -> some View {
         HStack(spacing: 0) {
-            Color.clear.frame(width: metrics.gutter)
+            Color.clear.frame(width: metrics.gutter + (new ? metrics.blame : 0))
             SideScrollBar(scroll: scroll, visible: metrics.code)
         }
         .frame(width: metrics.layout == .unified ? metrics.width : metrics.pane)
@@ -496,5 +527,104 @@ extension Array {
     /// line the core did not send is drawn empty rather than crash.
     subscript(safe index: Int) -> Element? {
         indices.contains(index) ? self[index] : nil
+    }
+}
+
+/// The blame of the file on screen, and what a click on a line does.
+struct BlameGutter {
+    let reading: BlameReading
+    let show: (BlameCommitInfo) -> Void
+}
+
+/// The blame gutter beside one row: the age and the author on the first
+/// line of each group of lines one commit wrote, a grey bar while git has
+/// not said, nothing beside a row with no new line.
+struct BlameCellView: View {
+    let gutter: BlameGutter
+    /// The row's line on the new side.
+    let line: UInt32?
+    let width: CGFloat
+    /// No room for names: initials.
+    let compact: Bool
+
+    static let ageWidth: CGFloat = 30
+
+    var body: some View {
+        let cell = line.map { gutter.reading.cell(line: $0) }
+        ZStack(alignment: .leading) {
+            Theme.Surfaces.sidebar
+            if let line, let cell {
+                content(cell, line: line)
+            }
+        }
+        .frame(width: width)
+        .frame(maxHeight: .infinity)
+        .overlay(alignment: .trailing) { Rectangle().fill(Theme.Surfaces.hairline).frame(width: 1) }
+        .overlay(alignment: .top) {
+            if isFirst(cell) { Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1) }
+        }
+    }
+
+    private func isFirst(_ cell: BlameCell?) -> Bool {
+        switch cell {
+        case .notCommitted(let first), .commit(_, let first): first
+        case .unknown, nil: false
+        }
+    }
+
+    @ViewBuilder
+    private func content(_ cell: BlameCell, line: UInt32) -> some View {
+        switch cell {
+        case .unknown:
+            // Bars of a few lengths, the same for a line each time.
+            Capsule()
+                .fill(Theme.Surfaces.hairline)
+                .frame(width: (width - 24) * [0.62, 0.45, 0.78, 0.55, 0.7][Int(line) % 5], height: 6)
+                .padding(.leading, 8)
+                .accessibilityHidden(true)
+        case .notCommitted(let first):
+            if first {
+                Text(compact ? "—" : "Not committed")
+                    .font(Metrics.caption.italic())
+                    .foregroundStyle(Theme.Surfaces.textTertiary)
+                    .lineLimit(1)
+                    .padding(.leading, compact ? 8 : 8 + Self.ageWidth)
+                    .accessibilityLabel("Not committed")
+            }
+        case .commit(let commit, let first):
+            let start = gutter.reading.groupStart(line: line)
+            ZStack(alignment: .leading) {
+                if gutter.reading.hovered == start { Theme.Interaction.selection }
+                if first {
+                    HStack(spacing: 0) {
+                        Text(blameAge(time: commit.time, now: Int64(Date().timeIntervalSince1970)))
+                            .foregroundStyle(Theme.Surfaces.textTertiary)
+                            .frame(width: Self.ageWidth, alignment: .leading)
+                        Text(compact ? BlameReading.initials(commit) : BlameReading.author(commit))
+                            .foregroundStyle(Theme.Surfaces.textSecondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .font(Metrics.caption)
+                    .monospacedDigit()
+                    .padding(.leading, 8)
+                    .padding(.trailing, 4)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                if inside {
+                    gutter.reading.hovered = start
+                } else if gutter.reading.hovered == start {
+                    gutter.reading.hovered = nil
+                }
+            }
+            .onTapGesture { gutter.show(commit) }
+            .help(BlameReading.help(commit))
+            .accessibilityElement()
+            .accessibilityLabel("\(BlameReading.author(commit)), \(commit.subject)")
+            .accessibilityAddTraits(.isButton)
+        }
     }
 }

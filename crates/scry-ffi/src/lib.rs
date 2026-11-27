@@ -37,6 +37,8 @@ uniffi::setup_scaffolding!();
 mod agent;
 mod changes;
 mod cli_command;
+mod file_blame;
+mod history;
 pub use agent::{
     AgentSetup, AgentSetupState, agent_setup, allow_plugin_tools, install_plugin,
     remove_old_server, uninstall_plugin,
@@ -47,6 +49,11 @@ pub use changes::{
     repository_waiting,
 };
 pub use cli_command::{CliCommandState, cli_command_state, install_cli_command};
+pub use file_blame::{BlameCommitInfo, BlameLines, BlameProgress, FileBlame, blame_age};
+pub use history::{
+    FileHistory, HistoryHeader, HistoryList, HistoryPin, HistoryPoint, HistoryPointKind,
+    PointCounts,
+};
 
 /// Why a call failed, by kind, each with a sentence the UI shows as it is.
 #[derive(Debug, uniffi::Error)]

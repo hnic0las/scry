@@ -251,6 +251,11 @@ struct RootView: View {
                 OpeningView(fileName: opening)
             } else if let changes = viewModel.changes {
                 ChangesView(viewModel: changes)
+                    // Another place is another view: its own task and scroll.
+                    .id(ObjectIdentifier(changes))
+            } else if let history = viewModel.history {
+                HistoryView(viewModel: history)
+                    .id(ObjectIdentifier(history))
             } else if let overview = viewModel.overview {
                 OverviewView(viewModel: overview)
             } else if viewModel.canOpen {
@@ -273,6 +278,11 @@ struct RootView: View {
             }
         }
         .frame(minWidth: 900, minHeight: 600)
+        .environment(\.trail, TrailActions(
+            canGoBack: viewModel.canGoBack, canGoForward: viewModel.canGoForward,
+            backHelp: viewModel.backHelp, forwardHelp: viewModel.forwardHelp,
+            back: { viewModel.goBack() }, forward: { viewModel.goForward() }
+        ))
         // Only the window in front shows hints.
         .environment(\.showsShortcutHints, commandHold.isHeld && activeState == .key)
         .onAppear { commandHold.start() }

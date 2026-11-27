@@ -257,6 +257,82 @@ struct RootViewModelTests {
         #expect(root.overview == nil)
     }
 
+    /// `git scry log` asks for a file's history with `--history` and
+    /// `--path`.
+    @Test func readsTheHistoryRequest() {
+        let arguments = ["Scry", "--history", "/r", "--path", "src/a.swift"]
+        #expect(RootViewModel.historyRequest(in: arguments) == RootViewModel.HistoryRequest(root: "/r", path: "src/a.swift"))
+        #expect(RootViewModel.historyRequest(in: ["Scry", "--history", "/r"]) == nil)
+        #expect(RootViewModel.historyRequest(in: ["Scry", "--diff", "/r", "--path", "a"]) == nil)
+    }
+
+    /// Entering a file's history and opening a whole commit are places
+    /// the window goes back from and forward to, each as it was left; a
+    /// new place drops those Forward led to.
+    @Test func backAndForwardMoveBetweenThePlacesShown() async {
+        let root = RootViewModel()
+        root.open(changes: FakeChanges(files: [FakeChanges.file(0, "a.swift")]))
+        let changes = try? #require(root.changes)
+        #expect(!root.canGoBack && !root.canGoForward)
+        #expect(root.backHelp == "Back")
+
+        root.open(history: FakeHistory(points: [FakeHistory.commit(0, "Start", head: true)]))
+        let history = try? #require(root.history)
+        #expect(root.changes == nil)
+        #expect(root.canGoBack && !root.canGoForward)
+        #expect(root.backHelp == "Back to Not committed")
+
+        let commit = FakeChanges(files: [])
+        commit.title = "Commit 9f8e7d6"
+        root.open(commit: commit)
+        #expect(root.changes?.header.title == "Commit 9f8e7d6")
+        #expect(root.history == nil)
+        #expect(root.backHelp == "Back to the history of SyncEngine.swift")
+
+        root.goBack()
+        #expect(root.history === history)
+        #expect(root.forwardHelp == "Forward to Commit 9f8e7d6")
+        root.goBack()
+        #expect(root.changes === changes)
+        root.goBack()
+        #expect(root.changes === changes)
+        root.goForward()
+        #expect(root.history === history)
+        // History's "Changed files" is Back.
+        history?.showChangedFiles()
+        #expect(root.changes === changes)
+        // A new place from here: the history and the commit are dropped.
+        root.open(history: FakeHistory(points: []))
+        #expect(root.trail.count == 2)
+        #expect(!root.canGoForward)
+        // Another change replaces every place.
+        root.open(changes: FakeChanges(files: []))
+        #expect(root.trail.count == 1 && !root.canGoBack)
+    }
+
+    /// The History key asks for the selected file's history; a window on
+    /// git difftool's copies, or on a history's own file, has none.
+    @Test func theSelectedFilesHistoryIsAsked() async {
+        var asked: [String] = []
+        let source = FakeChanges(files: [FakeChanges.file(0, "a.swift"), FakeChanges.file(1, "b.swift")])
+        let changes = ChangesViewModel(source: source, defaults: .isolated, openHistory: { asked.append($0.path) })
+        #expect(!changes.canShowHistory)
+        await changes.load()
+        #expect(changes.canShowHistory)
+        #expect(changes.toolbarHints.contains(.history))
+        await changes.nextFile()
+        changes.showHistory()
+        #expect(asked == ["b.swift"])
+
+        let reduced = FakeChanges(files: [FakeChanges.file(0, "a.swift")])
+        reduced.hasHistory = false
+        let none = ChangesViewModel(source: reduced, defaults: .isolated, openHistory: { asked.append($0.path) })
+        await none.load()
+        #expect(!none.canShowHistory)
+        none.showHistory()
+        #expect(asked == ["b.swift"])
+    }
+
     /// `git difftool` hands two files, or two folders, each after its
     /// option, with the file's name in the repository when there is one;
     /// the window then shows them, with nothing to resolve or to go back

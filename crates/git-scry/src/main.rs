@@ -6,6 +6,7 @@
 mod diff;
 mod difftool;
 mod highlight;
+mod log;
 mod open;
 mod resolve;
 mod wait;
@@ -138,6 +139,32 @@ enum Command {
         #[arg(last = true)]
         paths: Vec<String>,
     },
+    /// Read one file's history in the Scry app: what is not committed of
+    /// it, then the commits that touched it, followed through its
+    /// renames, and what each one changed.
+    ///
+    ///   git scry log src/sync.rs
+    ///
+    /// With --print, the points are listed in the terminal instead.
+    /// Exits with 0, or 2 when the file has no history, git cannot
+    /// answer or the app cannot be found.
+    #[command(verbatim_doc_comment)]
+    Log {
+        /// The file, from the current folder.
+        path: String,
+        /// List the points in the terminal.
+        #[arg(long)]
+        print: bool,
+        /// The app, when not $SCRY_APP, the bundle this git-scry belongs
+        /// to, /Applications/Scry.app or ~/Applications/Scry.app.
+        #[arg(
+            long,
+            value_name = "PATH",
+            require_equals = true,
+            conflicts_with = "print"
+        )]
+        app: Option<PathBuf>,
+    },
     /// Show two files, or two folders, in the Scry app, as the diff tool
     /// `git difftool` runs:
     ///
@@ -239,6 +266,7 @@ fn main() -> ExitCode {
             name: merged,
             app,
         }),
+        Command::Log { path, print, app } => log::run(log::Options { path, print, app }),
         Command::Diff {
             revisions,
             staged,

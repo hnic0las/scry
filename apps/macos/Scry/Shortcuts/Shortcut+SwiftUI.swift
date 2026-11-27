@@ -14,6 +14,8 @@ extension Shortcut {
         case .character(let character): KeyEquivalent(character)
         case .upArrow: .upArrow
         case .downArrow: .downArrow
+        case .leftArrow: .leftArrow
+        case .rightArrow: .rightArrow
         case .return: .return
         case .escape: .escape
         }

@@ -231,6 +231,40 @@ impl Scope {
         })
     }
 
+    /// One commit against its first parent, or against nothing for a
+    /// first commit: what "Show the Whole Commit" opens.
+    pub fn commit(git: &dyn Git, commit: &str) -> Result<Scope, GitError> {
+        let name = format!("{commit}^{{commit}}");
+        let id = git.run(&["rev-parse", "--verify", "--end-of-options", &name])?;
+        let id = id.trim().to_string();
+        let short = short_id(git, &id);
+        let subject = git.run(&["log", "-1", "--format=%s", &id])?;
+        let subject = subject.trim();
+        let parent = git.output(&["rev-parse", "--verify", "--quiet", &format!("{id}^1")])?;
+        let (old, old_label, detail) = if parent.status == Some(0) {
+            let parent = String::from_utf8_lossy(&parent.stdout).trim().to_string();
+            let name = short_id(git, &parent);
+            let detail = format!("Against its parent {name} · {subject}");
+            (parent, name, detail)
+        } else {
+            let tree = git.run_with_input(&["hash-object", "-t", "tree", "--stdin"], b"")?;
+            (
+                tree.trim().to_string(),
+                String::from("nothing: the first commit"),
+                format!("The first commit · {subject}"),
+            )
+        };
+        Ok(Scope {
+            key: format!("{old}..{id}"),
+            comparison: Comparison::Commits { old, new: id },
+            title: format!("Commit {short}"),
+            detail,
+            branch: None,
+            old_label,
+            new_label: short,
+        })
+    }
+
     /// The title and the detail in one line: "Not committed, against
     /// HEAD".
     pub fn sentence(&self) -> String {
@@ -921,6 +955,86 @@ pub fn file_diff(
         return Ok(FileDiff::Text(TextDiff::unchanged(Text::of(&bytes))));
     }
     Ok(FileDiff::Text(TextDiff::from_patch(patch, marks)))
+}
+
+/// The diff of two versions of one file under whatever names they have,
+/// by their content alone: git is not asked whether the two are alike
+/// enough to be one renamed file. `old` is a blob (`commit:path`); `new`
+/// is one too, or `None` for the file at `new_path` in the working copy.
+pub fn blob_diff(
+    git: &dyn Git,
+    root: &Path,
+    old: &str,
+    new: Option<&str>,
+    new_path: &str,
+    marks: Marks,
+) -> Result<FileDiff, DiffError> {
+    let mut all: Vec<&str> = DIFF_OPTIONS.to_vec();
+    all.push(WHOLE_FILE);
+    all.push(old);
+    match new {
+        Some(new) => all.push(new),
+        None => all.extend(["--", new_path]),
+    }
+    let output = git.output(&all)?;
+    if output.status != Some(0) {
+        return Err(DiffError::Git(GitError::Failed {
+            command: all.join(" "),
+            stderr: output.stderr,
+        }));
+    }
+    let patch = parse_patch(&String::from_utf8_lossy(&output.stdout));
+    let new_bytes = || -> Result<Vec<u8>, GitError> {
+        Ok(match new {
+            Some(blob) => git.output(&["cat-file", "blob", blob])?.stdout,
+            None => fs::read(root.join(new_path)).unwrap_or_default(),
+        })
+    };
+    if patch.binary {
+        return Ok(FileDiff::Binary {
+            old_size: blob_size(git, old),
+            new_size: Some(new_bytes()?.len() as u64),
+        });
+    }
+    if patch.lines.is_empty() {
+        let bytes = new_bytes()?;
+        if is_binary(&bytes) {
+            let size = Some(bytes.len() as u64);
+            return Ok(FileDiff::Binary {
+                old_size: size,
+                new_size: size,
+            });
+        }
+        return Ok(FileDiff::Text(TextDiff::unchanged(Text::of(&bytes))));
+    }
+    Ok(FileDiff::Text(TextDiff::from_patch(patch, marks)))
+}
+
+/// Lines added and removed; each `None` when not counted.
+pub type Counts = (Option<usize>, Option<usize>);
+
+/// Lines added and removed between the two versions `blob_diff` takes:
+/// `None` when they hold the same content, `Some((None, None))` for a
+/// binary file.
+pub fn blob_counts(
+    git: &dyn Git,
+    old: &str,
+    new: Option<&str>,
+    new_path: &str,
+) -> Result<Option<Counts>, GitError> {
+    let mut all: Vec<&str> = DIFF_OPTIONS.to_vec();
+    all.push("--numstat");
+    all.push(old);
+    match new {
+        Some(new) => all.push(new),
+        None => all.extend(["--", new_path]),
+    }
+    let output = git.run(&all)?;
+    let mut fields = output.split('\t');
+    let (Some(added), Some(removed)) = (fields.next(), fields.next()) else {
+        return Ok(None);
+    };
+    Ok(Some((added.trim().parse().ok(), removed.parse().ok())))
 }
 
 /// The diff of two files that need not be in a repository, as `git

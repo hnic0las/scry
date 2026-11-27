@@ -4,7 +4,7 @@
 //! (portability rule 3), so tests and other front ends can supply their own.
 
 use std::fmt;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -53,6 +53,25 @@ pub trait Git {
             });
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// Runs git with `input` on its standard input and gives `each` every
+    /// line of its output, as git writes it when the implementation can:
+    /// a long `git blame --incremental` shows as it goes. `each`
+    /// answering `false` stops git, which is not a failure.
+    fn lines(
+        &self,
+        args: &[&str],
+        input: &[u8],
+        each: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<(), GitError> {
+        let output = self.run_with_input(args, input)?;
+        for line in output.lines() {
+            if !each(line) {
+                break;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -234,6 +253,68 @@ impl Git for GitCli {
         })
         .map_err(GitError::Spawn)?;
         Ok(git_output(output))
+    }
+
+    fn lines(
+        &self,
+        args: &[&str],
+        input: &[u8],
+        each: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<(), GitError> {
+        let mut child = self
+            .command(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(GitError::Spawn)?;
+        let mut stdin = child.stdin.take();
+        let stdout = child.stdout.take();
+        let mut stderr = child.stderr.take();
+        let (stopped, errors) = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                if let Some(stdin) = stdin.as_mut() {
+                    let _ = stdin.write_all(input);
+                }
+            });
+            // Read apart, so git never waits on a full pipe of errors.
+            let errors = scope.spawn(move || {
+                let mut text = Vec::new();
+                if let Some(stderr) = stderr.as_mut() {
+                    let _ = stderr.read_to_end(&mut text);
+                }
+                text
+            });
+            let mut stopped = false;
+            if let Some(stdout) = stdout {
+                let mut reader = io::BufReader::new(stdout);
+                let mut line = Vec::new();
+                loop {
+                    line.clear();
+                    match reader.read_until(b'\n', &mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    let text = String::from_utf8_lossy(&line);
+                    if !each(text.trim_end_matches(['\n', '\r'])) {
+                        stopped = true;
+                        break;
+                    }
+                }
+            }
+            if stopped {
+                let _ = child.kill();
+            }
+            (stopped, errors.join().unwrap_or_default())
+        });
+        let status = child.wait().map_err(GitError::Spawn)?;
+        if !stopped && status.code() != Some(0) {
+            return Err(GitError::Failed {
+                command: args.join(" "),
+                stderr: String::from_utf8_lossy(&errors).trim().to_string(),
+            });
+        }
+        Ok(())
     }
 }
 

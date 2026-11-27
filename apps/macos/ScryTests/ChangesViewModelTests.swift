@@ -8,6 +8,10 @@ final class FakeChanges: ChangesSource, @unchecked Sendable {
     var list: [ChangesFile]
     var diffs: [UInt32: FileDiffInfo] = [:]
     var grouped = true
+    var title = "Not committed"
+    var singleFile = false
+    var hasHistory = true
+    var historyFrom: String?
     var failure: ScryError?
     private(set) var listed = 0
     private(set) var asked: [(index: UInt32, allMarks: Bool)] = []
@@ -18,14 +22,21 @@ final class FakeChanges: ChangesSource, @unchecked Sendable {
 
     func header() -> ChangesHeader {
         ChangesHeader(
-            repository: "offline-sync", root: "/r", title: "Not committed", detail: "Against HEAD",
-            sentence: "Not committed, against HEAD", branch: "feature/offline-sync",
+            repository: "offline-sync", root: "/r", title: title, detail: "Against HEAD",
+            sentence: "\(title), against HEAD", branch: "feature/offline-sync",
             oldLabel: "HEAD", newLabel: "Working copy", grouped: grouped, live: true, reduced: false,
-            singleFile: false, gitDir: "/r/.git"
+            singleFile: singleFile, gitDir: "/r/.git", hasHistory: hasHistory, historyFrom: historyFrom
         )
     }
 
     private(set) var viewed: [(index: UInt32, viewed: Bool)] = []
+    /// The blame each file gets, by its index; none refuses.
+    var blames: [UInt32: FakeBlame] = [:]
+
+    func blameSource(index: UInt32) throws -> BlameSource {
+        guard let blame = blames[index] else { throw ScryError.Refused(message: "No history.") }
+        return blame
+    }
 
     func setViewed(index: UInt32, viewed: Bool) throws {
         if let failure { throw failure }
@@ -470,10 +481,11 @@ struct ChangesViewModelTests {
     @Test func hintsTheShortcutsThatWorkNow() async {
         let viewModel = ChangesViewModel(source: sample(), defaults: defaults())
         await viewModel.load()
-        #expect(viewModel.toolbarHints == [.nextChange, .changesLayout, .refreshChanges])
+        #expect(viewModel.toolbarHints == [.nextChange, .changesLayout, .blame, .refreshChanges])
         #expect(viewModel.hintStrip == [.nextFile, .viewed, .openRepository, .keyboardShortcuts])
 
         await viewModel.select(viewModel.files[2])
+        // The last file has no text here: nothing to blame.
         #expect(viewModel.toolbarHints == [.previousChange, .changesLayout, .refreshChanges])
         #expect(viewModel.hintStrip == [.previousFile, .viewed, .openRepository, .keyboardShortcuts])
     }

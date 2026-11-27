@@ -10,9 +10,16 @@ protocol ChangesSource: Sendable {
     func fileDiff(index: UInt32, allMarks: Bool) throws -> FileDiffInfo
     /// Marks the file at `index` of the last list viewed, or not.
     func setViewed(index: UInt32, viewed: Bool) throws
+    /// The blame of the new side of the file at `index` of the last list,
+    /// not read yet.
+    func blameSource(index: UInt32) throws -> BlameSource
 }
 
-extension ChangeSet: ChangesSource {}
+extension ChangeSet: ChangesSource {
+    func blameSource(index: UInt32) throws -> BlameSource {
+        try blame(index: index)
+    }
+}
 
 /// S17, the Changes window: the files that differ between two versions of
 /// a repository, and the selected one shown whole, unified or split. Read
@@ -147,6 +154,17 @@ final class ChangesViewModel {
     /// large.
     @ObservationIgnored private var allMarks = false
     @ObservationIgnored private let now: () -> Date
+    /// Opens the history of a file of the list.
+    @ObservationIgnored private let openHistory: ((ChangesFile) -> Void)?
+    /// What to say when no file differs, in place of the usual words.
+    @ObservationIgnored private let emptyText: String?
+    /// Blame is shown, for the whole window.
+    let blameSwitch: BlameSwitch
+    /// The open file's blame, while blame is shown.
+    private(set) var blame: BlameReading?
+    @ObservationIgnored private var blameTask: Task<Void, Never>?
+    /// Goes to what a commit did to a file, from a line of the blame.
+    @ObservationIgnored private let openBlamed: ((BlameCommitInfo, ChangesFile) -> Void)?
 
     init(
         source: ChangesSource,
@@ -154,9 +172,17 @@ final class ChangesViewModel {
         queue: Queue? = nil,
         watch: ((ChangesHeader) -> AsyncStream<Void>)? = nil,
         now: @escaping () -> Date = Date.init,
+        emptyMessage: String? = nil,
         leaveQueue: @escaping (Bool) -> Void = { _ in },
-        openConflicted: @escaping (String) -> Void = { _ in }
+        openConflicted: @escaping (String) -> Void = { _ in },
+        openHistory: ((ChangesFile) -> Void)? = nil,
+        blame: BlameSwitch = BlameSwitch(),
+        openBlamed: ((BlameCommitInfo, ChangesFile) -> Void)? = nil
     ) {
+        self.openHistory = openHistory
+        blameSwitch = blame
+        self.openBlamed = openBlamed
+        emptyText = emptyMessage
         self.watch = watch
         self.now = now
         self.source = source
@@ -183,7 +209,8 @@ final class ChangesViewModel {
                 files.first { $0.path == old.path && $0.group == old.group }
             }
             loadingFiles = false
-            await select(kept ?? files.first)
+            // Read again, the file stays on the block it was on.
+            await select(kept ?? files.first, at: kept == nil ? 0 : currentChange)
         } catch {
             loadingFiles = false
             listError = error.message
@@ -249,6 +276,7 @@ final class ChangesViewModel {
         let top = topRow
         content = result
         atFileEdge = nil
+        restartBlame()
         guard case .text(let new) = result else {
             currentChange = 0
             return
@@ -351,6 +379,65 @@ final class ChangesViewModel {
         }
     }
 
+    // MARK: History
+
+    /// The selected file's history can be opened: not from the copies
+    /// git difftool hands over, nor from a history.
+    var canShowHistory: Bool { header.hasHistory && openHistory != nil && selected != nil }
+
+    /// Replaces the list with the selected file's history.
+    func showHistory() {
+        guard canShowHistory, let selected else { return }
+        openHistory?(selected)
+    }
+
+    // MARK: Blame
+
+    /// The open file has lines to blame: a text file with a new side, in
+    /// a repository.
+    var canBlame: Bool {
+        !header.reduced && diff != nil && selected?.state != .deleted
+    }
+
+    /// The key and the toolbar's button: shows the blame gutter, or
+    /// hides it.
+    func toggleBlame() {
+        guard canBlame || blameSwitch.isOn else { return }
+        blameSwitch.isOn.toggle()
+        updateBlame()
+    }
+
+    /// Reads the open file's blame when blame is shown and it is not
+    /// read yet; drops it when blame is hidden.
+    func updateBlame() {
+        guard blameSwitch.isOn else { return dropBlame() }
+        guard blame == nil, canBlame, let selected, let diff,
+              let read = try? source.blameSource(index: selected.index)
+        else { return }
+        let blame = BlameReading(source: read, lineCount: diff.newLines.count)
+        self.blame = blame
+        blameTask = Task { await blame.run() }
+    }
+
+    /// The file area shows other lines: their blame is another one.
+    private func restartBlame() {
+        dropBlame()
+        updateBlame()
+    }
+
+    private func dropBlame() {
+        blameTask?.cancel()
+        blameTask = nil
+        blame?.stop()
+        blame = nil
+    }
+
+    /// A click on a line of the blame: what its commit did to the file.
+    func showBlamed(_ commit: BlameCommitInfo) {
+        guard let selected else { return }
+        openBlamed?(commit, selected)
+    }
+
     // MARK: git difftool's files
 
     /// "File 2 of 13".
@@ -376,6 +463,8 @@ final class ChangesViewModel {
         if canGoToPreviousChange { shortcuts.append(.previousChange) }
         if canGoToNextChange { shortcuts.append(.nextChange) }
         shortcuts.append(.changesLayout)
+        if canBlame { shortcuts.append(.blame) }
+        if canShowHistory { shortcuts.append(.history) }
         if !header.reduced { shortcuts.append(.refreshChanges) }
         return shortcuts
     }
@@ -444,6 +533,7 @@ final class ChangesViewModel {
         if let group = file?.group { collapsed.remove(group) }
         guard let file else {
             content = .none
+            restartBlame()
             return
         }
         // The last file stays on screen while the next one is read, unless
@@ -459,6 +549,7 @@ final class ChangesViewModel {
         slow.cancel()
         guard request == asked else { return }
         content = result
+        restartBlame()
         if case .text(let diff) = result, !diff.changes.isEmpty {
             currentChange = min(max(change, 0), diff.changes.count - 1)
         }
@@ -492,6 +583,13 @@ final class ChangesViewModel {
         selected = files.first { $0.path == path } ?? files.first
         if let selected {
             content = Self.read(selected, from: source, allMarks: false)
+        }
+        if blameSwitch.isOn, canBlame, let selected, let diff,
+           let read = try? source.blameSource(index: selected.index) {
+            read.read()
+            let blame = BlameReading(source: read, lineCount: diff.newLines.count)
+            blame.take()
+            self.blame = blame
         }
     }
 
@@ -627,8 +725,9 @@ final class ChangesViewModel {
                 return "\(edge) change · press again for the \(file) file"
             }
             if let viewedError { return viewedError }
-            if diff.changes.isEmpty { return "No change in the content" }
-            return "\(Self.count(diff.changes.count, "change")) · +\(diff.added) −\(diff.removed)"
+            let reading = blame?.status.map { " · \($0)" } ?? ""
+            if diff.changes.isEmpty { return "No change in the content" + reading }
+            return "\(Self.count(diff.changes.count, "change")) · +\(diff.added) −\(diff.removed)" + reading
         case .binary: return "Binary file"
         case .conflicted: return "Conflicted"
         case .submodule: return "A repository of its own"
@@ -663,7 +762,8 @@ final class ChangesViewModel {
 
     /// What to show in place of the list or the file when there is none.
     var emptyMessage: String {
-        "Nothing to show. No file differs: \(header.sentence.prefix(1).lowercased() + header.sentence.dropFirst())."
+        if let emptyText { return emptyText }
+        return "Nothing to show. No file differs: \(header.sentence.prefix(1).lowercased() + header.sentence.dropFirst())."
     }
 
     /// The letter in a file's badge: never colour alone.

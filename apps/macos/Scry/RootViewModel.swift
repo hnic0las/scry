@@ -9,16 +9,52 @@ final class RootViewModel {
     private(set) var editor: MergeEditorViewModel?
     /// The repository's operation (S1); the editor goes back to it.
     private(set) var overview: OverviewViewModel?
-    /// What differs between two versions of the repository (S17), outside
-    /// an operation; a conflicted file opens in the editor and comes back.
-    private(set) var changes: ChangesViewModel?
+    /// A place the window showed outside an operation: Back and Forward
+    /// move between them, each as it was left.
+    enum Place {
+        /// What differs between two versions of the repository (S17).
+        case changes(ChangesViewModel)
+        /// One file's history (S18).
+        case history(HistoryViewModel)
+
+        /// The place in a tooltip: "Back to the history of a.swift".
+        var name: String {
+            switch self {
+            case .changes(let changes): changes.header.title
+            case .history(let history): "the history of \(history.header.name)"
+            }
+        }
+    }
+
+    /// Blame is shown in this window, on every file and point it shows.
+    let blame = BlameSwitch()
+
+    /// The places shown, oldest first, and the one on screen.
+    private(set) var trail: [Place] = []
+    private(set) var placeIndex = 0
+
+    private var place: Place? { trail.indices.contains(placeIndex) ? trail[placeIndex] : nil }
+
+    /// What differs between two versions of the repository, when that is
+    /// the place on screen; a conflicted file opens in the editor and
+    /// comes back.
+    var changes: ChangesViewModel? {
+        if case .changes(let changes) = place { return changes }
+        return nil
+    }
+
+    /// One file's history, when that is the place on screen.
+    var history: HistoryViewModel? {
+        if case .history(let history) = place { return history }
+        return nil
+    }
     /// Why the last file could not be opened.
     private(set) var openError: String?
     /// What could not be opened over the overview, shown as an alert
     /// until dismissed: the empty window, which shows `openError`, is
     /// not on display then.
     var failedOverOverview: Bool {
-        (overview != nil || changes != nil) && editor == nil && opening == nil && openError != nil
+        (overview != nil || place != nil) && editor == nil && opening == nil && openError != nil
     }
     /// The name of the file being opened, while it is.
     private(set) var opening: String?
@@ -68,7 +104,7 @@ final class RootViewModel {
     func showShortcuts() {
         let current: Shortcut.Section? = if let editor {
             editor.isEditing ? .editing : .editor
-        } else if changes != nil {
+        } else if place != nil {
             .changes
         } else if overview != nil {
             .overview
@@ -85,11 +121,13 @@ final class RootViewModel {
     /// Opens what the command line gives: the files of `git mergetool`, a
     /// repository's folder, or a file.
     func openLaunchFile(arguments: [String] = CommandLine.arguments) async {
-        guard editor == nil, overview == nil, changes == nil else { return }
+        guard editor == nil, overview == nil, place == nil else { return }
         if let files = Self.mergetoolFiles(in: arguments) {
             await open(mergetool: files)
         } else if let files = Self.difftoolFiles(in: arguments) {
             open(changes: ChangeSet.openDifftool(old: files.old, new: files.new, name: files.name), queue: files.queue)
+        } else if let request = Self.historyRequest(in: arguments) {
+            await openHistory(root: request.root, path: request.path, from: nil)
         } else if let request = Self.changesRequest(in: arguments) {
             await openChanges(request)
         } else if let path = Self.launchPath(in: arguments) {
@@ -138,6 +176,8 @@ final class RootViewModel {
     /// it was read already.
     func open(overview source: OverviewSource, snapshot: OverviewSnapshot? = nil) async {
         editor = nil
+        trail = []
+        placeIndex = 0
         overview = OverviewViewModel(source: source, snapshot: snapshot) { [weak self] file in
             Task { await self?.open(fromOverview: file) }
         }
@@ -216,12 +256,20 @@ final class RootViewModel {
         }
     }
 
-    /// Shows the changes read from `source`.
+    /// Shows the changes read from `source`, as the window's first place.
     func open(changes source: ChangesSource, queue: ChangesViewModel.Queue? = nil) {
         editor = nil
         overview = nil
         let root = source.header().root
-        changes = ChangesViewModel(
+        trail = [.changes(changesViewModel(source, queue: queue))]
+        placeIndex = 0
+        OpenRepository.path = root.isEmpty ? nil : root
+    }
+
+    private func changesViewModel(_ source: ChangesSource, queue: ChangesViewModel.Queue? = nil) -> ChangesViewModel {
+        let header = source.header()
+        let root = header.root
+        return ChangesViewModel(
             source: source,
             queue: queue,
             watch: { RepositoryWatcher.changes(root: $0.root, gitDir: $0.gitDir) },
@@ -231,9 +279,124 @@ final class RootViewModel {
             },
             openConflicted: { [weak self] path in
                 Task { await self?.open(fromChanges: URL(fileURLWithPath: root).appendingPathComponent(path).path) }
+            },
+            openHistory: { [weak self] file in
+                Task { await self?.openHistory(root: root, path: file.path, from: header.historyFrom) }
+            },
+            blame: blame,
+            openBlamed: { [weak self] commit, file in
+                Task {
+                    await self?.openHistory(root: root, path: file.path, from: header.historyFrom, at: commit.id)
+                }
             }
         )
+    }
+
+    // MARK: History, and the places shown
+
+    /// What `git scry log` asks the window to show.
+    struct HistoryRequest: Equatable, Sendable {
+        /// The repository, by any folder in it.
+        var root: String
+        /// The file, from the repository's root.
+        var path: String
+    }
+
+    /// `--history <root> --path <file>`, as `git-scry log` passes them.
+    static func historyRequest(in arguments: [String]) -> HistoryRequest? {
+        guard let root = value(of: "--history", in: arguments),
+              let path = value(of: "--path", in: arguments)
+        else { return nil }
+        return HistoryRequest(root: root, path: path)
+    }
+
+    /// Shows the history of the file at `path` in the repository at
+    /// `root`, going back from the commit `from`, or from what is not
+    /// committed: a new place after the one on screen.
+    ///
+    /// With `at`, a commit a line of the blame named, the history opens
+    /// on what that commit did to the file.
+    func openHistory(root: String, path: String, from: String?, at commit: String? = nil) async {
+        do {
+            let source = try await Task.detached { try FileHistory.open(path: root, file: path, from: from) }.value
+            open(history: source, at: commit)
+            openError = nil
+            if trail.count == 1 { recents.add(source.header().root) }
+        } catch {
+            openError = error.message
+        }
+    }
+
+    /// Shows the history read from `source`.
+    func open(history source: HistorySource, at commit: String? = nil) {
+        let root = source.header().root
+        let history = HistoryViewModel(
+            source: source,
+            showCommit: { [weak self] point in
+                Task { await self?.openCommit(root: root, commit: point.id) }
+            },
+            leave: { [weak self] in self?.leaveHistory(root: root) },
+            blame: blame,
+            startAt: commit
+        )
+        editor = nil
+        overview = nil
+        go(to: .history(history))
         OpenRepository.path = root.isEmpty ? nil : root
+    }
+
+    /// Shows one whole commit against its parent: a new place.
+    func openCommit(root: String, commit: String) async {
+        do {
+            let source = try await Task.detached { try ChangeSet.openCommit(path: root, commit: commit) }.value
+            open(commit: source)
+            openError = nil
+        } catch {
+            openError = error.message
+        }
+    }
+
+    /// Shows the commit read from `source`.
+    func open(commit source: ChangesSource) {
+        go(to: .changes(changesViewModel(source)))
+    }
+
+    /// A new place after the one on screen: those that Forward led to
+    /// are dropped, as in a browser.
+    private func go(to place: Place) {
+        trail = Array(trail.prefix(placeIndex + 1)) + [place]
+        placeIndex = trail.count - 1
+    }
+
+    /// History's "Changed files": back to where the history was opened
+    /// from, or, for a window opened on a history, to what is not
+    /// committed.
+    private func leaveHistory(root: String) {
+        if canGoBack {
+            goBack()
+        } else {
+            Task { await openChanges(ChangesRequest(root: root)) }
+        }
+    }
+
+    var canGoBack: Bool { placeIndex > 0 }
+    var canGoForward: Bool { placeIndex < trail.count - 1 }
+
+    func goBack() {
+        if canGoBack { placeIndex -= 1 }
+    }
+
+    func goForward() {
+        if canGoForward { placeIndex += 1 }
+    }
+
+    /// "Back to Not committed".
+    var backHelp: String {
+        canGoBack ? "Back to \(trail[placeIndex - 1].name)" : "Back"
+    }
+
+    var forwardHelp: String {
+        canGoForward ? "Forward to \(trail[placeIndex + 1].name)" : "Forward"
     }
 
     /// Opens a conflicted file of the changes in the editor, with a way
@@ -255,7 +418,7 @@ final class RootViewModel {
 
     /// Back from the editor to the overview or the changes, read again.
     func leaveEditor() {
-        guard overview != nil || changes != nil else { return }
+        guard overview != nil || place != nil else { return }
         editor = nil
         overview?.refresh()
         if let changes {
@@ -265,7 +428,7 @@ final class RootViewModel {
 
     /// The file opened from the overview is written: back to the list.
     var returnsToOverview: Bool {
-        (overview != nil || changes != nil) && !isMergetool && editor?.written == true
+        (overview != nil || place != nil) && !isMergetool && editor?.written == true
     }
 
     func open(_ path: String) async {
@@ -288,7 +451,7 @@ final class RootViewModel {
         do {
             editor = MergeEditorViewModel(model: try await load())
             openError = nil
-            if overview == nil, changes == nil { OpenRepository.path = path }
+            if overview == nil, place == nil { OpenRepository.path = path }
         } catch {
             openError = error.message
         }

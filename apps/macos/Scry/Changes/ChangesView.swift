@@ -13,6 +13,8 @@ struct ChangesView: View {
 
     static let sidebarWidth: CGFloat = 284
 
+    @Environment(\.trail) private var trail
+
     var body: some View {
         VStack(spacing: 0) {
             if viewModel.header.reduced, showsReducedNote {
@@ -26,7 +28,7 @@ struct ChangesView: View {
                         .frame(width: Self.sidebarWidth)
                     Rectangle().fill(Theme.Surfaces.hairline).frame(width: 1)
                 }
-                fileArea
+                ChangesFileArea(viewModel: viewModel, scroll: scroll)
             }
         }
         .background(Theme.Surfaces.pane)
@@ -34,7 +36,18 @@ struct ChangesView: View {
         .overlay(alignment: .top) { ToolbarHintRow(shortcuts: viewModel.toolbarHints) }
         .navigationTitle(viewModel.header.repository)
         .navigationSubtitle(viewModel.header.sentence)
-        .toolbar { toolbar }
+        .toolbar {
+            // git difftool's window has one place: nowhere to go back to.
+            TrailToolbar(trail: viewModel.header.reduced ? nil : trail)
+            ChangesToolbar(
+                viewModel: viewModel,
+                history: viewModel.header.hasHistory
+                    ? HistoryButton(isOn: false, enabled: viewModel.canShowHistory) { viewModel.showHistory() }
+                    : nil,
+                // git difftool's files are copies: there is nothing to read again.
+                reload: viewModel.header.reduced ? nil : { Task { await viewModel.load() } }
+            )
+        }
         .focusedSceneValue(\.changesActions, ChangesActions(
             layout: viewModel.layout,
             toggleLayout: { viewModel.layout = viewModel.layout == .unified ? .split : .unified }
@@ -46,12 +59,21 @@ struct ChangesView: View {
             }
         }
     }
+}
 
-    @ViewBuilder
-    private var fileArea: some View {
+/// The selected file of a change: its header, its rows or what stands
+/// for them, and the status bar.
+struct ChangesFileArea: View {
+    let viewModel: ChangesViewModel
+    /// How far the code is scrolled sideways, shared by every row.
+    let scroll: SideScroll
+    /// More buttons at the end of the file's header.
+    var trailing: AnyView?
+
+    var body: some View {
         VStack(spacing: 0) {
             if let file = viewModel.selected {
-                ChangesFileHeader(viewModel: viewModel, file: file)
+                ChangesFileHeader(viewModel: viewModel, file: file, trailing: trailing)
                 Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1)
             }
             content
@@ -60,6 +82,8 @@ struct ChangesView: View {
                 language: viewModel.language
             )
         }
+        // Blame is the window's: a file shown again follows it.
+        .onChange(of: viewModel.blameSwitch.isOn, initial: true) { viewModel.updateBlame() }
     }
 
     @ViewBuilder
@@ -106,44 +130,85 @@ struct ChangesView: View {
             ChangesCard(symbol: "exclamationmark.triangle", title: "Scry could not read this file", message: message)
         }
     }
+}
 
-    @ToolbarContentBuilder
-    private var toolbar: some ToolbarContent {
+/// The toolbar's History button: on while a file's history is shown.
+struct HistoryButton {
+    let isOn: Bool
+    let enabled: Bool
+    let action: () -> Void
+}
+
+/// The toolbar of a file being read: previous and next change, the
+/// layout, History, and reading again. `viewModel` is `nil` while a
+/// history has no file to show yet.
+struct ChangesToolbar: ToolbarContent {
+    let viewModel: ChangesViewModel?
+    var history: HistoryButton?
+    /// `nil` where there is nothing to read again.
+    var reload: (() -> Void)?
+
+    var body: some ToolbarContent {
         ToolbarItemGroup {
-            Button { Task { await viewModel.previousChange() } } label: {
+            Button { Task { await viewModel?.previousChange() } } label: {
                 Image(systemName: "chevron.up")
             }
             .keyboardShortcut(Shortcut.previousChange)
             .help(Shortcut.previousChange.help())
-            .disabled(!viewModel.canGoToPreviousChange)
+            .disabled(viewModel?.canGoToPreviousChange != true)
 
-            Button { Task { await viewModel.nextChange() } } label: {
+            Button { Task { await viewModel?.nextChange() } } label: {
                 Image(systemName: "chevron.down")
             }
             .keyboardShortcut(Shortcut.nextChange)
             .help(Shortcut.nextChange.help())
-            .disabled(!viewModel.canGoToNextChange)
+            .disabled(viewModel?.canGoToNextChange != true)
         }
         ToolbarItem {
-            Text(viewModel.changeCounter)
+            Text(viewModel?.changeCounter ?? "")
                 .font(Metrics.callout)
                 .foregroundStyle(Theme.Surfaces.textSecondary)
                 .monospacedDigit()
                 .padding(.horizontal, 4)
         }
         ToolbarItem {
-            Picker("Layout", selection: $viewModel.layout) {
+            Picker("Layout", selection: Binding(
+                get: { viewModel?.layout ?? .unified },
+                set: { viewModel?.layout = $0 }
+            )) {
                 Label("Unified", systemImage: "rectangle").tag(ChangesViewModel.Layout.unified)
                 Label("Split", systemImage: "rectangle.split.2x1").tag(ChangesViewModel.Layout.split)
             }
             .pickerStyle(.segmented)
             .labelStyle(.titleAndIcon)
             .help(Shortcut.changesLayout.help())
+            .disabled(viewModel == nil)
         }
-        // git difftool's files are copies: there is nothing to read again.
-        if !viewModel.header.reduced {
+        if let viewModel, !viewModel.header.reduced {
             ToolbarItem {
-                Button { Task { await viewModel.load() } } label: {
+                Toggle(isOn: Binding(get: { viewModel.blameSwitch.isOn }, set: { _ in viewModel.toggleBlame() })) {
+                    Label("Blame", systemImage: "text.alignleft")
+                }
+                .labelStyle(.titleAndIcon)
+                .keyboardShortcut(Shortcut.blame)
+                .help(Shortcut.blame.help(viewModel.blameSwitch.isOn ? "Hide blame" : "Who last wrote each line"))
+                .disabled(!viewModel.canBlame && !viewModel.blameSwitch.isOn)
+            }
+        }
+        if let history {
+            ToolbarItem {
+                Toggle(isOn: Binding(get: { history.isOn }, set: { _ in history.action() })) {
+                    Label("History", systemImage: "clock.arrow.circlepath")
+                }
+                .labelStyle(.titleAndIcon)
+                .keyboardShortcut(Shortcut.history)
+                .help(Shortcut.history.help(history.isOn ? "Back to the changed files" : "History of this file"))
+                .disabled(!history.enabled)
+            }
+        }
+        if let reload {
+            ToolbarItem {
+                Button(action: reload) {
                     Image(systemName: "arrow.clockwise")
                 }
                 .keyboardShortcut(Shortcut.refreshChanges)
@@ -493,6 +558,8 @@ struct ChangesFileRow: View {
 struct ChangesFileHeader: View {
     let viewModel: ChangesViewModel
     let file: ChangesFile
+    /// More buttons at the end, from the screen the header is in.
+    var trailing: AnyView?
 
     static let height: CGFloat = 36
 
@@ -567,6 +634,7 @@ struct ChangesFileHeader: View {
                 ))
                 .accessibilityValue(file.viewed == .viewed ? "yes" : "no")
             }
+            if let trailing { trailing }
         }
         .controlSize(.small)
         .padding(.horizontal, 12)
