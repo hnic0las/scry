@@ -18,27 +18,51 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 
-max_kb=$(( ${SCRY_MUTANTS_MAX_MB:-2048} * 1024 ))
+max_mb=${SCRY_MUTANTS_MAX_MB:-2048}
 jobs=${SCRY_MUTANTS_JOBS:-4}
 
 # cargo-mutants builds and tests each mutant in a copy of the tree named
 # cargo-mutants-<crate>-<random>.tmp in the temporary folder: the test
 # programs run from its target folder. The compiler, whose arguments name
 # that folder too, is left alone.
+#
+# The size checked is the process's physical footprint, compressed memory
+# included. ps's RSS leaves compressed pages out: on 2026-11-27 three
+# mutants that grew a vector without end stayed under the limit by RSS
+# while filling memory, and the Mac stopped (a watchdog panic). Checked
+# five times a second, as such a mutant grows by gigabytes a second.
 watch() {
-    while sleep 1; do
-        ps -Ao pid=,rss=,command= | while read -r pid rss command; do
-            program=${command%% *}
-            case "$program" in
-                *cargo-mutants-*.tmp/target/*)
-                    if [ "$rss" -gt "$max_kb" ]; then
-                        echo "mutants.sh: killed $pid at $(( rss / 1024 )) MB: $program" >&2
-                        kill -9 "$pid" 2>/dev/null || true
-                    fi
-                    ;;
-            esac
-        done
-    done
+    python3 -I - "$max_mb" <<'PY'
+import ctypes, subprocess, sys, time
+
+limit = int(sys.argv[1]) * 1024 * 1024
+libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+
+class Usage(ctypes.Structure):
+    _fields_ = [("uuid", ctypes.c_uint8 * 16)] + [
+        (name, ctypes.c_uint64)
+        for name in ("user", "system", "idle", "interrupt", "pageins", "wired",
+                     "resident", "footprint", "start", "exit")
+    ]
+
+def footprint(pid):
+    usage = Usage()
+    if libproc.proc_pid_rusage(pid, 0, ctypes.byref(usage)) != 0:
+        return 0
+    return usage.footprint
+
+while True:
+    listing = subprocess.run(["ps", "-Ao", "pid=,command="], capture_output=True, text=True).stdout
+    for line in listing.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        program = command.split(" ", 1)[0]
+        if "cargo-mutants-" in program and ".tmp/target/" in program:
+            size = footprint(int(pid))
+            if size > limit:
+                print(f"mutants.sh: killed {pid} at {size >> 20} MB: {program}", file=sys.stderr, flush=True)
+                subprocess.run(["kill", "-9", pid])
+    time.sleep(0.2)
+PY
 }
 
 watch &
