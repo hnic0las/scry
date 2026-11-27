@@ -186,10 +186,10 @@ cargo llvm-cov --workspace --summary-only
 
 For the app, the Scry scheme collects coverage of the app target: in Xcode, Report navigator › the test run › Coverage; from the command line, `xcrun xccov view --report` on the `.xcresult` that `xcodebuild test` writes.
 
-Fuzzing feeds the hand-written parsers generated input, to find panics and endless loops on files nobody writes by hand. It needs the nightly toolchain and cargo-fuzz (`rustup toolchain install nightly`, `cargo install cargo-fuzz`); the targets are in `fuzz/` (conflict markers, a merge session, Xcode projects, String Catalogs, `Package.resolved`, lockfiles), outside the workspace:
+Fuzzing feeds the hand-written parsers generated input, to find panics and endless loops on files nobody writes by hand. It needs the nightly toolchain and cargo-fuzz (`rustup toolchain install nightly`, `cargo install cargo-fuzz`); the targets are in `fuzz/` (conflict markers, a merge session, Xcode projects, String Catalogs, `Package.resolved`, lockfiles, `git diff` output), outside the workspace:
 
 ```sh
-scripts/fuzz.sh            # every target, 30 minutes each (3 hours)
+scripts/fuzz.sh            # every target, 30 minutes each (3 hours 30)
 scripts/fuzz.sh 60 pbxproj # one target, one minute
 ```
 

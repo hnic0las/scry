@@ -252,3 +252,245 @@ fn mcp_answers_one_message_per_line_until_input_ends() {
         "{stdout}"
     );
 }
+
+/// A repository in `root/repo` with one commit, git's configuration kept
+/// beside it so that it is not one of the repository's files.
+fn repository(root: &std::path::Path, files: &[(&str, &str)]) -> std::path::PathBuf {
+    let repo = root.join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::write(root.join("gitconfig"), "").unwrap();
+    for (path, content) in files {
+        let path = repo.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    for args in [
+        &["init", "--quiet", "--initial-branch=main"][..],
+        &["add", "."],
+        &["commit", "--quiet", "-m", "base"],
+    ] {
+        let status = Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", root.join("gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Scry Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Scry Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+    repo
+}
+
+/// `git-scry` in `dir`, a folder of a `repository`.
+fn git_scry_in(root: &std::path::Path, dir: &std::path::Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_git-scry"))
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", root.join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap()
+}
+
+/// `diff --print` lists everything not committed in its groups, with a
+/// title saying what is compared and the totals; unlike `git diff`, a new
+/// file git does not know yet is part of it.
+#[test]
+fn diff_print_lists_what_is_not_committed() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repository(root.path(), &[("src/a.txt", "one\ntwo\n")]);
+    fs::write(repo.join("src/a.txt"), "one\n2\nthree\n").unwrap();
+    fs::write(repo.join("new.txt"), "x\n").unwrap();
+
+    let output = git_scry_in(root.path(), &repo, &["diff", "--print"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Not committed, against HEAD · 2 files · +3 −1\n\
+         Not staged\n  M  src/a.txt  +2 −1\n\
+         Untracked\n  U  new.txt  +1 −0\n"
+    );
+
+    fs::remove_file(repo.join("new.txt")).unwrap();
+    fs::write(repo.join("src/a.txt"), "one\ntwo\n").unwrap();
+    let output = git_scry_in(root.path(), &repo, &["diff", "--print"]);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Not committed, against HEAD\nNothing to show: no file differs.\n"
+    );
+}
+
+/// `--print=unified` and `--print=split` show each file whole after the
+/// list, with both line numbers and the changed words marked, and a path
+/// after `--` is read from the current folder, not from the root.
+#[test]
+fn diff_print_shows_each_file_whole_in_either_layout() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repository(
+        root.path(),
+        &[("src/a.txt", "one\ntimeout = 30\n"), ("b.txt", "b\n")],
+    );
+    fs::write(repo.join("src/a.txt"), "one\ntimeout = 60\nlast\n").unwrap();
+    fs::write(repo.join("b.txt"), "B\n").unwrap();
+
+    let src = repo.join("src");
+    let output = git_scry_in(
+        root.path(),
+        &src,
+        &["diff", "--print=unified", "--", "a.txt"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Not committed, against HEAD · 1 file · +2 −1\n\
+         Not staged\n  M  src/a.txt  +2 −1\n\
+         \n== src/a.txt\n\
+         \x20   1     1   one\n\
+         \x20   2       - timeout = [-30-]\n\
+         \x20         2 + timeout = {+60+}\n\
+         \x20         3 + last\n"
+    );
+
+    let output = git_scry_in(root.path(), &src, &["diff", "--print=split", "--", "a.txt"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let rows: Vec<&str> = stdout.lines().skip(5).collect();
+    assert_eq!(rows.len(), 3, "{stdout}");
+    assert!(rows[1].starts_with("    2 timeout = [-30-]"), "{stdout}");
+    assert!(rows[1].ends_with("│     2 timeout = {+60+}"), "{stdout}");
+    assert!(rows[2].trim_start().starts_with("│     3 last"), "{stdout}");
+}
+
+/// A revision compares the working copy with it, `a..b` two commits and
+/// `--staged` the index, each said in the title; `--staged` with a range
+/// is refused, since the index has one commit to be compared with.
+#[test]
+fn diff_print_reads_revisions_ranges_and_staged() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repository(root.path(), &[("a.txt", "one\n")]);
+    fs::write(repo.join("a.txt"), "two\n").unwrap();
+    let print = |args: &[&str]| {
+        let mut all = vec!["diff", "--print"];
+        all.extend_from_slice(args);
+        let output = git_scry_in(root.path(), &repo, &all);
+        (
+            output.status.code(),
+            String::from_utf8(output.stdout).unwrap(),
+        )
+    };
+
+    let (code, stdout) = print(&["main"]);
+    assert_eq!(code, Some(0));
+    assert!(
+        stdout.starts_with("Working copy, against main · 1 file · +1 −1\n"),
+        "{stdout}"
+    );
+    let (_, stdout) = print(&["main..HEAD"]);
+    assert_eq!(
+        stdout,
+        "HEAD, against main\nNothing to show: no file differs.\n"
+    );
+    let (_, stdout) = print(&["main..."]);
+    assert!(
+        stdout.starts_with("HEAD, against its merge base with main\n"),
+        "{stdout}"
+    );
+    let (_, stdout) = print(&["--staged"]);
+    assert!(stdout.starts_with("Staged, against HEAD\n"), "{stdout}");
+
+    let (code, stdout) = print(&["--staged", "main..HEAD"]);
+    assert_eq!((code, stdout.as_str()), (Some(2), ""));
+}
+
+/// Without `--print`, `diff` says the window is not built yet instead of
+/// doing nothing, and outside a repository it reports git's error: both
+/// exit with 2.
+#[test]
+fn diff_fails_clearly_without_print_or_without_a_repository() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repository(root.path(), &[("a.txt", "one\n")]);
+    let output = git_scry_in(root.path(), &repo, &["diff"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Use --print"), "{stderr}");
+
+    let outside = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_git-scry"))
+        .current_dir(outside.path())
+        .args(["diff", "--print"])
+        .env("GIT_CEILING_DIRECTORIES", outside.path().parent().unwrap())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .starts_with("git-scry: ")
+    );
+}
+
+/// Files without lines to count say what they are, in the list and in
+/// their place among the files shown whole: a binary file with its
+/// sizes, a folder with a repository of its own, a file left with
+/// conflicts by a merge; and a last line that lost its line ending is
+/// noted under the file.
+#[test]
+fn diff_print_says_what_has_no_lines_to_show() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repository(root.path(), &[("a.txt", "one\n"), ("c.txt", "base\n")]);
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", root.path().join("gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Scry Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Scry Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    // A merge that stops on c.txt.
+    assert!(git(&repo, &["switch", "--quiet", "-c", "feature"]));
+    fs::write(repo.join("c.txt"), "feature\n").unwrap();
+    assert!(git(&repo, &["commit", "--quiet", "-am", "feature"]));
+    assert!(git(&repo, &["switch", "--quiet", "main"]));
+    fs::write(repo.join("c.txt"), "main\n").unwrap();
+    assert!(git(&repo, &["commit", "--quiet", "-am", "main"]));
+    assert!(!git(&repo, &["merge", "--quiet", "feature"]));
+
+    fs::write(repo.join("a.txt"), "one").unwrap();
+    fs::write(repo.join("icon.png"), [0u8, 1, 2]).unwrap();
+    fs::create_dir(repo.join("vendor")).unwrap();
+    assert!(git(&repo.join("vendor"), &["init", "--quiet"]));
+    fs::write(repo.join("vendor/inner.txt"), "x\n").unwrap();
+    // Too large to be read for the list.
+    fs::write(repo.join("big.log"), "0123456789\n".repeat(200_000)).unwrap();
+
+    let output = git_scry_in(root.path(), &repo, &["diff", "--print"]);
+    let list = String::from_utf8(output.stdout).unwrap();
+    assert!(list.contains("\n  U  big.log  not counted\n"), "{list}");
+    fs::remove_file(repo.join("big.log")).unwrap();
+
+    let output = git_scry_in(root.path(), &repo, &["diff", "--print=unified"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Not committed, against HEAD · 4 files · +1 −1\n\
+         Not staged\n  M  a.txt  +1 −1\n  !  c.txt  conflicted\n\
+         Untracked\n  B  icon.png  binary\n  U  vendor  a repository of its own\n\
+         \n== a.txt\n\
+         \x20   1       - one\n\
+         \x20         1 + one\n\
+         (no line ending after the last line of the new side)\n\
+         \n== c.txt\nThis file has conflicts: resolve them first (git scry).\n\
+         \n== icon.png\nBinary file, nothing → 3 bytes\n\
+         \n== vendor\nA repository of its own.\n"
+    );
+}

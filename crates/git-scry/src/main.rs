@@ -3,6 +3,7 @@
 //! Git runs any `git-<name>` executable on the PATH as `git <name>`, so this
 //! binary is also available as `git scry`.
 
+mod diff;
 mod highlight;
 mod open;
 mod resolve;
@@ -90,6 +91,41 @@ enum Command {
         #[arg(long)]
         follow: bool,
     },
+    /// Read a change: the files that differ, and each one whole with its
+    /// added and removed lines.
+    ///
+    ///   git scry diff --print               everything not committed
+    ///   git scry diff --print --staged      what the next commit holds
+    ///   git scry diff --print main          the working copy against main
+    ///   git scry diff --print main..topic   topic against main
+    ///   git scry diff --print main...topic  what topic changed on its own
+    ///
+    /// Unlike `git diff`, no revision means everything not committed:
+    /// staged, not staged and new files that are not ignored. Exits with
+    /// 0, or 2 when git cannot answer.
+    #[command(verbatim_doc_comment)]
+    Diff {
+        /// A commit to compare the working copy with, or a range: a..b,
+        /// or a...b for b against its merge base with a.
+        revisions: Option<String>,
+        /// Compare the index, not the working copy, with the commit.
+        #[arg(long)]
+        staged: bool,
+        /// Print in the terminal: the list of files (--print), or the
+        /// list and each file whole (--print=unified, --print=split).
+        #[arg(
+            long,
+            value_name = "LAYOUT",
+            value_enum,
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "list"
+        )]
+        print: Option<diff::Layout>,
+        /// Only these files or folders, after `--`.
+        #[arg(last = true)]
+        paths: Vec<String>,
+    },
     /// Print a file with the syntax highlighting the app shows.
     ///
     /// Exits with 0, or 2 when the file cannot be read or Scry has no
@@ -156,6 +192,17 @@ fn main() -> ExitCode {
         Command::Mcp => serve_mcp(),
         Command::Wait { follow } => wait::run(follow),
         Command::Highlight { file, spans } => highlight::run(&file, spans),
+        Command::Diff {
+            revisions,
+            staged,
+            print,
+            paths,
+        } => diff::run(diff::Options {
+            staged,
+            revisions,
+            paths,
+            print,
+        }),
         Command::Resolve {
             base,
             local,

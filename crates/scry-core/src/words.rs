@@ -201,6 +201,13 @@ fn similarity(a_texts: &[&str], b_texts: &[&str]) -> f64 {
     2.0 * common as f64 / total as f64
 }
 
+/// The lines of two runs that are alike, as (index in `base`, index in
+/// `side`) pairs in order: what a diff shows as one line edited rather than
+/// one removed and one added. Too large a pair of runs gets no pair.
+pub fn paired_lines(base: &[&str], side: &[&str]) -> Vec<(usize, usize)> {
+    pair_gap(base, side)
+}
+
 /// Pairs the lines of a gap in order, maximising their total similarity;
 /// returns (base index, side index) pairs. Too large a gap gets no pair.
 fn pair_gap(base: &[&str], side: &[&str]) -> Vec<(usize, usize)> {

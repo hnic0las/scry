@@ -1,0 +1,15 @@
+diff --git a/a.swift b/a.swift
+index 1a2b3c4..5d6e7f8 100644
+--- a/a.swift
++++ b/a.swift
+@@ -1,5 +1,6 @@ final class SyncEngine
+ top
+-let timeout = 30
+-func cancelAll() {
++// retries
++let timeout = 60
++var pending = 0
+ bottom
+-last
+\ No newline at end of file
++last
