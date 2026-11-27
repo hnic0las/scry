@@ -6,12 +6,12 @@
 
 <p align="center">
   <strong>See through your merge conflicts.</strong><br>
-  A local-first merge tool for git: a native macOS app and the <code>git scry</code> command.
+  A local-first merge and diff tool for git: a native macOS app and the <code>git scry</code> command.
 </p>
 
-Scry (`git-scry`) is a local-first tool, integrated with git, for merging and reviewing changes. It resolves conflicts through `git mergetool`, opens the whole operation in a native app, checks each choice by parsing the file, and works with your Claude Code: your agent resolves, explains and proposes resolutions through Scry's plugin, you review in Scry.
+Scry (`git-scry`) is a local-first tool, integrated with git, for merging and reviewing changes. It resolves conflicts through `git mergetool`, opens the whole operation in a native app, checks each choice by parsing the file, and works with your Claude Code: your agent resolves, explains and proposes resolutions through Scry's plugin, you review in Scry. It also reads a change before you commit it: the files that differ, each one whole, with its history, its blame and Explain on the lines you select.
 
-Status: version 0.2.0, the first public release: the merge tool (the macOS app and the `git-scry` CLI) and the Claude Code plugin. The diff tool and review come next (see [Roadmap](#roadmap)).
+Status: version 0.2.0 is the first public release: the merge tool (the macOS app and the `git-scry` CLI) and the Claude Code plugin. The diff viewer described below is on `main` and ships with the next release. Review of branches and pull requests comes next (see [Roadmap](#roadmap)).
 
 ![The merge editor: ours, the result and theirs, with the inspector and each candidate checked by parsing](.github/screenshots/editor-light.png)
 
@@ -27,7 +27,7 @@ Then go to step 3. Without Homebrew:
 
 1. **The app.** Download Scry from the [releases](https://github.com/hnic0las/scry/releases/latest) and move it to the Applications folder, or build it from this repository (`scripts/install-app.sh`, see [macOS app](#macos-app)). It needs macOS 15 or later on a Mac with Apple silicon.
 2. **The `git scry` command.** Scry › Settings › CLI › **Install git scry** links the app's `git-scry` into a folder of your terminal's `PATH` (the first of `~/.local/bin`, `/opt/homebrew/bin` or `/usr/local/bin` it can write to), or shows the commands to run when it cannot. The link follows the app's updates.
-3. **git's merge tool** (optional). Scry › Settings › CLI › **Use Scry as git's Merge Tool** sets `merge.tool`, `mergetool.scry.cmd` and `mergetool.scry.trustExitCode` in your global git configuration, and keeps the merge tool it replaces, to put it back with **Stop Using Scry**.
+3. **git's merge tool** (optional). Scry › Settings › CLI › **Use Scry as git's Merge Tool** sets `merge.tool`, `mergetool.scry.cmd` and `mergetool.scry.trustExitCode` in your global git configuration, and keeps the merge tool it replaces, to put it back with **Stop Using Scry**. **Use Scry as git's Diff Tool** does the same for `git difftool`; `git scry diff` needs no setting.
 4. **Claude Code** (optional). Scry › Settings › Agent › **Install Scry's Plugin**, or in a terminal:
 
    ```sh
@@ -38,6 +38,23 @@ Then go to step 3. Without Homebrew:
    or, inside Claude Code, `/plugin marketplace add hnic0las/scry` then `/plugin install git-scry@scry`. Then restart your Claude Code sessions: a session loads its plugins when it starts. The plugin runs the app's `git-scry`, so install the app first.
 
 ## Use
+
+To read a change, in any repository:
+
+| Where | What | Does |
+|---|---|---|
+| Terminal | `git scry` | With no operation in progress, opens the app on everything not committed, as `git scry diff` does |
+| Terminal | `git scry diff` | Opens everything not committed: staged, not staged and new files |
+| Terminal | `git scry diff --staged` | Opens what the next commit holds |
+| Terminal | `git scry diff main`, `main..topic`, `main...topic` | Opens the working copy against a commit, one commit against another, or a branch against its merge base |
+| Terminal | `git scry diff --print` | Prints the list of files instead (`--print=unified` or `--print=split` for each file whole) |
+| Terminal | `git scry log <file>` | Opens one file's history, followed through its renames (`--print` to list it) |
+| Terminal | `git difftool` | Opens each file in a reduced window, once Scry is git's diff tool |
+| Scry | ⌥⌘↓ and ⌥⌘↑, ⌃⌘↓ and ⌃⌘↑ | Next and previous change, next and previous file |
+| Scry | ⌥⌘L | Unified or split |
+| Scry | ⌥⌘V | Marks the file viewed and goes to the next one that is not |
+| Scry | ⌘Y, ⌥⌘B | The file's history, and blame |
+| Scry | ⌃⌘E on selected lines | Explain: your Claude Code session open in the repository says what the lines do and why they changed |
 
 In a repository with a merge, rebase, cherry-pick or revert in progress:
 
@@ -57,7 +74,7 @@ Two more commands are for the plugin, not for you to run: `git scry mcp` (Scry's
 
 ## Settings
 
-- **CLI**: the `git scry` command (Install git scry), and Scry as git's merge tool (Use Scry as git's Merge Tool, Stop Using Scry), with the command git runs for each file.
+- **CLI**: the `git scry` command (Install git scry), Scry as git's merge tool (Use Scry as git's Merge Tool, Stop Using Scry) and as git's diff tool (Use Scry as git's Diff Tool), each with the command git runs for each file.
 - **Agent**:
   - **Claude Code**: whether Claude Code and Scry's plugin are installed, with Install Scry's Plugin, Turn On Scry's Plugin, Uninstall from Claude Code, and the two commands to copy. Installing also adds to Claude Code's user settings (`~/.claude/settings.json`) the rules that let the plugin's read tools, `explain` and `suggest` run without asking, so Explain and Suggest are never stopped by a question; `resolve`, which writes your files, still asks. Uninstalling removes those rules. Warnings, each with its button: an earlier Scry's `scry` server, registered with `claude mcp add`, which made Claude Code show Scry twice (Remove the Earlier Server); the plugin's tools not allowed yet (Allow Scry's Tools); the plugin unable to find Scry (move Scry to Applications, or install the `git scry` command).
   - **Explain and Suggest**: the switch "Explain and suggest with Claude Code", on by default. Off, there is no Explain or Suggest anywhere in Scry; answers already received are hidden, not deleted.
@@ -104,6 +121,21 @@ Each of these gets its own view:
 - **`Package.resolved`**: merge package by package, each pin whole;
 - **lockfiles from 18 package managers** (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock`, `deno.lock`, `Cargo.lock`, `Podfile.lock`, `Cartfile.resolved`, `Gemfile.lock`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `composer.lock`, `pubspec.lock`, `gradle.lockfile`, `flake.lock`, `mix.lock`, `go.sum`): take one side, see the packages each side changed and the command that writes the file again. `go.sum` can also keep both sides' lines.
 
+### Reading a change
+
+Screenshots of the diff viewer are still to come.
+
+- **The whole change in one window**: `git scry diff` lists the files that differ and shows the selected one **whole**, not as hunks, with its changes coloured in place, syntax colours and word-level marks. Unified by default, or split (⌥⌘L).
+- **The list as you want it**: by folder or flat, in git's groups (Staged, Not staged, Untracked) for what is not committed. A change map beside the file has one mark per block; ⌥⌘↓ goes from block to block, then to the next file.
+- **Viewed** (⌥⌘V): mark a file once read. The mark is tied to the file's content: a file that changes afterwards says "changed since viewed". A folder closes when all its files are viewed, and a right click on a folder or a group marks all its files.
+- **Live**: the window follows the repository while you, or an agent, write in it. The lines you are reading stay where they are, and files that changed or arrived get a dot.
+- **The inspector** (⌃⌘I) says what the file is (state, lines, sizes, last commit) and lists its blocks; a click goes to one.
+- **One file's history** (⌘Y, or `git scry log <file>`): what is not committed of it, then each commit that touched it, followed through its renames, each against its parent or against a point you pin.
+- **Blame** (⌥⌘B): who last wrote each line and when, beside the code; a click on a line opens the history on its commit.
+- **Explain the selected lines** (⌃⌘E): click line numbers to select whole lines, and your Claude Code session says what they do and why they changed. The explanation stays with its lines, and says so when they changed after it was written. Nothing is written to your files.
+- **`git difftool`** opens Scry too, in a reduced window: git hands over two files and nothing else, so it has no list, no history and no blame.
+- Read only: the diff viewer never stages, commits or changes a file.
+
 ### With Claude Code
 
 Scry works with Claude Code through its plugin, `git-scry`, and through your own Claude Code session: no API key, no account of Scry's, and Scry never starts Claude Code.
@@ -120,8 +152,9 @@ Scry works with Claude Code through its plugin, `git-scry`, and through your own
 ### In your workflow
 
 - **`git mergetool`**, in the app or in the terminal with the same digits as the app's shortcuts.
-- **`git scry`** opens the app on the operation in progress, from any folder of the repository.
-- `git scry session`, `conflicts` and `highlight` print what the app shows, for scripts and terminals.
+- **`git difftool`**, and **`git scry diff`** and **`git scry log`** for the whole change and one file's history.
+- **`git scry`** opens the app on the operation in progress, or on what is not committed, from any folder of the repository.
+- `git scry session`, `conflicts`, `highlight`, `diff --print` and `log --print` print what the app shows, for scripts and terminals.
 - Scry never stages, commits or pushes on its own: each of those steps is a button you press.
 - Local first: no account and no server. Scry sends nothing itself; what Claude reads goes through your own Claude Code session.
 
@@ -133,7 +166,7 @@ Scry's merges are checked against `git merge-file` on generated conflicts, line 
 
 - **Suggest for a whole file** and **Ask** on a conflict, and Explain and Suggest with other models: your own Claude API key, a local model, Apple's on-device model. Every proposal keeps its source, is checked by code and is accepted by you; no agent stages, commits, pushes or posts.
 - **More files merged well**: storyboards and `.xib` files; migrations both sides added (Django, Alembic, Rails `schema.rb`), which leave two heads without any text conflict; Jupyter notebooks, `.strings` in UTF-16, Android `strings.xml`, `.po`, `.resx`; `CHANGELOG.md`, where both sides add at the top; running `npm install` or `yarn install` directly to repair their lockfiles.
-- **A diff tool**: `git difftool` and `git scry diff [ref..ref]`, with a side-by-side view and the list of changed files.
+- **More in the diff viewer**: a filter on the list of files, hiding generated files and lockfiles, and the commit's message and files beside a history.
 - **Review of branches and pull requests**, with built-in checks such as secret scanning.
 - **Editing the whole file**, not only conflicts.
 - **Other front ends**: the core holds all the logic and is built and tested on macOS, Linux and Windows, so another app could use it.
