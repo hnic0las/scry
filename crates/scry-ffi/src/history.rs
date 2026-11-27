@@ -398,7 +398,7 @@ fn labels(point: &Point, pin: Option<&Pinned>, order: Order) -> (String, String,
             ),
             PointKind::Commit => (
                 match &point.parent {
-                    Some(parent) => format!("{} parent", &parent[..parent.len().min(7)]),
+                    Some(parent) => format!("{} parent", parent.get(..7).unwrap_or(parent)),
                     None => String::from("nothing: the first commit"),
                 },
                 name(point),

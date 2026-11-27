@@ -55,7 +55,7 @@ pub struct Point {
 impl Point {
     /// The commit's id cut to seven characters.
     pub fn short_id(&self) -> &str {
-        &self.id[..self.id.len().min(7)]
+        self.id.get(..7).unwrap_or(&self.id)
     }
 }
 
@@ -225,6 +225,10 @@ pub fn parse_log(text: &str, head: &str) -> Vec<Point> {
             let (fields, change) = record.split_once(END)?;
             let mut fields = fields.split(FIELD);
             let id = fields.next()?.to_string();
+            // Anything else is not git's output for a commit.
+            if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
             let parents = fields.next()?;
             let author = fields.next()?.to_string();
             let time = fields.next()?.parse().ok()?;
@@ -560,5 +564,18 @@ mod tests {
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].path, "");
         assert_eq!(points[0].short_id(), "aaa");
+    }
+
+    /// Found by fuzzing: a record whose id is not a commit's (here with a
+    /// letter of two bytes before the seventh) was kept, and cutting its
+    /// id to seven characters panicked.
+    #[test]
+    fn a_record_without_a_commit_id_is_left_out() {
+        let text = "\u{1}fe436fǜ94\u{1f}\u{1f}A\u{1f}1\u{1f}s\u{2}\0\
+                    \u{1}\u{1f}\u{1f}A\u{1f}1\u{1f}s\u{2}\0\
+                    \u{1}abc1234ff\u{1f}\u{1f}A\u{1f}1\u{1f}s\u{2}\0";
+        let points = parse_log(text, "x");
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].short_id(), "abc1234");
     }
 }

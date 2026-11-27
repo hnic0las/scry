@@ -22,7 +22,7 @@ seconds=${1:-1800}
 shift || true
 targets=("$@")
 if [ ${#targets[@]} -eq 0 ]; then
-    targets=(conflict_markers merge_session pbxproj catalog resolved lockfile diff)
+    targets=(conflict_markers merge_session pbxproj catalog resolved lockfile diff history_log blame)
 fi
 
 cargo +nightly fuzz build || exit 1

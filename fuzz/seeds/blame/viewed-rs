@@ -1,0 +1,11 @@
+b2ae60583b70951625db4b94bdad1bc187a8d07f 1 1 204
+author Nicolas Hoareau
+author-mail <hnic0las@users.noreply.github.com>
+author-time 1795803000
+author-tz +0100
+committer Nicolas Hoareau
+committer-mail <hnic0las@users.noreply.github.com>
+committer-time 1795803000
+committer-tz +0100
+summary feature: live refresh and Viewed in the Changes window
+filename crates/scry-core/src/viewed.rs

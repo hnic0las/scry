@@ -1,0 +1,92 @@
+6f0431acd6941fe71dafb3a2b39af5d16245a2c7 9 9 1
+author Nicolas Hoareau
+author-mail <hnic0las@users.noreply.github.com>
+author-time 1795804500
+author-tz +0100
+committer Nicolas Hoareau
+committer-mail <hnic0las@users.noreply.github.com>
+committer-time 1795804500
+committer-tz +0100
+summary docs: the diff viewer in the README
+previous fe436fcd78277c94029af2d6bb7dfd3889c4ddd8 README.md
+filename README.md
+6f0431acd6941fe71dafb3a2b39af5d16245a2c7 12 12 1
+previous fe436fcd78277c94029af2d6bb7dfd3889c4ddd8 README.md
+filename README.md
+6f0431acd6941fe71dafb3a2b39af5d16245a2c7 14 14 1
+previous fe436fcd78277c94029af2d6bb7dfd3889c4ddd8 README.md
+filename README.md
+6f0431acd6941fe71dafb3a2b39af5d16245a2c7 30 30 1
+previous fe436fcd78277c94029af2d6bb7dfd3889c4ddd8 README.md
+filename README.md
+e792c612b6f6c15d9a5a7eedeef3adb8d78b3e85 20 20 8
+author Nicolas Hoareau
+author-mail <hnic0las@users.noreply.github.com>
+author-time 1795769080
+author-tz +0100
+committer Nicolas Hoareau
+committer-mail <hnic0las@users.noreply.github.com>
+committer-time 1795769080
+committer-tz +0100
+summary docs: install with Homebrew
+previous 720c9c24095c5a2596ce632300fa80b766a8b8c8 README.md
+filename README.md
+5282f44497f2f099cd6cbe35e4cc87f4cfc95285 20 28 1
+author Nicolas Hoareau
+author-mail <hnic0las@users.noreply.github.com>
+author-time 1795593004
+author-tz +0100
+committer Nicolas Hoareau
+committer-mail <hnic0las@users.noreply.github.com>
+committer-time 1795593004
+committer-tz +0100
+summary docs: GPL-3.0-or-later licence, and the README for 0.2.0
+previous cdd055996b88d3ce42333ba57468849862c96d1a README.md
+filename README.md
+3a0eed92b655b2d951c62ea3e9eebf3978c92ae4 15 15 5
+author Nicolas Hoareau
+author-mail <hnic0las@users.noreply.github.com>
+author-time 1795515565
+author-tz +0100
+committer Nicolas Hoareau
+committer-mail <hnic0las@users.noreply.github.com>
+committer-time 1795515565
+committer-tz +0100
+summary docs: README with install steps, commands, settings and screenshots
+previous 854b72e35d101440e545c607db6e977db09044ba README.md
+filename README.md
+3a0eed92b655b2d951c62ea3e9eebf3978c92ae4 21 29 1
+previous 854b72e35d101440e545c607db6e977db09044ba README.md
+filename README.md
+3a0eed92b655b2d951c62ea3e9eebf3978c92ae4 23 31 10
+previous 854b72e35d101440e545c607db6e977db09044ba README.md
+filename README.md
+043afc0558fbb2662840c9d6ed3731eb53c72180 1 1 8
+author Nicolas Hoareau
+author-mail <hnic0las@users.noreply.github.com>
+author-time 1794520064
+author-tz +0100
+committer Nicolas Hoareau
+committer-mail <hnic0las@users.noreply.github.com>
+committer-time 1794520064
+committer-tz +0100
+summary docs: show the app icon and a feature summary in the README
+previous a538abf37ba47a57db41b739b1f0b206720bf3c5 README.md
+filename README.md
+043afc0558fbb2662840c9d6ed3731eb53c72180 10 10 1
+previous a538abf37ba47a57db41b739b1f0b206720bf3c5 README.md
+filename README.md
+18950ff97c01cc4b332b9dd36b9b9fd29fd0f43e 2 11 1
+author Nicolas Hoareau
+author-mail <hnic0las@users.noreply.github.com>
+author-time 1793999677
+author-tz +0100
+committer Nicolas Hoareau
+committer-mail <hnic0las@users.noreply.github.com>
+committer-time 1793999677
+committer-tz +0100
+summary chore: initialize the repository
+boundary
+filename README.md
+18950ff97c01cc4b332b9dd36b9b9fd29fd0f43e 4 13 1
+filename README.md
