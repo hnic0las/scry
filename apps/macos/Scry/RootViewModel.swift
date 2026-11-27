@@ -28,6 +28,7 @@ final class RootViewModel {
 
     /// Blame is shown in this window, on every file and point it shows.
     let blame = BlameSwitch()
+    let inspector = InspectorSwitch()
 
     /// The places shown, oldest first, and the one on screen.
     private(set) var trail: [Place] = []
@@ -284,6 +285,7 @@ final class RootViewModel {
                 Task { await self?.openHistory(root: root, path: file.path, from: header.historyFrom) }
             },
             blame: blame,
+            inspector: inspector,
             openBlamed: { [weak self] commit, file in
                 Task {
                     await self?.openHistory(root: root, path: file.path, from: header.historyFrom, at: commit.id)
@@ -337,6 +339,7 @@ final class RootViewModel {
             },
             leave: { [weak self] in self?.leaveHistory(root: root) },
             blame: blame,
+            inspector: inspector,
             startAt: commit
         )
         editor = nil

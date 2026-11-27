@@ -620,6 +620,35 @@ struct ChangesViewModelTests {
         #expect(!ChangesViewModel(source: reduced, defaults: defaults()).canShowInspector)
     }
 
+    /// A block's row names its first line that is not blank, and a file
+    /// only added to says so without "−0".
+    @Test func theInspectorNamesABlockByItsFirstLineWithText() async throws {
+        guard case var .text(diff) = FakeChanges.text(lines: 4, changesAt: [1]) else {
+            Issue.record("no text")
+            return
+        }
+        // The block: line 2 removed, lines 2 and 3 added; the first one
+        // shown, the removed line, is blank.
+        diff.oldLines[1] = DiffLine(text: "   ", columns: 3, spans: [])
+        diff.newLines[1] = DiffLine(text: "  let queue = SyncQueue()", columns: 25, spans: [])
+        let source = FakeChanges(files: [FakeChanges.file(0, "a.swift", added: 6, removed: 0)])
+        source.diffs[0] = .text(diff: diff)
+        let viewModel = ChangesViewModel(source: source, defaults: defaults())
+        await viewModel.load()
+        #expect(viewModel.changeRows.map(\.text) == ["let queue = SyncQueue()"])
+        #expect(viewModel.fileFacts.first { $0.title == "Lines" }?.value == "+6")
+    }
+
+    /// An answer written a moment ago, or stamped a little after the
+    /// app's clock, reads "just now".
+    @Test func aFreshAnswerIsJustNow() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        #expect(ExplainBlock.relative(10_000_000, now: now) == "just now")
+        #expect(ExplainBlock.relative(10_002_000, now: now) == "just now")
+        #expect(ExplainBlock.relative(9_941_000, now: now) == "just now")
+        #expect(ExplainBlock.relative(9_880_000, now: now).contains("2 minutes"))
+    }
+
     /// A group's title hides its files and shows them again; a file
     /// reached from the keyboard opens its group.
     @Test func collapsesAGroup() async {

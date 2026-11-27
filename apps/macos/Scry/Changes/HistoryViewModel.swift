@@ -61,6 +61,7 @@ final class HistoryViewModel {
 
     /// Blame is shown, for the whole window.
     let blameSwitch: BlameSwitch
+    let inspectorSwitch: InspectorSwitch
     /// The commit to show first, when the history was opened from a line
     /// of a blame.
     @ObservationIgnored private var startAt: String?
@@ -85,9 +86,11 @@ final class HistoryViewModel {
         showCommit: @escaping (HistoryPoint) -> Void = { _ in },
         leave: @escaping () -> Void = {},
         blame: BlameSwitch = BlameSwitch(),
+        inspector: InspectorSwitch? = nil,
         startAt: String? = nil
     ) {
         blameSwitch = blame
+        inspectorSwitch = inspector ?? InspectorSwitch(defaults: defaults)
         self.startAt = startAt
         self.source = source
         self.defaults = defaults
@@ -148,6 +151,7 @@ final class HistoryViewModel {
     private func fileModel(_ changes: ChangesSource, empty: String) -> ChangesViewModel {
         ChangesViewModel(
             source: changes, defaults: defaults, emptyMessage: empty, blame: blameSwitch,
+            inspector: inspectorSwitch,
             openBlamed: { [weak self] commit, _ in
                 Task { await self?.show(commit: commit.id) }
             }

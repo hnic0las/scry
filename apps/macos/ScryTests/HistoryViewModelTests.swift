@@ -160,6 +160,22 @@ struct HistoryViewModelTests {
         #expect(history.selected?.index == 5)
     }
 
+    /// The inspector is the window's: the toolbar's button and its key,
+    /// made for the point first shown, still show or hide it once another
+    /// point is shown (found while taking the README's screenshots).
+    @Test func theInspectorFollowsTheWindowFromPointToPoint() async {
+        let history = viewModel(sample())
+        await history.load()
+        let first = history.file
+        #expect(first?.inspectorShown == true)
+        await history.older()
+        #expect(history.file !== first)
+        first?.toggleInspector()
+        #expect(history.file?.showsInspector == false)
+        first?.toggleInspector()
+        #expect(history.file?.inspectorShown == true)
+    }
+
     /// "Against a pin" pins the newest commit, reads each point against
     /// it and counts what differs; the pin itself has nothing to show.
     @Test func againstAPinComparesEveryPointWithIt() async {

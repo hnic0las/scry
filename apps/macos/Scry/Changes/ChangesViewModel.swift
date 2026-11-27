@@ -218,13 +218,13 @@ final class ChangesViewModel {
         }
     }
 
-    /// The user wants the inspector beside the file.
+    /// The user wants the inspector beside the file: the window's choice.
     var inspectorShown: Bool {
-        didSet {
-            guard inspectorShown != oldValue else { return }
-            defaults.set(inspectorShown, forKey: Self.inspectorKey)
-        }
+        get { inspectorSwitch.isOn }
+        set { inspectorSwitch.isOn = newValue }
     }
+
+    let inspectorSwitch: InspectorSwitch
 
     /// The open file's sizes and last commit, once read.
     private(set) var facts: FileFacts?
@@ -247,7 +247,6 @@ final class ChangesViewModel {
 
     static let layoutKey = "changesLayout"
     static let listModeKey = "changesListMode"
-    static let inspectorKey = "changesInspector"
 
     @ObservationIgnored private let source: ChangesSource
     @ObservationIgnored private let defaults: UserDefaults
@@ -309,8 +308,10 @@ final class ChangesViewModel {
         openConflicted: @escaping (String) -> Void = { _ in },
         openHistory: ((ChangesFile) -> Void)? = nil,
         blame: BlameSwitch = BlameSwitch(),
+        inspector: InspectorSwitch? = nil,
         openBlamed: ((BlameCommitInfo, ChangesFile) -> Void)? = nil
     ) {
+        inspectorSwitch = inspector ?? InspectorSwitch(defaults: defaults)
         self.openHistory = openHistory
         blameSwitch = blame
         self.openBlamed = openBlamed
@@ -325,7 +326,6 @@ final class ChangesViewModel {
         header = source.header()
         layout = defaults.string(forKey: Self.layoutKey).flatMap(Layout.init) ?? .unified
         listMode = defaults.string(forKey: Self.listModeKey).flatMap(ListMode.init) ?? .folders
-        inspectorShown = defaults.object(forKey: Self.inspectorKey) as? Bool ?? true
     }
 
     // MARK: The list
@@ -882,8 +882,10 @@ final class ChangesViewModel {
     var fileFacts: [Fact] {
         guard let selected else { return [] }
         var rows = [Fact(title: "State", value: Self.stateName(selected))]
-        if let added = selected.added, let removed = selected.removed {
-            rows.append(Fact(title: "Lines", value: "+\(added) −\(removed)"))
+        if let added = selected.added, let removed = selected.removed, added + removed > 0 {
+            // As the list's counts: no "−0".
+            let lines = [added > 0 ? "+\(added)" : nil, removed > 0 ? "−\(removed)" : nil]
+            rows.append(Fact(title: "Lines", value: lines.compactMap { $0 }.joined(separator: " ")))
         }
         if let facts {
             let sizes = [facts.oldSize, facts.newSize].compactMap { $0 }.map { Self.size($0) }
@@ -906,12 +908,16 @@ final class ChangesViewModel {
             let first = Int(change.firstLine)
             let line = diff.unified.indices.contains(first) ? diff.unified[first] : nil
             let number = line.flatMap { $0.new ?? $0.old }.map(Int.init) ?? 0
-            var text = ""
-            if let line {
+            // The block's first line that is not blank: an empty line says
+            // nothing of where the block is.
+            let block = diff.unified.dropFirst(first).prefix(Int(change.added + change.removed))
+            let text = block.lazy.compactMap { line -> String? in
                 let side = line.kind == .removed ? diff.oldLines : diff.newLines
                 let at = Int((line.kind == .removed ? line.old : line.new) ?? 0) - 1
-                if side.indices.contains(at) { text = side[at].text.trimmingCharacters(in: .whitespaces) }
-            }
+                guard side.indices.contains(at) else { return nil }
+                let text = side[at].text.trimmingCharacters(in: .whitespaces)
+                return text.isEmpty ? nil : text
+            }.first ?? ""
             return ChangeRow(
                 id: index, line: number, text: text, added: Int(change.added), removed: Int(change.removed)
             )

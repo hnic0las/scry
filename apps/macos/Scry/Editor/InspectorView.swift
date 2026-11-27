@@ -393,9 +393,10 @@ struct ExplainBlock: View {
 
     /// "2 minutes ago"; an answer stamped a moment after the app's clock
     /// reads as now, not "in 0 seconds".
-    static func relative(_ milliseconds: UInt64) -> String {
-        let now = Date()
-        let date = min(Date(timeIntervalSince1970: Double(milliseconds) / 1000), now)
+    static func relative(_ milliseconds: UInt64, now: Date = Date()) -> String {
+        let date = Date(timeIntervalSince1970: Double(milliseconds) / 1000)
+        // The formatter says "in 0 seconds" for two equal dates.
+        guard now.timeIntervalSince(date) >= 60 else { return "just now" }
         return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: now)
     }
 

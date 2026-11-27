@@ -22,6 +22,30 @@ final class BlameSwitch {
     var isOn = false
 }
 
+/// The inspector is shown or not, for one window, as blame is: every file
+/// and every point of a history the window shows follows it, and so do
+/// the toolbar's button and its key, whichever file they were made for.
+/// Remembered for the next windows.
+@MainActor
+@Observable
+final class InspectorSwitch {
+    var isOn: Bool {
+        didSet {
+            guard isOn != oldValue else { return }
+            defaults.set(isOn, forKey: Self.key)
+        }
+    }
+
+    @ObservationIgnored private let defaults: UserDefaults
+
+    static let key = "changesInspector"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        isOn = defaults.object(forKey: Self.key) as? Bool ?? true
+    }
+}
+
 /// What the gutter shows beside one line of the new side.
 enum BlameCell: Equatable {
     /// Not read yet: a grey bar.
