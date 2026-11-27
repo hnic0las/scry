@@ -5,12 +5,15 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::diff::Comparison;
 use crate::git::{Git, GitError};
 
 /// The version of the file that is blamed: the new side of what the
 /// window shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Target {
     /// The file as it is on disk.
     WorkingCopy,
@@ -168,18 +171,61 @@ pub fn blame(
     path: &str,
     each: &mut dyn FnMut(Lines, &[BlameCommit]) -> bool,
 ) -> Result<(), GitError> {
+    read(git, target, path, None, each)
+}
+
+/// Who last wrote lines `first..=last` (from 1) of `path` in `target`,
+/// by line: each group of lines with its commit, `None` for lines not
+/// committed yet.
+pub fn blame_lines(
+    git: &dyn Git,
+    target: &Target,
+    path: &str,
+    first: usize,
+    last: usize,
+) -> Result<Vec<(Lines, Option<BlameCommit>)>, GitError> {
+    let mut found: Vec<(Lines, Option<BlameCommit>)> = Vec::new();
+    read(
+        git,
+        target,
+        path,
+        Some((first, last)),
+        &mut |lines, commits| {
+            let commit = lines.commit.and_then(|index| commits.get(index)).cloned();
+            found.push((lines, commit));
+            true
+        },
+    )?;
+    found.sort_by_key(|(lines, _)| lines.first);
+    Ok(found)
+}
+
+fn read(
+    git: &dyn Git,
+    target: &Target,
+    path: &str,
+    range: Option<(usize, usize)>,
+    each: &mut dyn FnMut(Lines, &[BlameCommit]) -> bool,
+) -> Result<(), GitError> {
     let mut parser = Parser::new();
     let mut feed = |line: &str| match parser.feed(line) {
         Some(lines) => each(lines, parser.commits()),
         None => true,
     };
+    let range = range.map(|(first, last)| format!("{first},{last}"));
+    let mut arguments = vec!["blame", "--incremental"];
+    if let Some(range) = &range {
+        arguments.extend(["-L", range]);
+    }
     match target {
-        Target::WorkingCopy => git.lines(&["blame", "--incremental", "--", path], &[], &mut feed),
-        Target::Commit(commit) => git.lines(
-            &["blame", "--incremental", commit, "--", path],
-            &[],
-            &mut feed,
-        ),
+        Target::WorkingCopy => {
+            arguments.extend(["--", path]);
+            git.lines(&arguments, &[], &mut feed)
+        }
+        Target::Commit(commit) => {
+            arguments.extend([commit.as_str(), "--", path]);
+            git.lines(&arguments, &[], &mut feed)
+        }
         Target::Index => {
             // Git blames a commit or the working copy: the staged text is
             // given as if it were the file on disk.
@@ -190,11 +236,8 @@ pub fn blame(
                     stderr: staged.stderr,
                 });
             }
-            git.lines(
-                &["blame", "--incremental", "--contents", "-", "--", path],
-                &staged.stdout,
-                &mut feed,
-            )
+            arguments.extend(["--contents", "-", "--", path]);
+            git.lines(&arguments, &staged.stdout, &mut feed)
         }
     }
 }

@@ -21,6 +21,7 @@ pub mod highlight;
 pub mod history;
 pub mod indent;
 pub mod layout;
+pub mod line_asks;
 pub mod lockfile;
 pub mod merge_graph;
 pub mod mergetool;

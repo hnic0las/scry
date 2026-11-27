@@ -2,12 +2,13 @@
 //! and one file's diff ready to draw (`scry_core::diff` does the reading).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use scry_core::diff::{self, Comparison, Marks};
 use scry_core::file_blame::Target;
 use scry_core::git::{GitCli, GitError};
 use scry_core::history;
+use scry_core::line_asks::LineStore;
 use scry_core::operation;
 use scry_core::overview;
 use scry_core::syntax::Language;
@@ -300,6 +301,25 @@ pub struct ChangeSet {
     source: Source,
     /// The files as last listed: `file_diff` takes one by its index.
     files: Mutex<Vec<Listed>>,
+    /// The text diff last read for Explain on lines, with its file's path
+    /// and content: read again only when the file changes.
+    explained: Mutex<Option<(String, diff::ContentId, Arc<diff::TextDiff>)>>,
+    /// The repository's git folder, found once; `None` without one.
+    git_dir: OnceLock<Option<PathBuf>>,
+}
+
+/// What Explain on lines needs of one file of the list.
+pub(crate) struct Asked {
+    pub store: LineStore,
+    pub git_dir: PathBuf,
+    /// The file's path in the version its lines are selected in.
+    pub path: String,
+    /// That version: the new side, or the old one of a deleted file.
+    pub target: Target,
+    pub old_side: bool,
+    /// What the window compares, in its words.
+    pub what: String,
+    pub diff: Arc<diff::TextDiff>,
 }
 
 /// A file of the list, with its content's id when it was listed.
@@ -360,6 +380,8 @@ impl ChangeSet {
                 paths,
             },
             files: Mutex::new(Vec::new()),
+            explained: Mutex::new(None),
+            git_dir: OnceLock::new(),
         }))
     }
 
@@ -380,6 +402,8 @@ impl ChangeSet {
                 paths: Vec::new(),
             },
             files: Mutex::new(Vec::new()),
+            explained: Mutex::new(None),
+            git_dir: OnceLock::new(),
         }))
     }
 
@@ -413,6 +437,8 @@ impl ChangeSet {
         Arc::new(ChangeSet {
             source,
             files: Mutex::new(Vec::new()),
+            explained: Mutex::new(None),
+            git_dir: OnceLock::new(),
         })
     }
 
@@ -623,27 +649,7 @@ impl ChangeSet {
         } else {
             Marks::Auto
         };
-        let read = match &self.source {
-            Source::Repository {
-                git, root, scope, ..
-            } => diff::file_diff(git, root, &scope.comparison, &file, marks),
-            Source::Files { git, old, new, .. } => diff::plain_files(git, old, new, marks),
-            Source::Folders { git, old, new } => {
-                diff::folder_file_diff(git, old, new, &file, marks)
-            }
-            Source::Point {
-                git,
-                root,
-                sides: Some(sides),
-                ..
-            } => history::sides_diff(git, root, sides, &file, marks),
-            Source::Point { .. } => {
-                return Err(ScryError::Refused {
-                    message: String::from("This file is no longer in the list."),
-                });
-            }
-        }
-        .map_err(diff_error)?;
+        let read = self.read(&file, marks)?;
         Ok(file_diff(read, Path::new(&file.path)))
     }
 }
@@ -665,39 +671,7 @@ impl ChangeSet {
         if file.state == diff::FileState::Deleted {
             return Err(nothing());
         }
-        let (git, target, path) = match &self.source {
-            Source::Repository { git, scope, .. } => {
-                (git, Target::of(&scope.comparison), file.path.clone())
-            }
-            Source::Point {
-                git,
-                sides: Some(sides),
-                ..
-            } => match sides {
-                history::Sides::Compared { comparison, .. } => {
-                    (git, Target::of(comparison), file.path.clone())
-                }
-                history::Sides::Blobs {
-                    new: None,
-                    new_path,
-                    ..
-                } => (git, Target::WorkingCopy, new_path.clone()),
-                history::Sides::Blobs {
-                    new: Some(blob),
-                    new_path,
-                    ..
-                } => {
-                    // `commit:path`: the commit is what comes before the
-                    // path.
-                    let commit = blob
-                        .strip_suffix(new_path.as_str())
-                        .and_then(|commit| commit.strip_suffix(':'))
-                        .ok_or_else(nothing)?;
-                    (git, Target::Commit(commit.to_string()), new_path.clone())
-                }
-            },
-            _ => return Err(nothing()),
-        };
+        let (git, target, path) = self.side(&file).ok_or_else(nothing)?;
         Ok(FileBlame::new(git.clone(), target, path))
     }
 }
@@ -718,6 +692,122 @@ impl ChangeSet {
                 header,
             },
             files: Mutex::new(Vec::new()),
+            explained: Mutex::new(None),
+            git_dir: OnceLock::new(),
+        })
+    }
+
+    /// The diff of `file`, a file of the last list.
+    fn read(&self, file: &diff::ChangedFile, marks: Marks) -> Result<diff::FileDiff, ScryError> {
+        match &self.source {
+            Source::Repository {
+                git, root, scope, ..
+            } => diff::file_diff(git, root, &scope.comparison, file, marks),
+            Source::Files { git, old, new, .. } => diff::plain_files(git, old, new, marks),
+            Source::Folders { git, old, new } => diff::folder_file_diff(git, old, new, file, marks),
+            Source::Point {
+                git,
+                root,
+                sides: Some(sides),
+                ..
+            } => history::sides_diff(git, root, sides, file, marks),
+            Source::Point { .. } => {
+                return Err(ScryError::Refused {
+                    message: String::from("This file is no longer in the list."),
+                });
+            }
+        }
+        .map_err(diff_error)
+    }
+
+    /// The version of `file` whose lines the window numbers, blames and
+    /// lets the user select, with its path there: the new side, or the
+    /// old one of a deleted file. `None` without a repository.
+    fn side(&self, file: &diff::ChangedFile) -> Option<(&GitCli, Target, String)> {
+        let deleted = file.state == diff::FileState::Deleted;
+        let of = |comparison: &Comparison| match (deleted, comparison) {
+            (false, comparison) => Target::of(comparison),
+            (true, Comparison::WorkingCopy { base } | Comparison::Staged { base }) => {
+                Target::Commit(base.clone())
+            }
+            (true, Comparison::Unstaged) => Target::Index,
+            (true, Comparison::Commits { old, .. }) => Target::Commit(old.clone()),
+        };
+        let path = match (deleted, &file.old_path) {
+            (true, Some(old_path)) => old_path.clone(),
+            _ => file.path.clone(),
+        };
+        match &self.source {
+            Source::Repository { git, scope, .. } => Some((git, of(&scope.comparison), path)),
+            Source::Point {
+                git,
+                sides: Some(sides),
+                ..
+            } => match sides {
+                history::Sides::Compared { comparison, .. } => Some((git, of(comparison), path)),
+                history::Sides::Blobs {
+                    new: None,
+                    new_path,
+                    ..
+                } => Some((git, Target::WorkingCopy, new_path.clone())),
+                history::Sides::Blobs {
+                    new: Some(blob),
+                    new_path,
+                    ..
+                } => {
+                    // `commit:path`: the commit is what comes before the
+                    // path.
+                    let commit = blob
+                        .strip_suffix(new_path.as_str())
+                        .and_then(|commit| commit.strip_suffix(':'))?;
+                    Some((git, Target::Commit(commit.to_string()), new_path.clone()))
+                }
+            },
+            _ => None,
+        }
+    }
+
+    /// What Explain on lines needs of the file at `index` of the last
+    /// list; `None` where lines cannot be asked about: no repository
+    /// (`git difftool`), or a file with no text to show.
+    pub(crate) fn asked(&self, index: u32) -> Option<Asked> {
+        let listed = self.lock().get(index as usize).cloned()?;
+        let file = &listed.file;
+        let (git, target, path) = self.side(file)?;
+        let git_dir = self
+            .git_dir
+            .get_or_init(|| match &self.source {
+                Source::Repository { git_dir, .. } if !git_dir.as_os_str().is_empty() => {
+                    Some(git_dir.clone())
+                }
+                _ => scry_core::asks::git_dir(git).ok(),
+            })
+            .clone()?;
+        let mut cached = self
+            .explained
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let read = match cached.as_ref() {
+            Some((cached_path, id, read)) if *cached_path == file.path && *id == listed.id => {
+                read.clone()
+            }
+            _ => {
+                let diff::FileDiff::Text(read) = self.read(file, Marks::Auto).ok()? else {
+                    return None;
+                };
+                let read = Arc::new(read);
+                *cached = Some((file.path.clone(), listed.id.clone(), read.clone()));
+                read
+            }
+        };
+        Some(Asked {
+            store: LineStore::new(&git_dir),
+            git_dir,
+            path,
+            target,
+            old_side: file.state == diff::FileState::Deleted,
+            what: self.header().sentence,
+            diff: read,
         })
     }
 

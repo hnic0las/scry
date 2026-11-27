@@ -13,6 +13,26 @@ protocol ChangesSource: Sendable {
     /// The blame of the new side of the file at `index` of the last list,
     /// not read yet.
     func blameSource(index: UInt32) throws -> BlameSource
+    /// Where Explain stands on the lines of the file at `index`.
+    func lineExplanations(index: UInt32) -> LineExplanations
+    /// Asks about lines `first...last` of the file at `index`; gives the
+    /// ask's id.
+    func askLines(index: UInt32, first: UInt32, last: UInt32) throws -> String
+    func cancelLines(index: UInt32, id: String) throws
+    func forgetLines(index: UInt32, id: String) throws
+}
+
+extension ChangesSource {
+    func lineExplanations(index: UInt32) -> LineExplanations {
+        LineExplanations(available: false, watching: false, items: [])
+    }
+
+    func askLines(index: UInt32, first: UInt32, last: UInt32) throws -> String {
+        throw ScryError.Refused(message: "Explain needs a text file in a git repository.")
+    }
+
+    func cancelLines(index: UInt32, id: String) throws {}
+    func forgetLines(index: UInt32, id: String) throws {}
 }
 
 extension ChangeSet: ChangesSource {
@@ -129,6 +149,8 @@ final class ChangesViewModel {
         didSet {
             guard layout != oldValue else { return }
             defaults.set(layout.rawValue, forKey: Self.layoutKey)
+            // The other layout has other rows.
+            lineRow = selection.flatMap { row(ofLine: $0.lowerBound) }
             scrollRequest += 1
         }
     }
@@ -165,6 +187,28 @@ final class ChangesViewModel {
     @ObservationIgnored private var blameTask: Task<Void, Never>?
     /// Goes to what a commit did to a file, from a line of the blame.
     @ObservationIgnored private let openBlamed: ((BlameCommitInfo, ChangesFile) -> Void)?
+    /// The lines selected in the gutter, from 1: of the new side, or of
+    /// the old one in a deleted file.
+    private(set) var selection: ClosedRange<Int>?
+    /// The line a shift-click or a drag extends the selection from.
+    @ObservationIgnored private var selectionAnchor: Int?
+    /// The pointer is down on a line number.
+    @ObservationIgnored private var pressing = false
+    /// Where Explain stands on the open file's lines, as last read.
+    private(set) var explanations: LineExplanations?
+    /// When `explanations` was read: the waiting time counts from it.
+    private(set) var explainNow = Date()
+    /// Why the last ask or cancel failed.
+    private(set) var explainError: String?
+    /// The explanation shown whole in the inspector, by its id.
+    private(set) var openExplanation: String?
+    /// The long answers the user opened, by id.
+    private(set) var expandedExplanations: Set<String> = []
+    /// The row to scroll to for an explanation's lines, until a change is
+    /// gone to.
+    @ObservationIgnored private var lineRow: Int?
+    /// No for a preview, which shows what it was given.
+    @ObservationIgnored var pollsExplanations = true
 
     init(
         source: ChangesSource,
@@ -277,6 +321,8 @@ final class ChangesViewModel {
         content = result
         atFileEdge = nil
         restartBlame()
+        // The lines moved under the selection.
+        clearSelection()
         guard case .text(let new) = result else {
             currentChange = 0
             return
@@ -438,6 +484,241 @@ final class ChangesViewModel {
         openBlamed?(commit, selected)
     }
 
+    // MARK: Explain the selected lines
+
+    /// One explanation of the open file and what its block shows.
+    struct ExplainedLines: Identifiable, Equatable {
+        let item: LineExplanation
+        let state: InspectorViewModel.Explain
+        var id: String { item.id }
+        /// "Lines 10–18".
+        var label: String { ChangesViewModel.linesLabel(Int(item.first)...Int(item.last)) }
+    }
+
+    /// The strip at the left of explained lines.
+    enum ExplainStrip: Equatable {
+        /// Asked, not answered yet: dashed.
+        case waiting
+        case answered
+        /// The lines changed since, or the agent could not explain: grey,
+        /// dashed.
+        case stale
+    }
+
+    /// Lines can be selected to ask about them: a text file, not the
+    /// copies git difftool hands over, with Explain on in Settings.
+    var canSelectLines: Bool {
+        !header.reduced && diff != nil && InspectorViewModel.explainEnabled(in: defaults)
+    }
+
+    /// The lines selected are the old side's: a deleted file has no new
+    /// side.
+    var selectsOldSide: Bool { selected?.state == .deleted }
+
+    /// The pointer went down on the line number of `row`, or moved
+    /// `rowDelta` rows from it while down. With `extend` (shift), the
+    /// selection goes on from where it started.
+    func pressLine(row: Int, rowDelta: Int = 0, extend: Bool = false) {
+        guard canSelectLines else { return }
+        if !pressing {
+            guard let line = selectableLine(nearRow: row) else { return }
+            pressing = true
+            if !extend || selectionAnchor == nil { selectionAnchor = line }
+        }
+        guard let anchor = selectionAnchor, let line = selectableLine(nearRow: row + rowDelta) else { return }
+        let range = min(anchor, line)...max(anchor, line)
+        guard range != selection else { return }
+        selection = range
+        if let touched = currentExplanation { openExplanation = touched.id }
+    }
+
+    func releaseLine() {
+        pressing = false
+    }
+
+    /// Esc: nothing is selected any more.
+    func clearSelection() {
+        selection = nil
+        selectionAnchor = nil
+        pressing = false
+    }
+
+    /// The selectable line of `row`, or of the nearest row that has one.
+    private func selectableLine(nearRow row: Int) -> Int? {
+        guard let diff, rowCount > 0 else { return nil }
+        let old = selectsOldSide
+        let unified = layout == .unified
+        func number(_ row: Int) -> Int? {
+            guard row >= 0, row < rowCount else { return nil }
+            let number = unified
+                ? (old ? diff.unified[row].old : diff.unified[row].new)
+                : (old ? diff.rows[row].old : diff.rows[row].new)
+            return number.map(Int.init)
+        }
+        let start = min(max(row, 0), rowCount - 1)
+        for distance in 0..<rowCount {
+            if let line = number(start - distance) ?? number(start + distance) { return line }
+        }
+        return nil
+    }
+
+    /// The row showing `line` of the selectable side, in the layout.
+    private func row(ofLine line: Int) -> Int? {
+        guard let diff else { return nil }
+        let old = selectsOldSide
+        let number = UInt32(line)
+        return layout == .unified
+            ? diff.unified.firstIndex { (old ? $0.old : $0.new) == number }
+            : diff.rows.firstIndex { (old ? $0.old : $0.new) == number }
+    }
+
+    /// Reads where Explain stands on the open file's lines again, and
+    /// whether a session watches: the window does it every second, since
+    /// the agent answers from outside.
+    func refreshExplanations() async {
+        guard canSelectLines, let selected else {
+            explanations = nil
+            return
+        }
+        let source = source
+        let asked = request
+        let read = await Task.detached { source.lineExplanations(index: selected.index) }.value
+        guard request == asked else { return }
+        explainNow = now()
+        if read != explanations { explanations = read }
+    }
+
+    /// The explanations of the open file, ordered by line; none with
+    /// Explain off.
+    var explainedLines: [ExplainedLines] {
+        guard canSelectLines, let explanations else { return [] }
+        return explanations.items.map { item in
+            ExplainedLines(item: item, state: InspectorViewModel.explain(
+                askedAt: item.askedAt, answer: item.answer, watching: explanations.watching,
+                stale: item.stale, now: explainNow
+            ))
+        }
+    }
+
+    /// The explanation the selection touches: asking again extends it.
+    var currentExplanation: LineExplanation? {
+        guard let selection else { return nil }
+        return explanations?.items.first { Int($0.first) <= selection.upperBound && selection.lowerBound <= Int($0.last) }
+    }
+
+    /// Whether a Claude Code session watches the repository, for the
+    /// status bar; `nil` where lines cannot be asked about, or once
+    /// Settings › Agent found Scry's plugin off.
+    var watching: Bool? {
+        guard canSelectLines, ClaudeCodePlugin.isOn(in: defaults), let explanations, explanations.available
+        else { return nil }
+        return explanations.watching
+    }
+
+    /// The inspector is shown: lines are selected, or the file has
+    /// explanations.
+    var showsExplainInspector: Bool {
+        guard canSelectLines, let explanations, explanations.available else { return false }
+        return selection != nil || !explanations.items.isEmpty
+    }
+
+    /// The strip beside `line`, and its explanation's id.
+    func strip(line: Int) -> (kind: ExplainStrip, id: String)? {
+        guard canSelectLines,
+              let item = explanations?.items.first(where: { Int($0.first) <= line && line <= Int($0.last) })
+        else { return nil }
+        if item.stale || item.answer?.failed == true { return (.stale, item.id) }
+        return (item.askedAt != nil ? .waiting : .answered, item.id)
+    }
+
+    /// The explanation is shown whole in the inspector.
+    func isOpen(_ explained: ExplainedLines) -> Bool {
+        openExplanation == explained.id || explanations?.items.count == 1
+            || (openExplanation == nil && currentExplanation?.id == explained.id)
+    }
+
+    /// ⌃⌘E and the Explain buttons: asks about the selected lines, again
+    /// when they are explained already.
+    func explainSelection() async {
+        guard let selection else { return }
+        await ask(selection)
+    }
+
+    func askAgain(_ item: LineExplanation) async {
+        await ask(Int(item.first)...Int(item.last))
+    }
+
+    private func ask(_ lines: ClosedRange<Int>) async {
+        guard canSelectLines, let selected else { return }
+        do {
+            openExplanation = try source.askLines(
+                index: selected.index, first: UInt32(lines.lowerBound), last: UInt32(lines.upperBound)
+            )
+            explainError = nil
+        } catch {
+            explainError = error.message
+        }
+        await refreshExplanations()
+        // The ask covers the explanations it touched: so does the selection.
+        if selection != nil, let item = explanations?.items.first(where: { $0.id == openExplanation }) {
+            selection = Int(item.first)...Int(item.last)
+        }
+    }
+
+    /// Takes back a waiting ask; its last answer stays.
+    func cancelExplain(_ item: LineExplanation) async {
+        await change { try self.source.cancelLines(index: $0, id: item.id) }
+    }
+
+    /// Removes an explanation.
+    func forgetExplanation(_ item: LineExplanation) async {
+        await change { try self.source.forgetLines(index: $0, id: item.id) }
+    }
+
+    private func change(_ action: (UInt32) throws -> Void) async {
+        guard let selected else { return }
+        do {
+            try action(selected.index)
+            explainError = nil
+        } catch {
+            explainError = error.message
+        }
+        await refreshExplanations()
+    }
+
+    /// A click on an explanation's lines in the inspector: selects them
+    /// and scrolls there.
+    func show(_ item: LineExplanation) {
+        selection = Int(item.first)...Int(item.last)
+        selectionAnchor = Int(item.first)
+        openExplanation = item.id
+        lineRow = row(ofLine: Int(item.first))
+        scrollRequest += 1
+    }
+
+    /// A click on a folded explanation, or on its strip in the code:
+    /// shows it whole.
+    func open(_ id: String) {
+        openExplanation = id
+    }
+
+    func toggleExpanded(_ id: String) {
+        expandedExplanations.formSymmetricDifference([id])
+    }
+
+    /// "Line 10", "Lines 10–18".
+    nonisolated static func linesLabel(_ lines: ClosedRange<Int>) -> String {
+        lines.count == 1 ? "Line \(lines.lowerBound)" : "Lines \(lines.lowerBound)–\(lines.upperBound)"
+    }
+
+    /// Shows a selection and explanations given at once, for previews.
+    func showNow(selection: ClosedRange<Int>?, explanations: LineExplanations, open: String? = nil) {
+        pollsExplanations = false
+        self.selection = selection
+        self.explanations = explanations
+        openExplanation = open
+    }
+
     // MARK: git difftool's files
 
     /// "File 2 of 13".
@@ -476,6 +757,7 @@ final class ChangesViewModel {
         if canGoToPreviousFile { shortcuts.append(.previousFile) }
         if canGoToNextFile { shortcuts.append(.nextFile) }
         if canMarkViewed, selected != nil { shortcuts.append(.viewed) }
+        if selection != nil { shortcuts.append(.explainLines) }
         if !header.reduced { shortcuts.append(.openRepository) }
         shortcuts.append(.keyboardShortcuts)
         return shortcuts
@@ -527,6 +809,11 @@ final class ChangesViewModel {
         selected = file
         currentChange = 0
         atFileEdge = nil
+        clearSelection()
+        lineRow = nil
+        explanations = nil
+        openExplanation = nil
+        explainError = nil
         self.allMarks = allMarks
         if let file { arrived[file.path] = nil }
         // A file reached from the keyboard is shown in the list too.
@@ -672,11 +959,13 @@ final class ChangesViewModel {
         guard change >= 0, change < changeCount else { return }
         currentChange = change
         atFileEdge = nil
+        lineRow = nil
         scrollRequest += 1
     }
 
     /// The row to scroll to for the current block, in the current layout.
     var scrollTarget: Int? {
+        if let lineRow { return lineRow }
         guard let diff, diff.changes.indices.contains(currentChange) else { return nil }
         let change = diff.changes[currentChange]
         return Int(layout == .unified ? change.firstLine : change.firstRow)
@@ -725,7 +1014,8 @@ final class ChangesViewModel {
                 return "\(edge) change · press again for the \(file) file"
             }
             if let viewedError { return viewedError }
-            let reading = blame?.status.map { " · \($0)" } ?? ""
+            let reading = (blame?.status.map { " · \($0)" } ?? "")
+                + (selection.map { " · \(Self.linesLabel($0)) selected" } ?? "")
             if diff.changes.isEmpty { return "No change in the content" + reading }
             return "\(Self.count(diff.changes.count, "change")) · +\(diff.added) −\(diff.removed)" + reading
         case .binary: return "Binary file"

@@ -71,11 +71,19 @@ enum PreviewChanges {
 
     /// The window on the sample repository, in `layout`.
     static func window(
-        _ layout: ChangesViewModel.Layout, select path: String = "Sources/Sync/SyncEngine.swift", viewed: Bool = false
+        _ layout: ChangesViewModel.Layout, select path: String = "Sources/Sync/SyncEngine.swift", viewed: Bool = false,
+        selection: ClosedRange<Int>? = nil, explanations: [LineExplanation]? = nil
     ) -> some View {
         let viewModel = repository().map { ChangesViewModel(source: $0, defaults: .preview) }
         viewModel?.layout = layout
         viewModel?.loadNow(select: path)
+        if let explanations {
+            viewModel?.showNow(
+                selection: selection,
+                explanations: LineExplanations(available: true, watching: true, items: explanations),
+                open: explanations.first?.id
+            )
+        }
         if viewed, let viewModel {
             // Three files viewed, one of them changed since.
             let names = ["OldCache.swift", "SyncClient.swift", "offline.md"]
@@ -211,6 +219,40 @@ enum PreviewChanges {
 
 #Preview("Changes, files viewed", traits: .fixedLayout(width: 1300, height: 760)) {
     PreviewChanges.window(.unified, viewed: true)
+}
+
+extension PreviewChanges {
+    static func explained(_ id: String, _ lines: ClosedRange<UInt32>, _ text: String?, minutes: Double, stale: Bool = false)
+        -> LineExplanation {
+        let at = UInt64((Date().timeIntervalSince1970 - minutes * 60) * 1000)
+        return LineExplanation(
+            id: id, first: lines.lowerBound, last: lines.upperBound, stale: stale,
+            askedAt: text == nil ? at : nil,
+            answer: text.map { Explanation(text: $0, by: "Claude Code", at: at, failed: false) }
+        )
+    }
+
+    static let uploadText = "These lines make upload work offline. Without a network, the item goes to the outbox and the function returns without sending; otherwise the send runs inside a retry with exponential backoff, with a 30-second timeout per attempt. One thing to check: an item queued here is only sent when flush() runs, and nothing in this change calls flush() when the network comes back."
+    static let flushText = "flush now takes its batch from the queue with next(20), which removes the items it returns, where prefix(20) left them in the outbox."
+}
+
+#Preview("Explain, a selection", traits: .fixedLayout(width: 1300, height: 760)) {
+    PreviewChanges.window(.unified, selection: 10...18, explanations: [])
+}
+
+#Preview("Explain, answered and folded", traits: .fixedLayout(width: 1300, height: 760)) {
+    PreviewChanges.window(.unified, selection: 10...18, explanations: [
+        PreviewChanges.explained("L1", 10...18, PreviewChanges.uploadText, minutes: 2),
+        PreviewChanges.explained("L2", 21...26, PreviewChanges.flushText, minutes: 9),
+    ])
+}
+
+#Preview("Explain, waiting and stale, split, dark", traits: .fixedLayout(width: 1300, height: 760)) {
+    PreviewChanges.window(.split, selection: 10...13, explanations: [
+        PreviewChanges.explained("L1", 10...13, nil, minutes: 0.1),
+        PreviewChanges.explained("L2", 21...26, PreviewChanges.flushText, minutes: 9, stale: true),
+    ])
+    .preferredColorScheme(.dark)
 }
 
 #Preview("History, each change", traits: .fixedLayout(width: 1300, height: 760)) {

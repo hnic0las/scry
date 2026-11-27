@@ -6,14 +6,18 @@
 //! Only `resolve` writes in the repository: one conflict's region of a
 //! conflicted text file, and its record under the git folder. `explain`
 //! and `suggest` write only under the git folder, the answer to an ask
-//! made in Scry. Nothing touches the index.
+//! made in Scry: about a conflict, or with `explain` about lines the
+//! user selected in the Changes window, which `lines` reads. Nothing touches the index.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use scry_core::asks;
 use scry_core::blame::{self, LineCommit};
 use scry_core::conflict;
+use scry_core::file_blame;
 use scry_core::git::GitCli;
+use scry_core::line_asks::{LineAnswer, LineStore};
 use scry_core::operation::Side;
 use scry_core::overview::{self, FileView, Overview, Snapshot};
 use scry_core::presentation;
@@ -257,6 +261,10 @@ impl Tools {
 
     /// One conflict of `path` in full, with `context` lines around it.
     pub fn conflict(&mut self, path: &str, id: &str, context: usize) -> Result<String, String> {
+        // A plugin from before `lines` existed reads every ask here.
+        if line_ask(id) {
+            return self.lines(path, id);
+        }
         let repo = self.repo()?;
         let path = repo.text_file(path)?;
         let opened = repo.open(&path)?;
@@ -427,6 +435,9 @@ impl Tools {
         failed: bool,
         by: &str,
     ) -> Result<String, String> {
+        if line_ask(id) {
+            return self.explain_lines(path, id, text, failed, by);
+        }
         let repo = self.repo()?;
         let path = path.strip_prefix("./").unwrap_or(path);
         let store = Store::open(&repo.git).map_err(|error| error.to_string())?;
@@ -446,6 +457,99 @@ impl Tools {
                 "Kept your explanation of conflict {id} in {path}: Scry shows it to the user."
             ),
         })
+    }
+
+    /// The lines of `path` the user selected in Scry's Changes window and
+    /// asked about, as ask `id`: the change around them as the window
+    /// showed it, and who last wrote them.
+    pub fn lines(&mut self, path: &str, id: &str) -> Result<String, String> {
+        let (git, store) = self.line_store()?;
+        let path = path.strip_prefix("./").unwrap_or(path);
+        let Some(ask) = store.asks(path).remove(id) else {
+            return Err(nobody_asked_lines(path, id));
+        };
+        let mut text = format!(
+            "{path}, lines {} to {}, selected by the user in Scry's Changes window. Scry shows: {}.\n",
+            ask.first, ask.last, ask.what
+        );
+        text += "The selected lines are marked \">\". \"+\" is a line the change shown adds, \"-\" one it removes (numbered as before the change).\n\n";
+        text += &fenced(ask.excerpt.trim_end_matches('\n'));
+        // The file may have changed since: the blame is told as found, or
+        // left out.
+        if let Ok(written) = file_blame::blame_lines(&git, &ask.target, path, ask.first, ask.last) {
+            if !written.is_empty() {
+                text += "\nLast written by:\n";
+            }
+            for (lines, commit) in written {
+                let range = match lines.count {
+                    1 => format!("line {}", lines.first),
+                    count => format!("lines {} to {}", lines.first, lines.first + count - 1),
+                };
+                text += &match commit {
+                    Some(commit) => format!(
+                        "  {range}: {} {}, {}: {}\n",
+                        commit.short_id(),
+                        commit.author,
+                        file_blame::short_age(commit.time, now_seconds()),
+                        commit.subject
+                    ),
+                    None => format!("  {range}: not committed yet\n"),
+                };
+            }
+        }
+        text += &format!(
+            "\nAnswer with explain(path: {path:?}, id: {id:?}, text): 2 to 4 plain sentences for the user on what the selected lines do and why they changed, and anything worth checking. Read or search the repository when the lines call code you do not see here; git show <commit> tells what a commit did. Nothing here is a conflict: there are no sides and no candidates."
+        );
+        Ok(text)
+    }
+
+    /// Keeps `text` as `by`'s answer to the ask `id` about lines of
+    /// `path`; with `failed`, why `by` could not explain them.
+    fn explain_lines(
+        &mut self,
+        path: &str,
+        id: &str,
+        text: &str,
+        failed: bool,
+        by: &str,
+    ) -> Result<String, String> {
+        let (_, store) = self.line_store()?;
+        let path = path.strip_prefix("./").unwrap_or(path);
+        if !store.asks(path).contains_key(id) {
+            return Err(nobody_asked_lines(path, id));
+        }
+        let answer = LineAnswer {
+            id: id.to_string(),
+            by: by.to_string(),
+            text: text.trim().to_string(),
+            at: now_millis(),
+            failed,
+        };
+        store
+            .answer(path, answer)
+            .map_err(|error| format!("The explanation could not be kept: {error}"))?;
+        Ok(match failed {
+            true => format!(
+                "Kept why you could not explain the lines {id} of {path}: Scry shows it to the user."
+            ),
+            false => format!(
+                "Kept your explanation of the lines {id} of {path}: Scry shows it to the user."
+            ),
+        })
+    }
+
+    /// git at the repository's root and the asks about lines, which need
+    /// no operation in progress.
+    fn line_store(&self) -> Result<(GitCli, LineStore), String> {
+        let not_a_repository = |_| {
+            String::from(
+                "Not in a git repository: the server runs git from the folder it was started in. Start the agent in the repository.",
+            )
+        };
+        let root = overview::root(&self.git).map_err(not_a_repository)?;
+        let git = self.git.in_dir(root);
+        let git_dir = asks::git_dir(&git).map_err(not_a_repository)?;
+        Ok((git, LineStore::new(&git_dir)))
     }
 
     /// Keeps a resolution of conflict `id` of `path` that the user asked
@@ -787,9 +891,7 @@ fn answer(ask: Ask, text: &str, failed: bool, proposal: Option<Proposal>, by: &s
         kind: ask.kind,
         by: by.to_string(),
         text: text.trim().to_string(),
-        at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |time| time.as_millis() as u64),
+        at: now_millis(),
         // What the user wrote by hand when asking: the answer is stale
         // once the conflict holds other text.
         edited: ask.edited,
@@ -799,6 +901,29 @@ fn answer(ask: Ask, text: &str, failed: bool, proposal: Option<Proposal>, by: &s
 }
 
 /// The index of conflict `id` in `session`.
+/// Whether `id` names an ask about lines of the Changes window, not a
+/// conflict: `L` and hexadecimal digits.
+fn line_ask(id: &str) -> bool {
+    id.strip_prefix('L')
+        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+fn nobody_asked_lines(path: &str, id: &str) -> String {
+    format!(
+        "Nobody asked in Scry to explain the lines {id} of {path}, or the ask was taken back: explain only what git scry wait printed."
+    )
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_millis() as u64)
+}
+
+fn now_seconds() -> i64 {
+    (now_millis() / 1000) as i64
+}
+
 fn index_of(session: &MergeSession, id: &str) -> Option<usize> {
     (0..session.conflict_count()).find(|index| session.analysis_so_far(*index).id == id)
 }

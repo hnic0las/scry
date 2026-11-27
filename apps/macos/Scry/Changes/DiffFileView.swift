@@ -114,7 +114,8 @@ struct DiffFileView: View {
                         ForEach(diff.unified.indices, id: \.self) { index in
                             UnifiedRowView(
                                 line: diff.unified[index], diff: diff, metrics: metrics, scroll: scroll,
-                                current: current.contains(index), blame: blameGutter
+                                current: current.contains(index), blame: blameGutter,
+                                lines: LineGutter(model: viewModel, row: index)
                             )
                             .id(index)
                         }
@@ -122,7 +123,8 @@ struct DiffFileView: View {
                         ForEach(diff.rows.indices, id: \.self) { index in
                             SplitRowView(
                                 row: diff.rows[index], diff: diff, metrics: metrics, scroll: scroll,
-                                current: current.contains(index), blame: blameGutter
+                                current: current.contains(index), blame: blameGutter,
+                                lines: LineGutter(model: viewModel, row: index)
                             )
                             .id(index)
                         }
@@ -283,11 +285,13 @@ struct DiffCodeCell: View {
 struct DiffNumber: View {
     let number: UInt32?
     let width: CGFloat
+    /// The row's line is selected: bold, on the selection's tint.
+    var selected = false
 
     var body: some View {
         Text(number.map(String.init) ?? "")
-            .font(Metrics.lineNumber)
-            .foregroundStyle(Theme.Surfaces.textTertiary)
+            .font(selected ? Metrics.lineNumber.weight(.bold) : Metrics.lineNumber)
+            .foregroundStyle(selected ? Theme.Surfaces.text : Theme.Surfaces.textTertiary)
             .frame(width: width - Metrics.lineNumberPadding, alignment: .trailing)
             .padding(.trailing, Metrics.lineNumberPadding)
     }
@@ -328,14 +332,30 @@ struct UnifiedRowView: View {
     let scroll: SideScroll
     let current: Bool
     var blame: BlameGutter?
+    var lines: LineGutter?
+
+    /// The row's line on the side whose lines can be selected.
+    private var selectable: UInt32? {
+        lines?.model.selectsOldSide == true ? line.old : line.new
+    }
+
+    private var isSelected: Bool {
+        guard let selectable, let selection = lines?.model.selection else { return false }
+        return selection.contains(Int(selectable))
+    }
 
     var body: some View {
         HStack(spacing: 0) {
             if let blame {
                 BlameCellView(gutter: blame, line: line.new, width: metrics.blame, compact: metrics.compactBlame)
             }
-            DiffNumber(number: line.old, width: metrics.number)
-            DiffNumber(number: line.new, width: metrics.number)
+            HStack(spacing: 0) {
+                DiffNumber(number: line.old, width: metrics.number, selected: isSelected)
+                DiffNumber(number: line.new, width: metrics.number, selected: isSelected)
+            }
+            .frame(maxHeight: .infinity)
+            .background(isSelected ? Theme.Interaction.selection : Color.clear)
+            .modifier(LineSelectGesture(lines: lines, selectable: selectable != nil))
             DiffSign(kind: sign)
             if let text {
                 DiffCodeCell(line: text, words: line.words, wordTint: wordTint, scroll: scroll, width: metrics.code)
@@ -345,8 +365,10 @@ struct UnifiedRowView: View {
         .frame(height: Metrics.rowHeight)
         .background(background)
         .overlay(alignment: .leading) { CurrentBlockBar(current: current) }
+        .modifier(LineMarks(lines: lines, number: selectable))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(label)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     /// The line's text: on the old side when removed, on the new otherwise.
@@ -400,6 +422,7 @@ struct SplitRowView: View {
     let scroll: SideScroll
     let current: Bool
     var blame: BlameGutter?
+    var lines: LineGutter?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -424,8 +447,15 @@ struct SplitRowView: View {
     @ViewBuilder
     private func side(number: UInt32?, line: DiffLine?, words: [ByteRange], changed: Bool, added: Bool) -> some View {
         if let line {
+            // Lines are selected on the new side, or on the old one of a
+            // deleted file.
+            let selects = lines.map { $0.model.selectsOldSide != added } ?? false
+            let isSelected = selects && number.map { lines?.model.selection?.contains(Int($0)) == true } == true
             HStack(spacing: 0) {
-                DiffNumber(number: number, width: metrics.number)
+                DiffNumber(number: number, width: metrics.number, selected: isSelected)
+                    .frame(maxHeight: .infinity)
+                    .background(isSelected ? Theme.Interaction.selection : Color.clear)
+                    .modifier(LineSelectGesture(lines: lines, selectable: selects))
                 DiffSign(kind: !changed ? .none : added ? .added : .removed)
                 DiffCodeCell(
                     line: line, words: words,
@@ -436,6 +466,7 @@ struct SplitRowView: View {
             .frame(width: metrics.pane - (added ? metrics.blame : 0), alignment: .leading)
             .frame(maxHeight: .infinity)
             .background(!changed ? Theme.Surfaces.pane : added ? Theme.Diff.added : Theme.Diff.removed)
+            .modifier(LineMarks(lines: selects ? lines : nil, number: number))
             .accessibilityElement(children: .combine)
             .accessibilityLabel(
                 "\(!changed ? "Line" : added ? "Added, line" : "Removed, line") \(number ?? 0): \(line.text)"

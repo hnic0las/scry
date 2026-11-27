@@ -164,6 +164,15 @@ struct ExplainBlock: View {
     let ask: () -> Void
     let cancel: () -> Void
     let toggleExpanded: () -> Void
+    /// What is explained: its words differ.
+    var about = About.conflict
+
+    enum About {
+        case conflict
+        /// Lines selected in the Changes window, where esc clears the
+        /// selection rather than take the ask back.
+        case lines
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -182,8 +191,12 @@ struct ExplainBlock: View {
                             .foregroundStyle(Theme.Surfaces.textSecondary)
                     }
                     detail("A helper answers in the background of your session. Usually 5 to 20 seconds.")
-                    Button("Cancel", action: cancel)
-                        .keyboardShortcut(.cancelAction)
+                    if about == .conflict {
+                        Button("Cancel", action: cancel)
+                            .keyboardShortcut(.cancelAction)
+                    } else {
+                        Button("Cancel", action: cancel)
+                    }
                 }
                 if let previous { answer(previous, quiet: true) }
             case .noSession(let previous):
@@ -263,7 +276,9 @@ struct ExplainBlock: View {
                 Spacer()
                 Presence(watching: watching)
             }
-            detail("Claude Code explains what each side meant and the risk of each candidate. It never changes the result.")
+            detail(about == .conflict
+                ? "Claude Code explains what each side meant and the risk of each candidate. It never changes the result."
+                : "Claude Code explains what the selected lines do and why they changed. It never changes a file.")
         }
     }
 
@@ -305,7 +320,9 @@ struct ExplainBlock: View {
             } icon: {
                 Image(systemName: "clock").foregroundStyle(Theme.Surfaces.textSecondary)
             }
-            detail("The conflict changed after this was written.")
+            detail(about == .conflict
+                ? "The conflict changed after this was written."
+                : "These lines changed after this was written.")
             Text(explanation.text)
                 .font(Metrics.callout)
                 .lineSpacing(5)

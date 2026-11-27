@@ -91,15 +91,26 @@ final class InspectorViewModel {
               let state = explainState, state.available,
               explainedIndex == conflict?.index
         else { return nil }
-        guard let asked = state.askedAt else {
-            guard let answer = state.answer else { return .notAsked(watching: state.watching) }
+        return Self.explain(
+            askedAt: state.askedAt, answer: state.answer, watching: state.watching, stale: state.stale, now: now
+        )
+    }
+
+    /// What an Explain block shows for an ask made at `askedAt` (while it
+    /// waits) and its last `answer`: of a conflict, or of lines of a
+    /// change.
+    static func explain(
+        askedAt: UInt64?, answer: Explanation?, watching: Bool, stale: Bool, now: Date
+    ) -> Explain {
+        guard let asked = askedAt else {
+            guard let answer else { return .notAsked(watching: watching) }
             if answer.failed { return .failed(answer) }
-            if state.stale { return .stale(answer) }
-            return .answered(answer, watching: state.watching)
+            if stale { return .stale(answer) }
+            return .answered(answer, watching: watching)
         }
         // Asked again: the last explanation stays below, a failure does not.
-        let previous = state.answer.flatMap { $0.failed ? nil : $0 }
-        guard state.watching else { return .noSession(previous: previous) }
+        let previous = answer.flatMap { $0.failed ? nil : $0 }
+        guard watching else { return .noSession(previous: previous) }
         let waited = max(now.timeIntervalSince1970 - Double(asked) / 1000, 0)
         if waited >= Self.answerPatience { return .noAnswer(previous: previous) }
         return .waiting(seconds: Int(waited), previous: previous)

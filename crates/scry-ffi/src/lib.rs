@@ -39,6 +39,7 @@ mod changes;
 mod cli_command;
 mod file_blame;
 mod history;
+mod line_explain;
 pub use agent::{
     AgentSetup, AgentSetupState, agent_setup, allow_plugin_tools, install_plugin,
     remove_old_server, uninstall_plugin,
@@ -54,6 +55,7 @@ pub use history::{
     FileHistory, HistoryHeader, HistoryList, HistoryPin, HistoryPoint, HistoryPointKind,
     PointCounts,
 };
+pub use line_explain::{LineExplanation, LineExplanations};
 
 /// Why a call failed, by kind, each with a sentence the UI shows as it is.
 #[derive(Debug, uniffi::Error)]

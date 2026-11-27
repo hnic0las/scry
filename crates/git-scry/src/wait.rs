@@ -1,5 +1,6 @@
 //! `git scry wait`: prints the asks the user makes in Scry for an agent
-//! (Explain on a conflict), so the agent answers them through the MCP
+//! (Explain on a conflict, or on lines selected in the Changes window,
+//! with or without an operation in progress), so the agent answers them through the MCP
 //! server. Scry's Claude Code plugin runs `wait --follow` as a monitor:
 //! each line it prints reaches the user's session.
 

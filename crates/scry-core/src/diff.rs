@@ -718,7 +718,7 @@ fn disk_id(git: &dyn Git, path: &Path, name: &str) -> String {
 /// FNV-1a, 64 bits: the same on every platform and version, which the
 /// standard library's hasher does not promise. It tells an edited file
 /// from the one that was viewed; it guards against nothing.
-fn fnv(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
     })

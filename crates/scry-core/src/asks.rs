@@ -4,7 +4,9 @@
 //! spec "Explain through a watching agent").
 //!
 //! The asks and answers themselves are kept with the review
-//! ([`crate::records::Store`]); here is what watching them needs: reading
+//! ([`crate::records::Store`]) for conflicts and, for lines selected in
+//! the Changes window, outside any operation
+//! ([`crate::line_asks::LineStore`]); here is what watching them needs: reading
 //! the stop only when they changed, telling a new ask from one already
 //! printed, the line printed, and the presence files that tell the app a
 //! watcher is there.
@@ -16,7 +18,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::git::{Git, GitError};
-use crate::records::{OpenAsk, Store};
+use crate::line_asks::LineStore;
+use crate::records::{Ask, AskKind, OpenAsk, Store};
 
 /// How often a watcher says it is still there.
 pub const BEAT: Duration = Duration::from_secs(10);
@@ -57,6 +60,8 @@ type Signature = BTreeSet<(PathBuf, Option<SystemTime>, u64)>;
 /// One watcher's view of a repository's asks.
 pub struct Watch {
     reviews: PathBuf,
+    /// The asks about lines of the Changes window.
+    lines: LineStore,
     seen: Option<Signature>,
     /// The asks already printed, by stop folder, file, kind, conflict and
     /// time: the same ask is printed once, an ask made again is printed
@@ -69,6 +74,7 @@ impl Watch {
     pub fn new(git_dir: &Path) -> Watch {
         Watch {
             reviews: git_dir.join("scry").join("review"),
+            lines: LineStore::new(git_dir),
             seen: None,
             printed: BTreeSet::new(),
         }
@@ -81,22 +87,48 @@ impl Watch {
         if self.seen.as_ref() == Some(&signature) {
             return Ok(Vec::new());
         }
-        let any_ask = signature.iter().any(|(file, _, _)| {
-            file.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("asks-"))
-        });
-        if !any_ask {
-            self.seen = Some(signature);
-            return Ok(Vec::new());
+        // Whether asks were made about lines (`true`) or about conflicts.
+        let any_ask = |of_lines: bool| {
+            signature.iter().any(|(file, _, _)| {
+                (file.parent() == Some(self.lines.folder())) == of_lines
+                    && file
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("asks-"))
+            })
+        };
+        let mut open = Vec::new();
+        // The stop is read (three `git` runs) only when a conflict was
+        // asked about.
+        if any_ask(false) {
+            let store = Store::open(git)?;
+            let folder = store.folder().to_path_buf();
+            open.extend(
+                store
+                    .open_asks()
+                    .into_iter()
+                    .map(|open| (folder.clone(), open)),
+            );
         }
-        let store = Store::open(git)?;
+        if any_ask(true) {
+            // Lines of the Changes window: an Explain like the others,
+            // told apart by its id.
+            let folder = self.lines.folder().to_path_buf();
+            open.extend(self.lines.open_asks().into_iter().map(|(path, ask)| {
+                let ask = Ask {
+                    conflict: ask.id,
+                    kind: AskKind::Explain,
+                    at: ask.at,
+                    edited: None,
+                };
+                (folder.clone(), OpenAsk { path, ask })
+            }));
+        }
         self.seen = Some(signature);
-        let folder = store.folder().to_path_buf();
-        Ok(store
-            .open_asks()
+        open.sort_by(|a, b| (a.1.ask.at, &a.1.path).cmp(&(b.1.ask.at, &b.1.path)));
+        Ok(open
             .into_iter()
-            .filter(|open| {
+            .filter(|(folder, open)| {
                 self.printed.insert((
                     folder.clone(),
                     open.path.clone(),
@@ -105,17 +137,20 @@ impl Watch {
                     open.ask.at,
                 ))
             })
+            .map(|(_, open)| open)
             .collect())
     }
 
-    /// Every asks and answers file of every stop, with its modification
-    /// time and size.
+    /// Every asks and answers file of every stop and of the lines, with
+    /// its modification time and size.
     fn signature(&self) -> Signature {
-        let Ok(stops) = fs::read_dir(&self.reviews) else {
-            return Signature::new();
-        };
+        let stops = fs::read_dir(&self.reviews)
+            .into_iter()
+            .flatten()
+            .filter_map(|stop| Some(stop.ok()?.path()));
         stops
-            .filter_map(|stop| fs::read_dir(stop.ok()?.path()).ok())
+            .chain([self.lines.folder().to_path_buf()])
+            .filter_map(|folder| fs::read_dir(folder).ok())
             .flatten()
             .filter_map(|entry| {
                 let entry = entry.ok()?;
@@ -265,7 +300,6 @@ pub fn sessions(git_dir: &Path, now: SystemTime) -> Vec<SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::records::{Ask, AskKind};
 
     fn open(path: &str, conflict: &str) -> OpenAsk {
         OpenAsk {
@@ -405,5 +439,33 @@ mod tests {
         drop(old_running);
         drop(running);
         assert!(!folder.join("1").exists() && !folder.join("2").exists());
+    }
+
+    /// Lines asked about in the Changes window are printed as an Explain,
+    /// with no operation in progress, once.
+    #[test]
+    fn asks_about_lines_are_printed_outside_an_operation() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = crate::git::GitCli::new(repo.path().to_path_buf());
+        git.run(&["init", "--quiet"]).unwrap();
+        let git_dir = repo.path().join(".git");
+        let mut watch = Watch::new(&git_dir);
+        assert!(watch.poll(&git).unwrap().is_empty());
+        let ask = crate::line_asks::LineAsk {
+            id: String::from("L0000abcd"),
+            first: 1,
+            last: 2,
+            lines: vec![String::from("a"), String::from("b")],
+            what: String::new(),
+            excerpt: String::new(),
+            target: crate::file_blame::Target::WorkingCopy,
+            at: 5,
+        };
+        LineStore::new(&git_dir)
+            .ask("src/a b.rs", ask, &[])
+            .unwrap();
+        let lines: Vec<String> = watch.poll(&git).unwrap().iter().map(line).collect();
+        assert_eq!(lines, ["Scry asks: explain \"src/a b.rs\" L0000abcd"]);
+        assert!(watch.poll(&git).unwrap().is_empty());
     }
 }

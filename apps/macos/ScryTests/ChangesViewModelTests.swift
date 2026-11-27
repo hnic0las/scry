@@ -38,6 +38,34 @@ final class FakeChanges: ChangesSource, @unchecked Sendable {
         return blame
     }
 
+    /// Where Explain stands on every file's lines.
+    var explained = LineExplanations(available: true, watching: true, items: [])
+    /// When an ask is made, in milliseconds.
+    var askTime: UInt64 = 0
+    private(set) var lineAsks: [(index: UInt32, first: UInt32, last: UInt32)] = []
+
+    func lineExplanations(index: UInt32) -> LineExplanations {
+        explained
+    }
+
+    func askLines(index: UInt32, first: UInt32, last: UInt32) throws -> String {
+        if let failure { throw failure }
+        lineAsks.append((index, first, last))
+        let id = "L\(lineAsks.count)"
+        explained.items.append(LineExplanation(
+            id: id, first: first, last: last, stale: false, askedAt: askTime, answer: nil
+        ))
+        return id
+    }
+
+    func cancelLines(index: UInt32, id: String) throws {
+        explained.items.removeAll { $0.id == id }
+    }
+
+    func forgetLines(index: UInt32, id: String) throws {
+        explained.items.removeAll { $0.id == id }
+    }
+
     func setViewed(index: UInt32, viewed: Bool) throws {
         if let failure { throw failure }
         self.viewed.append((index, viewed))

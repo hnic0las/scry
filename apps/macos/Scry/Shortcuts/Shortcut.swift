@@ -191,6 +191,10 @@ extension Shortcut {
         id: "blame", title: "Show or hide blame", section: .changes, key: .character("b"),
         modifiers: [.option, .command], note: "Who last wrote each line; click a line for its commit", hint: "Blame"
     )
+    static let explainLines = Shortcut(
+        id: "explainLines", title: "Explain the selected lines", section: .changes, key: .character("e"),
+        modifiers: [.control, .command], note: "Click line numbers to select; asks Claude Code", hint: "Explain"
+    )
     static let history = Shortcut(
         id: "history", title: "History of the file", section: .changes, key: .character("y"),
         modifiers: [.command], note: "Again for the changed files", hint: "History"
@@ -244,7 +248,7 @@ extension Shortcut {
         applyEdit, cancelEdit,
         openFile, refresh, continueOperation,
         previousChange, nextChange, previousFile, nextFile, changesLayout, viewed, refreshChanges,
-        blame, history, olderPoint, newerPoint, pinPoint, goBack, goForward,
+        blame, explainLines, history, olderPoint, newerPoint, pinPoint, goBack, goForward,
         openRepository, openConflictedFile, keyboardShortcuts,
         confirmSheet, cancelSheet,
     ]

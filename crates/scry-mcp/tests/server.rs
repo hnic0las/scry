@@ -215,6 +215,7 @@ fn an_agent_connects_and_lists_the_tools() {
             "conflicts",
             "conflict",
             "resolve",
+            "lines",
             "explain",
             "suggest"
         ]
@@ -240,12 +241,12 @@ fn an_agent_connects_and_lists_the_tools() {
     );
 
     assert_eq!(
-        tools[4]["inputSchema"]["required"],
+        tools[5]["inputSchema"]["required"],
         json!(["path", "id", "text"])
     );
-    assert_eq!(tools[4]["annotations"]["destructiveHint"], false);
+    assert_eq!(tools[5]["annotations"]["destructiveHint"], false);
     assert_eq!(
-        tools[4]["inputSchema"]["properties"]["text"]["maxLength"],
+        tools[5]["inputSchema"]["properties"]["text"]["maxLength"],
         1200
     );
 
@@ -1411,4 +1412,83 @@ fn suggest_proposes_a_resolution_without_writing_it() {
     let kept = &store.answers("Sources/a.swift", AskKind::Resolve)[&id];
     assert!(kept.failed && kept.proposal.is_none());
     assert_eq!(fs::read_to_string(&file).unwrap(), before);
+}
+
+/// Lines selected in the Changes window, with no operation in progress:
+/// `lines` shows them in their change with who wrote them, an older
+/// plugin's `conflict` reads the same, and `explain` keeps the answer.
+#[test]
+fn selected_lines_are_read_and_explained_outside_an_operation() {
+    use scry_core::diff::{self, Comparison, FileDiff, Marks};
+    use scry_core::file_blame::Target;
+    use scry_core::line_asks::{self, LineStore};
+
+    let repo = Repo::new();
+    repo.commit(&[("Sources/a.swift", BASE)]);
+    fs::write(repo.path().join("Sources/a.swift"), OURS).unwrap();
+    let git = repo.cli(&repo.path());
+    let root = repo.path();
+    let comparison = Comparison::uncommitted(&git).unwrap();
+    let files = diff::changed_files(&git, &root, &comparison, &[]).unwrap();
+    let FileDiff::Text(read) =
+        diff::file_diff(&git, &root, &comparison, &files[0], Marks::Auto).unwrap()
+    else {
+        panic!("a text file");
+    };
+    let (ask, _) = line_asks::prepare(
+        "Sources/a.swift",
+        &read,
+        false,
+        1,
+        2,
+        Target::WorkingCopy,
+        "Not committed, against HEAD",
+        &[],
+        1,
+    )
+    .unwrap();
+    let id = ask.id.clone();
+    let store = LineStore::new(&root.join(".git"));
+    store.ask("Sources/a.swift", ask, &[]).unwrap();
+
+    let mut server = connected(&repo);
+    let arguments = json!({ "path": "Sources/a.swift", "id": id });
+    let shown = text(&mut server, "lines", arguments.clone());
+    assert!(
+        shown.starts_with("Sources/a.swift, lines 1 to 2, selected by the user in Scry's Changes window. Scry shows: Not committed, against HEAD.\n"),
+        "{shown}"
+    );
+    assert!(shown.contains(">     1   func first() {\n"), "{shown}");
+    assert!(shown.contains("      2 -     let x = 1\n"), "{shown}");
+    assert!(shown.contains(">     2 +     let x = 2\n"), "{shown}");
+    assert!(shown.contains("  line 1: "), "{shown}");
+    assert!(shown.contains(" Ann, "), "{shown}");
+    assert!(shown.contains("  line 2: not committed yet\n"), "{shown}");
+    assert_eq!(text(&mut server, "conflict", arguments), shown);
+
+    let explanation = "These lines set x to 2 in first(), where the commit had 1.";
+    let kept = text(
+        &mut server,
+        "explain",
+        json!({ "path": "Sources/a.swift", "id": id, "text": explanation }),
+    );
+    assert!(
+        kept.starts_with("Kept your explanation of the lines"),
+        "{kept}"
+    );
+    let answer = &store.answers("Sources/a.swift")[&id];
+    assert_eq!(answer.text, explanation);
+    assert_eq!(answer.by, "claude-code 2.1");
+    assert!(store.open_asks().is_empty());
+
+    let (refused, is_error) = call(
+        &mut server,
+        "explain",
+        json!({ "path": "Sources/a.swift", "id": "L00000000", "text": explanation }),
+    );
+    assert!(is_error);
+    assert!(
+        refused.starts_with("Nobody asked in Scry to explain the lines"),
+        "{refused}"
+    );
 }

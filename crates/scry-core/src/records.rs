@@ -460,7 +460,7 @@ fn open(ask: &Ask, answer: Option<&Answer>) -> bool {
 }
 
 /// The path [`encoded`] gave, `None` for a name it cannot have given.
-fn decoded(name: &str) -> Option<String> {
+pub(crate) fn decoded(name: &str) -> Option<String> {
     let bytes = name.as_bytes();
     let mut path = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -480,7 +480,7 @@ fn decoded(name: &str) -> Option<String> {
 /// `path` as one file name: letters, digits, `.`, `_` and `-` as they are,
 /// every other byte as `%` and two hexadecimal digits, so `a/b` and `a%2Fb`
 /// never share a file.
-fn encoded(path: &str) -> String {
+pub(crate) fn encoded(path: &str) -> String {
     path.bytes()
         .map(|byte| match byte {
             b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'_' | b'-' => {

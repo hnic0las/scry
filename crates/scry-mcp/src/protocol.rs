@@ -21,7 +21,7 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
 /// What the server tells the agent about itself when it connects.
-const INSTRUCTIONS: &str = "Scry's view of the merge, rebase, cherry-pick or revert in progress in this repository: start with overview, then conflicts(path), then conflict(path, id), and resolve(path, id, ...) to write a conflict's resolution with a reason. When git scry wait prints \"Scry asks: explain <path> <id>\", read that conflict and answer with explain(path, id, text), or explain(path, id, text, failed: true) saying why you could not. When it prints \"Scry asks: resolve <path> <id>\", read that conflict and propose a resolution with suggest(path, id, pick or text, reason): nothing is written, the user accepts it in Scry or not; or suggest(path, id, reason, failed: true) saying why you could not. Conflict ids come from the content: they survive other conflicts being resolved. Prefer picking a candidate to writing text. Never stage, commit or continue the operation: the user reviews each resolution in Scry first.";
+const INSTRUCTIONS: &str = "Scry's view of the merge, rebase, cherry-pick or revert in progress in this repository: start with overview, then conflicts(path), then conflict(path, id), and resolve(path, id, ...) to write a conflict's resolution with a reason. When git scry wait prints \"Scry asks: explain <path> <id>\", read that conflict and answer with explain(path, id, text), or explain(path, id, text, failed: true) saying why you could not. When the id starts with L, the ask is about lines the user selected in Scry's Changes window, with or without an operation in progress: read them with lines(path, id) and answer with explain the same way. When it prints \"Scry asks: resolve <path> <id>\", read that conflict and propose a resolution with suggest(path, id, pick or text, reason): nothing is written, the user accepts it in Scry or not; or suggest(path, id, reason, failed: true) saying why you could not. Conflict ids come from the content: they survive other conflicts being resolved. Prefer picking a candidate to writing text. Never stage, commit or continue the operation: the user reviews each resolution in Scry first.";
 
 /// The candidates `resolve` can pick, as their ids.
 fn picks() -> Vec<&'static str> {
@@ -108,6 +108,10 @@ impl Server {
                 let id = text(&arguments, "id")?;
                 self.tools.conflict(&path, &id, context(&arguments)?)
             }),
+            "lines" => text(&arguments, "path").and_then(|path| {
+                let id = text(&arguments, "id")?;
+                self.tools.lines(&path, &id)
+            }),
             "resolve" => text(&arguments, "path").and_then(|path| {
                 let id = text(&arguments, "id")?;
                 let resolution = resolution(&arguments)?;
@@ -130,7 +134,7 @@ impl Server {
                 return Err((
                     INVALID_PARAMS,
                     format!(
-                        "Unknown tool {name}: the tools are overview, conflicts, conflict, resolve, explain and suggest"
+                        "Unknown tool {name}: the tools are overview, conflicts, conflict, lines, resolve, explain and suggest"
                     ),
                 ));
             }
@@ -264,22 +268,40 @@ fn definitions() -> Value {
             },
         },
         {
-            "name": "explain",
-            "title": "Explain a conflict",
-            "description": "Answers an ask the user made in Scry (git scry wait prints \"Scry asks: explain <path> <id>\"): what each side meant to do, the risk of each candidate, which one looks safe and why. Scry shows it beside the conflict. Writes nothing in the repository's files.",
+            "name": "lines",
+            "title": "Selected lines",
+            "description": "The lines the user selected in Scry's Changes window and asked about (git scry wait prints \"Scry asks: explain <path> <id>\" with an id starting with L): the change around them as Scry shows it and who last wrote them. Works with no merge in progress. Answer with explain.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": path,
                     "id": {
                         "type": "string",
-                        "description": "The conflict's id, as the ask names it.",
+                        "description": "The ask's id, as git scry wait printed it (L1a2b3c4d).",
+                    },
+                },
+                "required": ["path", "id"],
+                "additionalProperties": false,
+            },
+            "annotations": read_only,
+        },
+        {
+            "name": "explain",
+            "title": "Explain a conflict or selected lines",
+            "description": "Answers an ask the user made in Scry (git scry wait prints \"Scry asks: explain <path> <id>\"). For a conflict: what each side meant to do, the risk of each candidate, which one looks safe and why. For selected lines (an id starting with L, read with lines): what they do and why they changed. Scry shows it beside the conflict or the lines. Writes nothing in the repository's files.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": path,
+                    "id": {
+                        "type": "string",
+                        "description": "The conflict's id, or the selected lines' (L1a2b3c4d), as the ask names it.",
                     },
                     "text": {
                         "type": "string",
                         "minLength": tools::FAILURE_LENGTH.start(),
                         "maxLength": tools::EXPLANATION_LENGTH.end(),
-                        "description": "2 to 4 sentences for the user (20 characters at least), naming each side by its label from overview; with failed, why you could not explain. Calling again replaces it.",
+                        "description": "2 to 4 sentences for the user (20 characters at least), naming each side of a conflict by its label from overview; with failed, why you could not explain. Calling again replaces it.",
                     },
                     "failed": {
                         "type": "boolean",
@@ -306,7 +328,7 @@ fn definitions() -> Value {
                     "path": path,
                     "id": {
                         "type": "string",
-                        "description": "The conflict's id, as the ask names it.",
+                        "description": "The conflict's id, or the selected lines' (L1a2b3c4d), as the ask names it.",
                     },
                     "pick": {
                         "type": "string",

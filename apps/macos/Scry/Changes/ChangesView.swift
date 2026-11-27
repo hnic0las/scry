@@ -76,14 +76,54 @@ struct ChangesFileArea: View {
                 ChangesFileHeader(viewModel: viewModel, file: file, trailing: trailing)
                 Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1)
             }
-            content
+            HStack(spacing: 0) {
+                content
+                if viewModel.showsExplainInspector {
+                    Rectangle().fill(Theme.Surfaces.hairline).frame(width: 1)
+                    LineExplainInspector(viewModel: viewModel)
+                        .frame(width: Metrics.inspectorWidth)
+                }
+            }
             ChangesStatusBar(
                 status: viewModel.status, live: viewModel.header.live, updatedAt: viewModel.updatedAt,
-                language: viewModel.language
+                language: viewModel.language, watching: viewModel.watching
             )
         }
         // Blame is the window's: a file shown again follows it.
         .onChange(of: viewModel.blameSwitch.isOn, initial: true) { viewModel.updateBlame() }
+        .background { hiddenShortcuts }
+        // The agent answers from outside the app: where Explain stands on
+        // the file's lines, and whether a session watches, is read every
+        // second.
+        .task(id: pollKey) {
+            guard viewModel.pollsExplanations, viewModel.canSelectLines else { return }
+            while !Task.isCancelled {
+                await viewModel.refreshExplanations()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    /// The file whose explanations are read: another file, or other
+    /// content, starts the reading again.
+    private var pollKey: String {
+        "\(viewModel.selected?.path ?? "")|\(viewModel.selected?.contentId ?? "")|\(viewModel.canSelectLines)"
+    }
+
+    /// ⌃⌘E asks about the selected lines; esc clears the selection.
+    private var hiddenShortcuts: some View {
+        Group {
+            Button("Explain the selected lines") { Task { await viewModel.explainSelection() } }
+                .keyboardShortcut(Shortcut.explainLines)
+                .disabled(viewModel.selection == nil)
+            if viewModel.selection != nil {
+                Button("Clear the selection") { viewModel.clearSelection() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .accessibilityHidden(true)
     }
 
     @ViewBuilder
@@ -681,6 +721,9 @@ struct ChangesStatusBar: View {
     /// When the list last changed by itself.
     var updatedAt: Date?
     let language: String?
+    /// Whether a Claude Code session watches the repository; `nil` where
+    /// it does not matter.
+    var watching: Bool?
 
     /// How long "updated just now" stays after a refresh.
     static let fresh: TimeInterval = 5
@@ -700,6 +743,9 @@ struct ChangesStatusBar: View {
                     }
                     .help("Scry reads the files again when they change on disk")
                 }
+            }
+            if let watching {
+                Presence(watching: watching)
             }
             if let language {
                 Text(language)
