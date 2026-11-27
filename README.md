@@ -17,6 +17,14 @@ Status: version 0.2.0, the first public release: the merge tool (the macOS app a
 
 ## Install
 
+With [Homebrew](https://brew.sh), one line installs the app and the `git scry` command:
+
+```sh
+brew install hnic0las/scry/scry
+```
+
+Then go to step 3. Without Homebrew:
+
 1. **The app.** Download Scry from the [releases](https://github.com/hnic0las/scry/releases/latest) and move it to the Applications folder, or build it from this repository (`scripts/install-app.sh`, see [macOS app](#macos-app)). It needs macOS 15 or later on a Mac with Apple silicon.
 2. **The `git scry` command.** Scry › Settings › CLI › **Install git scry** links the app's `git-scry` into a folder of your terminal's `PATH` (the first of `~/.local/bin`, `/opt/homebrew/bin` or `/usr/local/bin` it can write to), or shows the commands to run when it cannot. The link follows the app's updates.
 3. **git's merge tool** (optional). Scry › Settings › CLI › **Use Scry as git's Merge Tool** sets `merge.tool`, `mergetool.scry.cmd` and `mergetool.scry.trustExitCode` in your global git configuration, and keeps the merge tool it replaces, to put it back with **Stop Using Scry**.
@@ -124,7 +132,6 @@ Scry's merges are checked against `git merge-file` on generated conflicts, line 
 ## Roadmap
 
 - **Suggest for a whole file** and **Ask** on a conflict, and Explain and Suggest with other models: your own Claude API key, a local model, Apple's on-device model. Every proposal keeps its source, is checked by code and is accepted by you; no agent stages, commits, pushes or posts.
-- **Installing with Homebrew.**
 - **More files merged well**: storyboards and `.xib` files; migrations both sides added (Django, Alembic, Rails `schema.rb`), which leave two heads without any text conflict; Jupyter notebooks, `.strings` in UTF-16, Android `strings.xml`, `.po`, `.resx`; `CHANGELOG.md`, where both sides add at the top; running `npm install` or `yarn install` directly to repair their lockfiles.
 - **A diff tool**: `git difftool` and `git scry diff [ref..ref]`, with a side-by-side view and the list of changed files.
 - **Review of branches and pull requests**, with built-in checks such as secret scanning.
