@@ -13,7 +13,7 @@ Scry (`git-scry`) is a local-first tool, integrated with git, for merging and re
 
 Status: version 0.2.0 is the first public release: the merge tool (the macOS app and the `git-scry` CLI) and the Claude Code plugin. The diff viewer described below is on `main` and ships with the next release. Review of branches and pull requests comes next (see [Roadmap](#roadmap)).
 
-![The merge editor: ours, the result and theirs, with the inspector and each candidate checked by parsing](.github/screenshots/editor-light.png)
+![The merge editor in use: theirs for the first conflict, then both sides for the second, which Scry marks "Does not parse", then ours, which parses: 2 of 2 conflicts resolved](.github/screenshots/merge-editor.gif)
 
 ## Install
 
@@ -95,6 +95,8 @@ Two more commands are for the plugin, not for you to run: `git scry mcp` (Scry's
 
 ### Conflict by conflict
 
+![The merge editor: ours, the result and theirs, with the inspector and each candidate checked by parsing](.github/screenshots/editor-light.png)
+
 - **One key per choice**: ours, theirs, both in either order, base or none, from the keyboard, the lens row's menu, the › ‹ buttons beside each conflict or the inspector.
 - **Edit the result by hand**, conflict by conflict, with undo and redo throughout.
 - **Your choices are kept**: a file resolved in Scry, in the app or through `git mergetool`, opens again with the candidate or the text you chose for each conflict, as long as the file still holds it.
@@ -123,7 +125,7 @@ Each of these gets its own view:
 
 ### Reading a change
 
-Screenshots of the diff viewer are still to come.
+![Reading a change: each file marked viewed in turn with ⌥⌘V, its folder closing once all its files are viewed, then lines selected and explained by Claude Code](.github/screenshots/diff-viewer.gif)
 
 - **The whole change in one window**: `git scry diff` lists the files that differ and shows the selected one **whole**, not as hunks, with its changes coloured in place, syntax colours and word-level marks. Unified by default, or split (⌥⌘L).
 - **The list as you want it**: by folder or flat, in git's groups (Staged, Not staged, Untracked) for what is not committed. A change map beside the file has one mark per block; ⌥⌘↓ goes from block to block, then to the next file.
@@ -135,6 +137,14 @@ Screenshots of the diff viewer are still to come.
 - **Explain the selected lines** (⌃⌘E): click line numbers to select whole lines, and your Claude Code session says what they do and why they changed. The explanation stays with its lines, and says so when they changed after it was written. Nothing is written to your files.
 - **`git difftool`** opens Scry too, in a reduced window: git hands over two files and nothing else, so it has no list, no history and no blame.
 - Read only: the diff viewer never stages, commits or changes a file.
+
+![The Changes window: the files by folder in git's groups, the selected file whole with its changes in place, and the inspector with the file's facts, its blocks and an explanation](.github/screenshots/diff-changes-light.png)
+
+![Explain on selected lines: lines 14 to 20 selected in the gutter, and Claude Code's explanation in the inspector](.github/screenshots/diff-explain-light.png)
+
+![One file's history: each commit that touched it, and what the selected one changed](.github/screenshots/diff-history-light.png)
+
+![Blame: the age and author of each line beside the change, lines not committed marked as such](.github/screenshots/diff-blame-light.png)
 
 ### With Claude Code
 
