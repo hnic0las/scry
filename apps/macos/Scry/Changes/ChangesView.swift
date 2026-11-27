@@ -78,9 +78,9 @@ struct ChangesFileArea: View {
             }
             HStack(spacing: 0) {
                 content
-                if viewModel.showsExplainInspector {
+                if viewModel.showsInspector {
                     Rectangle().fill(Theme.Surfaces.hairline).frame(width: 1)
-                    LineExplainInspector(viewModel: viewModel)
+                    ChangesInspector(viewModel: viewModel)
                         .frame(width: Metrics.inspectorWidth)
                 }
             }
@@ -246,6 +246,22 @@ struct ChangesToolbar: ToolbarContent {
                 .disabled(!history.enabled)
             }
         }
+        if let viewModel, viewModel.canSelectLines {
+            ToolbarItem {
+                // The key is the file area's: it also works with this
+                // button out of the toolbar.
+                Button { Task { await viewModel.explainSelection() } } label: {
+                    Label("Explain", systemImage: "sparkles")
+                }
+                .labelStyle(.titleAndIcon)
+                .help(
+                    viewModel.selection == nil
+                        ? "Click line numbers to select lines, then ask Claude Code to explain them"
+                        : Shortcut.explainLines.help("Ask Claude Code what the selected lines do and why they changed")
+                )
+                .disabled(viewModel.selection == nil)
+            }
+        }
         if let reload {
             ToolbarItem {
                 Button(action: reload) {
@@ -253,6 +269,15 @@ struct ChangesToolbar: ToolbarContent {
                 }
                 .keyboardShortcut(Shortcut.refreshChanges)
                 .help(Shortcut.refreshChanges.help())
+            }
+        }
+        if let viewModel, viewModel.canShowInspector {
+            ToolbarItem {
+                Toggle(isOn: Binding(get: { viewModel.inspectorShown }, set: { _ in viewModel.toggleInspector() })) {
+                    Image(systemName: "sidebar.right")
+                }
+                .keyboardShortcut(Shortcut.toggleInspector)
+                .help(Shortcut.toggleInspector.help(viewModel.inspectorShown ? "Hide the inspector" : "Show the inspector"))
             }
         }
     }
@@ -305,18 +330,14 @@ extension FocusedValues {
 
 /// The list of changed files, with what is compared above it.
 struct ChangesSidebar: View {
-    let viewModel: ChangesViewModel
+    @Bindable var viewModel: ChangesViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(viewModel.header.title)
-                        .font(Metrics.headline)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                    ListModeButton(mode: viewModel.listMode, toggle: viewModel.toggleListMode)
-                }
+                Text(viewModel.header.title)
+                    .font(Metrics.headline)
+                    .lineLimit(1)
                 Text(viewModel.scopeDetail)
                     .font(Metrics.caption)
                     .foregroundStyle(Theme.Surfaces.textSecondary)
@@ -330,6 +351,8 @@ struct ChangesSidebar: View {
                         ViewedProgress(share: viewModel.viewedShare, summary: viewModel.viewedSummary)
                             .padding(.top, 3)
                     }
+                    ListModePicker(mode: $viewModel.listMode)
+                        .padding(.top, 6)
                 }
             }
             .padding(.horizontal, 12)
@@ -348,6 +371,14 @@ struct ChangesSidebar: View {
                                 ChangesSectionHeader(
                                     title: title, count: section.files.count, collapsed: section.collapsed
                                 ) { viewModel.toggle(group) }
+                                    .contextMenu {
+                                        if viewModel.canMarkViewed {
+                                            Button("Mark All as Viewed") { viewModel.setViewed(in: group, true) }
+                                                .disabled(section.files.allSatisfy { $0.viewed == .viewed })
+                                            Button("Mark All as Not Viewed") { viewModel.setViewed(in: group, false) }
+                                                .disabled(!section.files.contains { $0.viewed == .viewed })
+                                        }
+                                    }
                             }
                             ForEach(section.collapsed ? [] : section.rows) { row in
                                 switch row {
@@ -384,23 +415,21 @@ struct ChangesSidebar: View {
     }
 }
 
-/// The sidebar's button between the list by folder and the flat one: it
-/// shows the list a click gives.
-struct ListModeButton: View {
-    let mode: ChangesViewModel.ListMode
-    let toggle: () -> Void
+/// The sidebar's choice between the flat list and the list by folder,
+/// as the design's two segments, with their names.
+struct ListModePicker: View {
+    @Binding var mode: ChangesViewModel.ListMode
 
     var body: some View {
-        Button(action: toggle) {
-            Image(systemName: mode == .folders ? "list.bullet" : "list.bullet.indent")
-                .font(.system(size: 12))
-                .foregroundStyle(Theme.Surfaces.textSecondary)
-                .frame(width: 20, height: 18)
-                .contentShape(Rectangle())
+        Picker("Show the files", selection: $mode) {
+            Label("List", systemImage: "list.bullet").tag(ChangesViewModel.ListMode.flat)
+            Label("Folders", systemImage: "folder").tag(ChangesViewModel.ListMode.folders)
         }
-        .buttonStyle(.plain)
-        .help(mode == .folders ? "Show the files as a flat list" : "Show the files by folder")
-        .accessibilityLabel(mode == .folders ? "Show as a flat list" : "Show by folder")
+        .pickerStyle(.segmented)
+        .labelStyle(.titleAndIcon)
+        .labelsHidden()
+        .controlSize(.small)
+        .help("Show the files one after the other, or under their folders")
     }
 }
 
@@ -413,6 +442,16 @@ struct ChangesFolderRow: View {
     static let height: CGFloat = 24
     /// How far a row moves right for each folder above it.
     static let indent: CGFloat = 12
+
+    /// "6 · +148 −31": the files under it and their lines.
+    private var counts: String {
+        var parts = ["\(folder.count)"]
+        var lines: [String] = []
+        if folder.added > 0 { lines.append("+\(folder.added)") }
+        if folder.removed > 0 { lines.append("−\(folder.removed)") }
+        if !lines.isEmpty { parts.append(lines.joined(separator: " ")) }
+        return parts.joined(separator: " · ")
+    }
 
     var body: some View {
         Button(action: toggle) {
@@ -428,9 +467,11 @@ struct ChangesFolderRow: View {
                     .lineLimit(1)
                     .truncationMode(.head)
                 Spacer(minLength: 4)
-                if folder.collapsed {
-                    Text("\(folder.count)").font(Metrics.caption).monospacedDigit()
-                }
+                Text(counts)
+                    .font(Metrics.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.Surfaces.textTertiary)
+                    .fixedSize()
             }
             .foregroundStyle(Theme.Surfaces.textSecondary)
             .padding(.leading, 12 + CGFloat(folder.depth) * Self.indent)

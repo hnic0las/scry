@@ -46,8 +46,8 @@ pub use agent::{
 };
 pub use changes::{
     ChangeGroup, ChangeSet, ChangeState, ChangesFile, ChangesHeader, DiffChange, DiffLine, DiffRow,
-    DiffRowKind, FileDiffInfo, RepositoryWaiting, TextDiffInfo, UnifiedDiffLine, UnifiedKind,
-    repository_waiting,
+    DiffRowKind, FileDiffInfo, FileFacts, LastCommit, RepositoryWaiting, TextDiffInfo,
+    UnifiedDiffLine, UnifiedKind, repository_waiting,
 };
 pub use cli_command::{CliCommandState, cli_command_state, install_cli_command};
 pub use file_blame::{BlameCommitInfo, BlameLines, BlameProgress, FileBlame, blame_age};

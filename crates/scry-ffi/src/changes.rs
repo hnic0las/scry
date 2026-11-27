@@ -205,6 +205,29 @@ pub enum FileDiffInfo {
     Conflicted,
 }
 
+/// The commit that last touched a file.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct LastCommit {
+    pub id: String,
+    /// The id cut to seven characters.
+    pub short_id: String,
+    pub subject: String,
+    pub author: String,
+    /// When it was written, in seconds since 1970.
+    pub time: i64,
+}
+
+/// What the inspector says of a file beside its diff. Everything is
+/// `None` without a repository.
+#[derive(Debug, Clone, PartialEq, Eq, Default, uniffi::Record)]
+pub struct FileFacts {
+    /// Sizes in bytes; `None` for a side the file is not on.
+    pub old_size: Option<u64>,
+    pub new_size: Option<u64>,
+    /// `None` for a file no commit holds yet.
+    pub last_commit: Option<LastCommit>,
+}
+
 /// What waits in a repository, for the list of recent ones.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum RepositoryWaiting {
@@ -656,6 +679,52 @@ impl ChangeSet {
 
 #[uniffi::export]
 impl ChangeSet {
+    /// The sizes and the last commit of the file at `index` of the last
+    /// list: slower than the list, so asked for the open file only.
+    pub fn file_facts(&self, index: u32) -> FileFacts {
+        let Some(file) = self
+            .lock()
+            .get(index as usize)
+            .map(|listed| listed.file.clone())
+        else {
+            return FileFacts::default();
+        };
+        let Source::Repository {
+            git, root, scope, ..
+        } = &self.source
+        else {
+            return FileFacts::default();
+        };
+        if file.submodule || file.state == diff::FileState::Conflicted {
+            return FileFacts::default();
+        }
+        let (old_size, new_size) = diff::sizes(git, root, &scope.comparison, &file);
+        // Where the file is to be found in a commit: a file renamed and
+        // not committed still has its old name there, and a file a
+        // commit deleted is in the older one.
+        let deleted = file.state == diff::FileState::Deleted;
+        let (from, path) = match &scope.comparison {
+            Comparison::Commits { old, .. } if deleted => (Some(old.as_str()), &file.path),
+            Comparison::Commits { new, .. } => (Some(new.as_str()), &file.path),
+            _ => (None, file.old_path.as_ref().unwrap_or(&file.path)),
+        };
+        let last_commit = history::commits(git, from, path, 0, 1)
+            .ok()
+            .and_then(|page| page.points.into_iter().next())
+            .map(|point| LastCommit {
+                short_id: point.short_id().to_string(),
+                id: point.id,
+                subject: point.subject,
+                author: point.author,
+                time: point.time,
+            });
+        FileFacts {
+            old_size,
+            new_size,
+            last_commit,
+        }
+    }
+
     /// The blame of the new side of the file at `index` of the last
     /// list, not read yet. Refused where there is nothing to blame: no
     /// repository (`git difftool`), or a file with no new side.
@@ -1073,6 +1142,29 @@ mod tests {
     /// A file marked viewed stays so until its content changes, then is
     /// "changed since viewed"; the marks live under the git folder, per
     /// scope, and a window on two files has none.
+    #[test]
+    fn a_file_says_its_sizes_and_its_last_commit() {
+        let dir = repository(&[("a.rs", "one\n")]);
+        fs::write(dir.path().join("a.rs"), "one\ntwo\n").unwrap();
+        fs::write(dir.path().join("new.rs"), "x\n").unwrap();
+        let changes =
+            ChangeSet::open(dir.path().display().to_string(), false, None, Vec::new()).unwrap();
+        let files = changes.files().unwrap();
+        let index = |name: &str| files.iter().find(|file| file.path == name).unwrap().index;
+
+        let facts = changes.file_facts(index("a.rs"));
+        assert_eq!((facts.old_size, facts.new_size), (Some(4), Some(8)));
+        let commit = facts.last_commit.unwrap();
+        assert_eq!(commit.short_id.len(), 7);
+        assert!(commit.id.starts_with(&commit.short_id) && commit.time > 0);
+
+        // A file no commit holds has a size and no commit.
+        let facts = changes.file_facts(index("new.rs"));
+        assert_eq!((facts.old_size, facts.new_size), (None, Some(2)));
+        assert_eq!(facts.last_commit, None);
+        assert_eq!(changes.file_facts(99), FileFacts::default());
+    }
+
     #[test]
     fn a_file_is_marked_viewed_until_it_changes() {
         let dir = repository(&[("a.rs", "one\n"), ("b.rs", "one\n")]);

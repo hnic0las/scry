@@ -10,6 +10,8 @@ protocol ChangesSource: Sendable {
     func fileDiff(index: UInt32, allMarks: Bool) throws -> FileDiffInfo
     /// Marks the file at `index` of the last list viewed, or not.
     func setViewed(index: UInt32, viewed: Bool) throws
+    /// The sizes and the last commit of the file at `index`.
+    func fileFacts(index: UInt32) -> FileFacts
     /// The blame of the new side of the file at `index` of the last list,
     /// not read yet.
     func blameSource(index: UInt32) throws -> BlameSource
@@ -23,6 +25,10 @@ protocol ChangesSource: Sendable {
 }
 
 extension ChangesSource {
+    func fileFacts(index: UInt32) -> FileFacts {
+        FileFacts(oldSize: nil, newSize: nil, lastCommit: nil)
+    }
+
     func lineExplanations(index: UInt32) -> LineExplanations {
         LineExplanations(available: false, watching: false, items: [])
     }
@@ -103,7 +109,31 @@ final class ChangesViewModel {
         let depth: Int
         /// The files under it, however deep.
         let count: Int
+        /// Their lines added and removed; binary files count for none.
+        let added: Int
+        let removed: Int
         let collapsed: Bool
+    }
+
+    /// A block of the open file, for the inspector's list.
+    struct ChangeRow: Identifiable, Equatable {
+        /// Its place among the file's blocks, from 0.
+        let id: Int
+        /// The number of its first line.
+        let line: Int
+        /// Its first line, without the indentation.
+        let text: String
+        let added: Int
+        let removed: Int
+    }
+
+    /// A line of the inspector's "File": "Size", "1.4 KB → 1.9 KB".
+    struct Fact: Identifiable, Equatable {
+        let title: String
+        let value: String
+        /// More in the tooltip: the last commit's subject and author.
+        var help: String?
+        var id: String { title }
     }
 
     enum Row: Identifiable, Equatable {
@@ -188,6 +218,17 @@ final class ChangesViewModel {
         }
     }
 
+    /// The user wants the inspector beside the file.
+    var inspectorShown: Bool {
+        didSet {
+            guard inspectorShown != oldValue else { return }
+            defaults.set(inspectorShown, forKey: Self.inspectorKey)
+        }
+    }
+
+    /// The open file's sizes and last commit, once read.
+    private(set) var facts: FileFacts?
+
     /// The file's place among those `git difftool` opens in turn.
     let queue: Queue?
     var layout: Layout {
@@ -206,6 +247,7 @@ final class ChangesViewModel {
 
     static let layoutKey = "changesLayout"
     static let listModeKey = "changesListMode"
+    static let inspectorKey = "changesInspector"
 
     @ObservationIgnored private let source: ChangesSource
     @ObservationIgnored private let defaults: UserDefaults
@@ -283,6 +325,7 @@ final class ChangesViewModel {
         header = source.header()
         layout = defaults.string(forKey: Self.layoutKey).flatMap(Layout.init) ?? .unified
         listMode = defaults.string(forKey: Self.listModeKey).flatMap(ListMode.init) ?? .folders
+        inspectorShown = defaults.object(forKey: Self.inspectorKey) as? Bool ?? true
     }
 
     // MARK: The list
@@ -301,7 +344,7 @@ final class ChangesViewModel {
             }
             loadingFiles = false
             // Read again, the file stays on the block it was on.
-            await select(kept ?? files.first, at: kept == nil ? 0 : currentChange)
+            await select(kept ?? listed.first, at: kept == nil ? 0 : currentChange)
         } catch {
             loadingFiles = false
             listError = error.message
@@ -335,7 +378,7 @@ final class ChangesViewModel {
             arrived[file.path] = before[file.path] == nil ? .new : arrived[file.path] ?? .changed
         }
         let old = selected
-        let oldIndex = old.flatMap { files.firstIndex(of: $0) }
+        let oldIndex = old.flatMap { listed.firstIndex(of: $0) }
         files = fresh
         listError = nil
         loadingFiles = false
@@ -349,6 +392,7 @@ final class ChangesViewModel {
         } else {
             self.arrived = arrived
             // The file no longer differs: the one that took its place.
+            let fresh = listed
             let next = oldIndex.map { min($0, fresh.count - 1) }.flatMap { fresh.indices.contains($0) ? fresh[$0] : nil }
             await select(next ?? fresh.first)
         }
@@ -366,6 +410,7 @@ final class ChangesViewModel {
         let before = diff
         let top = topRow
         content = result
+        readFacts(file)
         atFileEdge = nil
         restartBlame()
         // The lines moved under the selection.
@@ -447,6 +492,15 @@ final class ChangesViewModel {
         }
     }
 
+    /// A group's menu: marks every file of the group viewed, or removes
+    /// their marks.
+    func setViewed(in group: ChangeGroup, _ viewed: Bool) {
+        for file in files where file.group == group && (file.viewed == .viewed) != viewed {
+            setViewed(file, viewed)
+            if viewedError != nil { return }
+        }
+    }
+
     /// The box of a row or of the file header: viewed, or not.
     func toggleViewed(_ file: ChangesFile) {
         setViewed(file, file.viewed != .viewed)
@@ -458,8 +512,9 @@ final class ChangesViewModel {
         guard let selected, canMarkViewed else { return }
         guard selected.viewed != .viewed else { return setViewed(selected, false) }
         setViewed(selected, true)
+        // After this file first, then from the top, in the list's order.
+        let files = listed
         guard viewedError == nil, let index = files.firstIndex(where: { $0.path == selected.path }) else { return }
-        // After this file first, then from the top.
         let order = files[(index + 1)...] + files[..<index]
         if let next = order.first(where: { $0.viewed != .viewed }) {
             await select(next)
@@ -486,6 +541,16 @@ final class ChangesViewModel {
     private static let groups: [(ChangeGroup, String)] = [
         (.staged, "Staged"), (.notStaged, "Not staged"), (.untracked, "Untracked"),
     ]
+
+    /// The files in the order the list shows them, hidden ones included:
+    /// the window opens on the first, and previous and next file follow
+    /// that order.
+    var listed: [ChangesFile] {
+        guard header.grouped else { return files }
+        // A file in no group is not listed; it still has its place.
+        return Self.groups.flatMap { group, _ in files.filter { $0.group == group } }
+            + files.filter { $0.group == nil }
+    }
 
     /// Shows the folders above a file again.
     private func openFolders(of file: ChangesFile) {
@@ -548,8 +613,11 @@ final class ChangesViewModel {
                 }
                 let key = "\(section)/\(folder.path)"
                 let collapsed = collapsedFolders.contains(key)
+                let files = folder.files
                 rows.append(.folder(Folder(
-                    key: key, name: name, path: folder.path, depth: depth, count: folder.count,
+                    key: key, name: name, path: folder.path, depth: depth, count: files.count,
+                    added: files.reduce(0) { $0 + Int($1.added ?? 0) },
+                    removed: files.reduce(0) { $0 + Int($1.removed ?? 0) },
                     collapsed: collapsed
                 )))
                 if !collapsed { add(folder, depth: depth + 1, section: section, to: &rows) }
@@ -771,11 +839,83 @@ final class ChangesViewModel {
         return explanations.watching
     }
 
-    /// The inspector is shown: lines are selected, or the file has
-    /// explanations.
+    /// The inspector has Explain to show: lines are selected, or the
+    /// file has explanations.
     var showsExplainInspector: Bool {
         guard canSelectLines, let explanations, explanations.available else { return false }
         return selection != nil || !explanations.items.isEmpty
+    }
+
+    // MARK: Inspector
+
+    /// The window can have an inspector: not git difftool's, which has
+    /// one file and nothing to say of it.
+    var canShowInspector: Bool { !header.reduced }
+
+    /// The inspector is beside the file.
+    var showsInspector: Bool { canShowInspector && inspectorShown && selected != nil }
+
+    /// With lines selected the inspector is about them; otherwise about
+    /// the file, with its explanations below.
+    var inspectorIsAboutLines: Bool { showsExplainInspector && selection != nil }
+
+    /// The key and the toolbar's button.
+    func toggleInspector() {
+        guard canShowInspector else { return }
+        inspectorShown.toggle()
+    }
+
+    /// Reads the open file's sizes and last commit, off the main thread.
+    private func readFacts(_ file: ChangesFile) {
+        guard canShowInspector else { return }
+        let source = source
+        let asked = request
+        Task { [weak self] in
+            let facts = await Task.detached { source.fileFacts(index: file.index) }.value
+            guard let self, self.request == asked else { return }
+            self.facts = facts
+        }
+    }
+
+    /// "File": the state, the lines, the sizes and the last commit, each
+    /// when there is one to say.
+    var fileFacts: [Fact] {
+        guard let selected else { return [] }
+        var rows = [Fact(title: "State", value: Self.stateName(selected))]
+        if let added = selected.added, let removed = selected.removed {
+            rows.append(Fact(title: "Lines", value: "+\(added) −\(removed)"))
+        }
+        if let facts {
+            let sizes = [facts.oldSize, facts.newSize].compactMap { $0 }.map { Self.size($0) }
+            if !sizes.isEmpty { rows.append(Fact(title: "Size", value: sizes.joined(separator: " → "))) }
+            if let commit = facts.lastCommit {
+                let when = ExplainBlock.relative(UInt64(max(commit.time, 0)) * 1000)
+                rows.append(Fact(
+                    title: "Last commit", value: "\(commit.shortId) · \(when)",
+                    help: "\(commit.subject)\n\(commit.author)"
+                ))
+            }
+        }
+        return rows
+    }
+
+    /// "Changes in this file": one row per block.
+    var changeRows: [ChangeRow] {
+        guard let diff else { return [] }
+        return diff.changes.enumerated().map { index, change in
+            let first = Int(change.firstLine)
+            let line = diff.unified.indices.contains(first) ? diff.unified[first] : nil
+            let number = line.flatMap { $0.new ?? $0.old }.map(Int.init) ?? 0
+            var text = ""
+            if let line {
+                let side = line.kind == .removed ? diff.oldLines : diff.newLines
+                let at = Int((line.kind == .removed ? line.old : line.new) ?? 0) - 1
+                if side.indices.contains(at) { text = side[at].text.trimmingCharacters(in: .whitespaces) }
+            }
+            return ChangeRow(
+                id: index, line: number, text: text, added: Int(change.added), removed: Int(change.removed)
+            )
+        }
     }
 
     /// The strip beside `line`, and its explanation's id.
@@ -797,6 +937,8 @@ final class ChangesViewModel {
     /// when they are explained already.
     func explainSelection() async {
         guard let selection else { return }
+        // The answer is read in the inspector.
+        inspectorShown = true
         await ask(selection)
     }
 
@@ -848,6 +990,7 @@ final class ChangesViewModel {
         selection = Int(item.first)...Int(item.last)
         selectionAnchor = Int(item.first)
         openExplanation = item.id
+        inspectorShown = true
         lineRow = row(ofLine: Int(item.first))
         scrollRequest += 1
     }
@@ -856,6 +999,7 @@ final class ChangesViewModel {
     /// shows it whole.
     func open(_ id: String) {
         openExplanation = id
+        inspectorShown = true
     }
 
     func toggleExpanded(_ id: String) {
@@ -902,7 +1046,9 @@ final class ChangesViewModel {
         shortcuts.append(.changesLayout)
         if canBlame { shortcuts.append(.blame) }
         if canShowHistory { shortcuts.append(.history) }
+        if canSelectLines, selection != nil { shortcuts.append(.explainLines) }
         if !header.reduced { shortcuts.append(.refreshChanges) }
+        if canShowInspector { shortcuts.append(.toggleInspector) }
         return shortcuts
     }
 
@@ -913,7 +1059,6 @@ final class ChangesViewModel {
         if canGoToPreviousFile { shortcuts.append(.previousFile) }
         if canGoToNextFile { shortcuts.append(.nextFile) }
         if canMarkViewed, selected != nil { shortcuts.append(.viewed) }
-        if selection != nil { shortcuts.append(.explainLines) }
         if !header.reduced { shortcuts.append(.openRepository) }
         shortcuts.append(.keyboardShortcuts)
         return shortcuts
@@ -934,6 +1079,7 @@ final class ChangesViewModel {
 
     /// "4 of 12", the selected file's place in the list.
     var filePosition: String? {
+        let files = listed
         guard let selected, let index = files.firstIndex(of: selected) else { return nil }
         return "\(index + 1) of \(files.count)"
     }
@@ -950,6 +1096,7 @@ final class ChangesViewModel {
     }
 
     private func neighbour(_ step: Int) -> ChangesFile? {
+        let files = listed
         guard let selected, let index = files.firstIndex(of: selected) else { return nil }
         let target = index + step
         return files.indices.contains(target) ? files[target] : nil
@@ -971,6 +1118,7 @@ final class ChangesViewModel {
         openExplanation = nil
         explainError = nil
         self.allMarks = allMarks
+        facts = nil
         if let file { arrived[file.path] = nil }
         // A file reached from the keyboard is shown in the list too.
         if let group = file?.group { collapsed.remove(group) }
@@ -994,6 +1142,7 @@ final class ChangesViewModel {
         guard request == asked else { return }
         content = result
         restartBlame()
+        readFacts(file)
         if case .text(let diff) = result, !diff.changes.isEmpty {
             currentChange = min(max(change, 0), diff.changes.count - 1)
         }
@@ -1306,11 +1455,11 @@ private final class FolderNode {
     }
 
     /// The files under it, however deep.
-    var count: Int {
-        children.reduce(0) { sum, child in
+    var files: [ChangesFile] {
+        children.flatMap { child in
             switch child {
-            case let .folder(folder): sum + folder.count
-            case .file: sum + 1
+            case let .folder(folder): folder.files
+            case let .file(file): [file]
             }
         }
     }

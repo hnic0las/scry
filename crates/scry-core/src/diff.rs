@@ -926,16 +926,7 @@ pub fn file_diff(
     }
     let patch = parse_patch(&String::from_utf8_lossy(&output.stdout));
     if patch.binary {
-        let old_path = file.old_path.as_deref().unwrap_or(&file.path);
-        // An added file has no old blob, and git then gives no size.
-        let old_size = blob_size(git, &comparison.old_blob(old_path));
-        let new_size = match (file.state, comparison.new_blob(&file.path)) {
-            (FileState::Deleted, _) => None,
-            (_, Some(blob)) => blob_size(git, &blob),
-            (_, None) => fs::metadata(root.join(&file.path))
-                .ok()
-                .map(|metadata| metadata.len()),
-        };
+        let (old_size, new_size) = sizes(git, root, comparison, file);
         return Ok(FileDiff::Binary { old_size, new_size });
     }
     if patch.lines.is_empty() && file.state != FileState::Deleted {
@@ -955,6 +946,27 @@ pub fn file_diff(
         return Ok(FileDiff::Text(TextDiff::unchanged(Text::of(&bytes))));
     }
     Ok(FileDiff::Text(TextDiff::from_patch(patch, marks)))
+}
+
+/// The sizes in bytes of the two sides of `file`, a file of
+/// `changed_files(comparison)`; `None` for a side the file is not on.
+pub fn sizes(
+    git: &dyn Git,
+    root: &Path,
+    comparison: &Comparison,
+    file: &ChangedFile,
+) -> (Option<u64>, Option<u64>) {
+    let old_path = file.old_path.as_deref().unwrap_or(&file.path);
+    // An added file has no old blob, and git then gives no size.
+    let old = blob_size(git, &comparison.old_blob(old_path));
+    let new = match (file.state, comparison.new_blob(&file.path)) {
+        (FileState::Deleted, _) => None,
+        (_, Some(blob)) => blob_size(git, &blob),
+        (_, None) => fs::metadata(root.join(&file.path))
+            .ok()
+            .map(|metadata| metadata.len()),
+    };
+    (old, new)
 }
 
 /// The diff of two versions of one file under whatever names they have,

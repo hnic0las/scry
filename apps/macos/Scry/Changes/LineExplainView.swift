@@ -30,6 +30,7 @@ struct LineSelectGesture: ViewModifier {
                         }
                         .onEnded { _ in lines.model.releaseLine() }
                 )
+                .help("Click to select this line, shift-click or drag for more, then Explain (\(Shortcut.explainLines.keys))")
                 .accessibilityAddTraits(.isButton)
                 .accessibilityHint("Selects the line, to explain it")
         } else {
@@ -136,17 +137,23 @@ struct SelectionBar: View {
     }
 }
 
-/// The inspector of the Changes window: the selection and its Explain
-/// button, then the explanations of the file, the one in hand whole and
-/// the others folded.
-struct LineExplainInspector: View {
+/// The inspector of the Changes window. With nothing selected: the file
+/// and its blocks, then its explanations. With lines selected: the
+/// selection and its Explain button, then the explanations, the one in
+/// hand whole and the others folded.
+struct ChangesInspector: View {
     let viewModel: ChangesViewModel
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    if let selection = viewModel.selection, viewModel.currentExplanation == nil {
+                    if !viewModel.inspectorIsAboutLines {
+                        FileFactsSection(viewModel: viewModel)
+                        ChangeRowsSection(viewModel: viewModel)
+                    }
+                    if viewModel.inspectorIsAboutLines, let selection = viewModel.selection,
+                       viewModel.currentExplanation == nil {
                         title("Selection")
                         Text(ChangesViewModel.linesLabel(selection))
                             .font(Metrics.headline)
@@ -158,10 +165,10 @@ struct LineExplainInspector: View {
                             cancel: {}, toggleExpanded: {}, about: .lines
                         )
                     }
-                    let explained = viewModel.explainedLines
+                    let explained = viewModel.showsExplainInspector ? viewModel.explainedLines : []
                     if !explained.isEmpty {
                         title("Explanations in this file · \(explained.count)")
-                            .padding(.top, viewModel.selection != nil && viewModel.currentExplanation == nil ? 6 : 0)
+                            .padding(.top, viewModel.selection == nil || viewModel.currentExplanation == nil ? 6 : 0)
                         ForEach(explained) { one in
                             explanation(one).id(one.id)
                         }
@@ -256,5 +263,86 @@ struct FoldedExplanation: View {
         guard let answer = explained.item.answer else { return "" }
         let stale = explained.item.stale ? " · the lines changed since" : ""
         return "\(answer.by) · \(ExplainBlock.relative(answer.at))\(stale)"
+    }
+}
+
+/// "File" in the inspector: the state, the lines, the sizes, the last
+/// commit.
+struct FileFactsSection: View {
+    let viewModel: ChangesViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("File")
+                .font(Metrics.captionBold)
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+            ForEach(viewModel.fileFacts) { fact in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(fact.title)
+                        .foregroundStyle(Theme.Surfaces.textSecondary)
+                        .frame(width: 84, alignment: .leading)
+                    Text(fact.value)
+                        .foregroundStyle(Theme.Surfaces.text)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                }
+                .font(Metrics.callout)
+                .help(fact.help ?? "")
+            }
+        }
+    }
+}
+
+/// "Changes in this file" in the inspector: one row per block, the
+/// current one tinted; a click goes there.
+struct ChangeRowsSection: View {
+    let viewModel: ChangesViewModel
+
+    var body: some View {
+        let rows = viewModel.changeRows
+        if !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Changes in this file · \(rows.count)")
+                    .font(Metrics.captionBold)
+                    .foregroundStyle(Theme.Surfaces.textSecondary)
+                    .monospacedDigit()
+                    .padding(.top, 6)
+                VStack(spacing: 0) {
+                    ForEach(rows) { row in
+                        Button { viewModel.go(to: row.id) } label: {
+                            HStack(spacing: 8) {
+                                Text("\(row.line)")
+                                    .foregroundStyle(Theme.Surfaces.textSecondary)
+                                    .frame(width: 34, alignment: .leading)
+                                Text(row.text)
+                                    .foregroundStyle(Theme.Surfaces.text)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                Spacer(minLength: 4)
+                                ChangesCounts(added: UInt32(row.added), removed: UInt32(row.removed))
+                            }
+                            .font(.system(size: 11, design: .monospaced))
+                            .padding(.horizontal, 8)
+                            .frame(height: 24)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5)
+                                    .fill(row.id == viewModel.currentChange ? Theme.Interaction.selection : Color.clear)
+                            )
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Line \(row.line), \(row.added) added, \(row.removed) removed")
+                    }
+                }
+                .padding(3)
+                .background(
+                    RoundedRectangle(cornerRadius: Metrics.cardCornerRadius)
+                        .fill(Theme.Surfaces.pane)
+                        .stroke(Theme.Surfaces.hairline)
+                )
+            }
+        }
     }
 }

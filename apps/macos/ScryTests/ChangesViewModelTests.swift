@@ -10,6 +10,7 @@ final class FakeChanges: ChangesSource, @unchecked Sendable {
     var grouped = true
     var title = "Not committed"
     var singleFile = false
+    var reduced = false
     var hasHistory = true
     var historyFrom: String?
     var failure: ScryError?
@@ -24,7 +25,7 @@ final class FakeChanges: ChangesSource, @unchecked Sendable {
         ChangesHeader(
             repository: "offline-sync", root: "/r", title: title, detail: "Against HEAD",
             sentence: "\(title), against HEAD", branch: "feature/offline-sync",
-            oldLabel: "HEAD", newLabel: "Working copy", grouped: grouped, live: true, reduced: false,
+            oldLabel: "HEAD", newLabel: "Working copy", grouped: grouped, live: true, reduced: reduced,
             singleFile: singleFile, gitDir: "/r/.git", hasHistory: hasHistory, historyFrom: historyFrom
         )
     }
@@ -69,6 +70,12 @@ final class FakeChanges: ChangesSource, @unchecked Sendable {
     func setViewed(index: UInt32, viewed: Bool) throws {
         if let failure { throw failure }
         self.viewed.append((index, viewed))
+    }
+
+    var facts: [UInt32: FileFacts] = [:]
+
+    func fileFacts(index: UInt32) -> FileFacts {
+        facts[index] ?? FileFacts(oldSize: nil, newSize: nil, lastCommit: nil)
     }
 
     func files() throws -> [ChangesFile] {
@@ -361,7 +368,7 @@ struct ChangesViewModelTests {
     /// not: a new file, a deleted one, a file only renamed.
     @Test func noticesNewDeletedAndRenamedFiles() async {
         let source = FakeChanges(files: [
-            FakeChanges.file(0, "New.swift", .untracked, group: .untracked),
+            FakeChanges.file(0, "New.swift", .untracked, group: .staged),
             FakeChanges.file(1, "Gone.swift", .deleted),
             FakeChanges.file(2, "Sources/RetryPolicy.swift", .renamed, oldPath: "Sources/Backoff.swift"),
             FakeChanges.file(3, "Plain.swift"),
@@ -542,6 +549,77 @@ struct ChangesViewModelTests {
         #expect(ChangesViewModel(source: source, defaults: store).listMode == .flat)
     }
 
+    /// The window opens on the first file the list shows, and previous
+    /// and next file follow the list, group after group, whatever order
+    /// the files came in. A group's menu marks all its files.
+    @Test func followsTheOrderOfTheGroups() async {
+        let source = FakeChanges(files: [
+            FakeChanges.file(0, "a.swift", .untracked, group: .untracked),
+            FakeChanges.file(1, "b.swift"),
+            FakeChanges.file(2, "c.swift", group: .staged),
+            FakeChanges.file(3, "d.swift"),
+        ])
+        for index in 0..<4 { source.diffs[UInt32(index)] = FakeChanges.text(lines: 3, changesAt: [0]) }
+        let viewModel = ChangesViewModel(source: source, defaults: defaults())
+        await viewModel.load()
+        #expect(viewModel.selected?.path == "c.swift")
+        #expect(viewModel.filePosition == "1 of 4")
+        var seen: [String] = []
+        while viewModel.canGoToNextFile {
+            await viewModel.nextFile()
+            seen.append(viewModel.selected?.path ?? "")
+        }
+        #expect(seen == ["b.swift", "d.swift", "a.swift"])
+        await viewModel.previousFile()
+        #expect(viewModel.selected?.path == "d.swift")
+
+        viewModel.setViewed(in: .notStaged, true)
+        #expect(viewModel.files.map { $0.viewed == .viewed } == [false, true, false, true])
+        viewModel.setViewed(in: .notStaged, false)
+        #expect(viewModel.viewedCount == 0)
+    }
+
+    /// The inspector says what the file is and lists its blocks; a click
+    /// on one goes there. It is shown unless the user hid it, which is
+    /// remembered, and git difftool's window has none.
+    @Test func theInspectorDescribesTheFileAndItsBlocks() async throws {
+        let source = sample()
+        source.facts[0] = FileFacts(
+            oldSize: 1_000, newSize: 2_000,
+            lastCommit: LastCommit(id: "9f8e7d6aa", shortId: "9f8e7d6", subject: "Retry", author: "Ada", time: 1_000)
+        )
+        let store = defaults()
+        let viewModel = ChangesViewModel(source: source, defaults: store)
+        await viewModel.load()
+        #expect(viewModel.showsInspector)
+        while viewModel.facts == nil { try await Task.sleep(for: .milliseconds(5)) }
+        let facts = viewModel.fileFacts
+        #expect(facts.map(\.title) == ["State", "Lines", "Size", "Last commit"])
+        #expect(facts[0].value == "Modified")
+        #expect(facts[1].value == "+4 −2")
+        #expect(facts[2].value.contains(" → "))
+        #expect(facts[3].value.hasPrefix("9f8e7d6 · "))
+        #expect(facts[3].help == "Retry\nAda")
+
+        #expect(viewModel.changeRows.map(\.id) == [0, 1])
+        #expect(viewModel.changeRows.allSatisfy { $0.line > 0 })
+        viewModel.go(to: 1)
+        #expect(viewModel.currentChange == 1)
+
+        // A file with no sizes and no commit says only what it knows.
+        await viewModel.select(viewModel.files[2])
+        #expect(viewModel.fileFacts.map(\.title) == ["State"])
+        #expect(viewModel.changeRows.isEmpty)
+
+        viewModel.toggleInspector()
+        #expect(!viewModel.showsInspector)
+        #expect(!ChangesViewModel(source: source, defaults: store).inspectorShown)
+
+        let reduced = FakeChanges(files: [FakeChanges.file(0, "a.swift")])
+        reduced.reduced = true
+        #expect(!ChangesViewModel(source: reduced, defaults: defaults()).canShowInspector)
+    }
+
     /// A group's title hides its files and shows them again; a file
     /// reached from the keyboard opens its group.
     @Test func collapsesAGroup() async {
@@ -587,12 +665,12 @@ struct ChangesViewModelTests {
     @Test func hintsTheShortcutsThatWorkNow() async {
         let viewModel = ChangesViewModel(source: sample(), defaults: defaults())
         await viewModel.load()
-        #expect(viewModel.toolbarHints == [.nextChange, .changesLayout, .blame, .refreshChanges])
+        #expect(viewModel.toolbarHints == [.nextChange, .changesLayout, .blame, .refreshChanges, .toggleInspector])
         #expect(viewModel.hintStrip == [.nextFile, .viewed, .openRepository, .keyboardShortcuts])
 
         await viewModel.select(viewModel.files[2])
         // The last file has no text here: nothing to blame.
-        #expect(viewModel.toolbarHints == [.previousChange, .changesLayout, .refreshChanges])
+        #expect(viewModel.toolbarHints == [.previousChange, .changesLayout, .refreshChanges, .toggleInspector])
         #expect(viewModel.hintStrip == [.previousFile, .viewed, .openRepository, .keyboardShortcuts])
     }
 

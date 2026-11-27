@@ -52,7 +52,7 @@ struct LineExplainTests {
         viewModel.releaseLine()
         #expect(viewModel.selection == 1...1)
         #expect(viewModel.status.hasSuffix(" · Line 1 selected"))
-        #expect(viewModel.hintStrip.contains(.explainLines))
+        #expect(viewModel.toolbarHints.contains(.explainLines))
 
         viewModel.pressLine(row: 4, extend: true)
         viewModel.releaseLine()
