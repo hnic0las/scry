@@ -310,9 +310,13 @@ struct ChangesSidebar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(viewModel.header.title)
-                    .font(Metrics.headline)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(viewModel.header.title)
+                        .font(Metrics.headline)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    ListModeButton(mode: viewModel.listMode, toggle: viewModel.toggleListMode)
+                }
                 Text(viewModel.scopeDetail)
                     .font(Metrics.caption)
                     .foregroundStyle(Theme.Surfaces.textSecondary)
@@ -345,13 +349,30 @@ struct ChangesSidebar: View {
                                     title: title, count: section.files.count, collapsed: section.collapsed
                                 ) { viewModel.toggle(group) }
                             }
-                            ForEach(section.collapsed ? [] : section.files, id: \.index) { file in
-                                ChangesFileRow(
-                                    file: file, selected: file == viewModel.selected,
-                                    arrival: viewModel.arrived[file.path],
-                                    select: { Task { await viewModel.select(file) } },
-                                    toggleViewed: viewModel.canMarkViewed ? { viewModel.toggleViewed(file) } : nil
-                                )
+                            ForEach(section.collapsed ? [] : section.rows) { row in
+                                switch row {
+                                case let .folder(folder):
+                                    ChangesFolderRow(folder: folder) { viewModel.toggle(folder) }
+                                        .contextMenu {
+                                            if viewModel.canMarkViewed {
+                                                let files = viewModel.files(in: folder)
+                                                Button("Mark All as Viewed") { viewModel.setViewed(in: folder, true) }
+                                                    .disabled(files.allSatisfy { $0.viewed == .viewed })
+                                                Button("Mark All as Not Viewed") {
+                                                    viewModel.setViewed(in: folder, false)
+                                                }
+                                                .disabled(!files.contains { $0.viewed == .viewed })
+                                            }
+                                        }
+                                case let .file(file, depth):
+                                    ChangesFileRow(
+                                        file: file, selected: file == viewModel.selected,
+                                        arrival: viewModel.arrived[file.path],
+                                        depth: depth, underFolder: viewModel.listMode == .folders,
+                                        select: { Task { await viewModel.select(file) } },
+                                        toggleViewed: viewModel.canMarkViewed ? { viewModel.toggleViewed(file) } : nil
+                                    )
+                                }
                             }
                         }
                     }
@@ -360,6 +381,67 @@ struct ChangesSidebar: View {
             }
         }
         .background(Theme.Surfaces.sidebar)
+    }
+}
+
+/// The sidebar's button between the list by folder and the flat one: it
+/// shows the list a click gives.
+struct ListModeButton: View {
+    let mode: ChangesViewModel.ListMode
+    let toggle: () -> Void
+
+    var body: some View {
+        Button(action: toggle) {
+            Image(systemName: mode == .folders ? "list.bullet" : "list.bullet.indent")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+                .frame(width: 20, height: 18)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(mode == .folders ? "Show the files as a flat list" : "Show the files by folder")
+        .accessibilityLabel(mode == .folders ? "Show as a flat list" : "Show by folder")
+    }
+}
+
+/// A folder of the list by folder: a click hides its files, or shows
+/// them.
+struct ChangesFolderRow: View {
+    let folder: ChangesViewModel.Folder
+    let toggle: () -> Void
+
+    static let height: CGFloat = 24
+    /// How far a row moves right for each folder above it.
+    static let indent: CGFloat = 12
+
+    var body: some View {
+        Button(action: toggle) {
+            HStack(spacing: 5) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .semibold))
+                    .rotationEffect(.degrees(folder.collapsed ? 0 : 90))
+                    .frame(width: 10)
+                Image(systemName: "folder")
+                    .font(.system(size: 11))
+                Text(folder.name)
+                    .font(.system(size: 12, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                Spacer(minLength: 4)
+                if folder.collapsed {
+                    Text("\(folder.count)").font(Metrics.caption).monospacedDigit()
+                }
+            }
+            .foregroundStyle(Theme.Surfaces.textSecondary)
+            .padding(.leading, 12 + CGFloat(folder.depth) * Self.indent)
+            .padding(.trailing, 12)
+            .frame(height: Self.height)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(folder.path)
+        .accessibilityLabel("\(folder.name), \(folder.count == 1 ? "1 file" : "\(folder.count) files")")
+        .accessibilityValue(folder.collapsed ? "collapsed" : "expanded")
     }
 }
 
@@ -529,11 +611,29 @@ struct ChangesFileRow: View {
     let selected: Bool
     /// What happened to the file while the window was open.
     var arrival: ChangesViewModel.Arrival?
+    /// The folders above it in the list by folder.
+    var depth = 0
+    /// The list is by folder: the row does not say the folder again.
+    var underFolder = false
     var select: () -> Void = {}
     /// `nil` where files cannot be marked viewed.
     var toggleViewed: (() -> Void)?
 
     static let height: CGFloat = 38
+    /// With the name alone.
+    static let shortHeight: CGFloat = 26
+
+    private var detail: String {
+        ChangesViewModel.detail(file, arrival: arrival, folder: !underFolder)
+    }
+
+    /// Not beside "changed since viewed", which needs the line: the file
+    /// header has both.
+    private var showsTag: Bool { file.partlyStaged && file.viewed != .changedSince }
+
+    private var height: CGFloat {
+        detail.isEmpty && !showsTag ? Self.shortHeight : Self.height
+    }
 
     var body: some View {
         HStack(spacing: 4) {
@@ -547,21 +647,21 @@ struct ChangesFileRow: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                         // The tag sits under the name, which keeps the row's width.
-                        HStack(spacing: 5) {
-                            Text(ChangesViewModel.detail(file, arrival: arrival))
-                                .font(Metrics.caption)
-                                .foregroundStyle(marked ? Theme.States.needsReview : Theme.Surfaces.textSecondary)
-                                .lineLimit(1)
-                                .truncationMode(file.viewed == .changedSince ? .tail : .head)
-                            // Not beside "changed since viewed", which needs
-                            // the line: the file header has both.
-                            if file.partlyStaged, file.viewed != .changedSince { PartlyStagedTag() }
+                        if !detail.isEmpty || showsTag {
+                            HStack(spacing: 5) {
+                                Text(detail)
+                                    .font(Metrics.caption)
+                                    .foregroundStyle(marked ? Theme.States.needsReview : Theme.Surfaces.textSecondary)
+                                    .lineLimit(1)
+                                    .truncationMode(file.viewed == .changedSince ? .tail : .head)
+                                if showsTag { PartlyStagedTag() }
+                            }
                         }
                     }
                     Spacer(minLength: 4)
                     ChangesCounts(added: file.added, removed: file.removed)
                 }
-                .frame(height: Self.height)
+                .frame(height: height)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -570,9 +670,9 @@ struct ChangesFileRow: View {
                 ViewedBox(state: file.viewed, toggle: toggleViewed)
             }
         }
-        .padding(.leading, 8)
+        .padding(.leading, 8 + CGFloat(depth) * ChangesFolderRow.indent)
         .padding(.trailing, toggleViewed == nil ? 8 : 4)
-        .frame(height: Self.height)
+        .frame(height: height)
         .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Theme.Interaction.selection : Color.clear))
         .padding(.horizontal, 4)
         .overlay(alignment: .leading) {

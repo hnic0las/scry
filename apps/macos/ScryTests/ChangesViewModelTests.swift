@@ -464,6 +464,84 @@ struct ChangesViewModelTests {
         #expect(viewModel.selected?.path == "icon.png")
     }
 
+    /// The list is by folder unless the user chose the flat one, which is
+    /// remembered: folders in the order their files came, one row for
+    /// folders that hold only a folder, and the folder left out of each
+    /// file's line.
+    @Test func listsTheFilesByFolderOrFlat() async {
+        let source = FakeChanges(files: [
+            FakeChanges.file(0, "README.md"),
+            FakeChanges.file(1, "ios/Sources/Views/A.swift"),
+            FakeChanges.file(2, "ios/Sources/Views/Deep/B.swift"),
+            FakeChanges.file(3, "ios/Sources/Views/Deep/C.swift"),
+            FakeChanges.file(4, "web/index.html"),
+        ])
+        source.grouped = false
+        let store = defaults()
+        let viewModel = ChangesViewModel(source: source, defaults: store)
+        await viewModel.load()
+        #expect(viewModel.listMode == .folders)
+
+        func shown() -> [String] {
+            viewModel.sections.flatMap(\.rows).map { row in
+                switch row {
+                case let .folder(folder): "\(folder.depth) \(folder.name)/ \(folder.count)"
+                case let .file(file, depth): "\(depth) \(file.name)"
+                }
+            }
+        }
+        #expect(shown() == [
+            "0 README.md", "0 ios/Sources/Views/ 3", "1 A.swift", "1 Deep/ 2", "2 B.swift", "2 C.swift",
+            "0 web/ 1", "1 index.html",
+        ])
+        #expect(ChangesViewModel.detail(source.list[1], folder: false).isEmpty)
+        #expect(ChangesViewModel.detail(source.list[1]) == "ios/Sources/Views/")
+
+        // A folder hides its files; a file reached from the keyboard
+        // shows them again.
+        guard case let .folder(deep) = viewModel.sections[0].rows[3] else {
+            Issue.record("no folder row")
+            return
+        }
+        viewModel.toggle(deep)
+        #expect(shown() == [
+            "0 README.md", "0 ios/Sources/Views/ 3", "1 A.swift", "1 Deep/ 2", "0 web/ 1", "1 index.html",
+        ])
+        await viewModel.nextFile()
+        await viewModel.nextFile()
+        #expect(viewModel.selected?.path == "ios/Sources/Views/Deep/B.swift")
+        #expect(shown().count == 8)
+
+        // The folder's menu marks every file under it, however deep, and
+        // only those.
+        guard case let .folder(views) = viewModel.sections[0].rows[1] else {
+            Issue.record("no folder row")
+            return
+        }
+        viewModel.setViewed(in: views, true)
+        #expect(viewModel.files.map { $0.viewed == .viewed } == [false, true, true, true, false])
+        #expect(source.viewed.map(\.index) == [1, 2, 3])
+        viewModel.setViewed(in: views, true)
+        #expect(source.viewed.count == 3)
+        // A folder closes when its last file is viewed.
+        #expect(shown() == ["0 README.md", "0 ios/Sources/Views/ 3", "0 web/ 1", "1 index.html"])
+        viewModel.setViewed(in: deep, false)
+        #expect(viewModel.files.map { $0.viewed == .viewed } == [false, true, false, false, false])
+        viewModel.toggle(views)
+        viewModel.toggle(deep)
+        #expect(shown().count == 8)
+        viewModel.toggleViewed(viewModel.files[2])
+        #expect(shown().count == 8)
+        viewModel.toggleViewed(viewModel.files[3])
+        #expect(shown() == [
+            "0 README.md", "0 ios/Sources/Views/ 3", "0 web/ 1", "1 index.html",
+        ])
+
+        viewModel.toggleListMode()
+        #expect(shown() == ["0 README.md", "0 A.swift", "0 B.swift", "0 C.swift", "0 index.html"])
+        #expect(ChangesViewModel(source: source, defaults: store).listMode == .flat)
+    }
+
     /// A group's title hides its files and shows them again; a file
     /// reached from the keyboard opens its group.
     @Test func collapsesAGroup() async {

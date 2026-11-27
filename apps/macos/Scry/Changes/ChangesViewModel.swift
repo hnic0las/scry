@@ -79,7 +79,43 @@ final class ChangesViewModel {
         let files: [ChangesFile]
         /// Its files are hidden under its title.
         let collapsed: Bool
+        /// What the list shows under the title: the files, under their
+        /// folders when the list is by folder.
+        let rows: [Row]
         var id: String { title ?? "" }
+    }
+
+    /// How the list shows its files: under their folders, or one after
+    /// the other with the folder under each name.
+    enum ListMode: String {
+        case folders, flat
+    }
+
+    /// A folder of the list, or several in one row when each holds only
+    /// the next.
+    struct Folder: Equatable {
+        /// The section's title and the path: the same folder can be in
+        /// two groups.
+        let key: String
+        /// "ios/Sources/Views" when the first two hold nothing else.
+        let name: String
+        let path: String
+        let depth: Int
+        /// The files under it, however deep.
+        let count: Int
+        let collapsed: Bool
+    }
+
+    enum Row: Identifiable, Equatable {
+        case folder(Folder)
+        case file(ChangesFile, depth: Int)
+
+        var id: String {
+            switch self {
+            case let .folder(folder): "folder \(folder.key)"
+            case let .file(file, _): "file \(file.index)"
+            }
+        }
     }
 
     /// Under `git difftool`, which opens its files one after the other:
@@ -143,6 +179,15 @@ final class ChangesViewModel {
     private(set) var atFileEdge: FileEdge?
     /// The groups whose files are hidden under their title.
     private(set) var collapsed: Set<ChangeGroup> = []
+    /// The folders whose files are hidden under their name, by key.
+    private(set) var collapsedFolders: Set<String> = []
+    var listMode: ListMode {
+        didSet {
+            guard listMode != oldValue else { return }
+            defaults.set(listMode.rawValue, forKey: Self.listModeKey)
+        }
+    }
+
     /// The file's place among those `git difftool` opens in turn.
     let queue: Queue?
     var layout: Layout {
@@ -160,6 +205,7 @@ final class ChangesViewModel {
     }
 
     static let layoutKey = "changesLayout"
+    static let listModeKey = "changesListMode"
 
     @ObservationIgnored private let source: ChangesSource
     @ObservationIgnored private let defaults: UserDefaults
@@ -236,6 +282,7 @@ final class ChangesViewModel {
         self.openConflicted = openConflicted
         header = source.header()
         layout = defaults.string(forKey: Self.layoutKey).flatMap(Layout.init) ?? .unified
+        listMode = defaults.string(forKey: Self.listModeKey).flatMap(ListMode.init) ?? .folders
     }
 
     // MARK: The list
@@ -379,6 +426,25 @@ final class ChangesViewModel {
         }
         files[index].viewed = viewed ? .viewed : .notViewed
         if selected == file { selected = files[index] }
+        if viewed { closeViewedFolders(above: file) }
+    }
+
+    /// The files under a folder of the list, however deep, in its group.
+    func files(in folder: Folder) -> [ChangesFile] {
+        let section = folder.key.dropLast(folder.path.count + 1)
+        let group = Self.groups.first { $0.1 == section }?.0
+        return files.filter { file in
+            (!header.grouped || file.group == group) && file.path.hasPrefix(folder.path + "/")
+        }
+    }
+
+    /// The folder's menu: marks every file under it viewed, or removes
+    /// their marks. Stops at the first file that cannot be marked.
+    func setViewed(in folder: Folder, _ viewed: Bool) {
+        for file in files(in: folder) where (file.viewed == .viewed) != viewed {
+            setViewed(file, viewed)
+            if viewedError != nil { return }
+        }
     }
 
     /// The box of a row or of the file header: viewed, or not.
@@ -402,17 +468,107 @@ final class ChangesViewModel {
 
     var sections: [Section] {
         guard header.grouped else {
-            return files.isEmpty ? [] : [Section(title: nil, group: nil, files: files, collapsed: false)]
+            return files.isEmpty
+                ? []
+                : [Section(title: nil, group: nil, files: files, collapsed: false, rows: rows(files, in: ""))]
         }
-        let groups: [(ChangeGroup, String)] = [
-            (.staged, "Staged"), (.notStaged, "Not staged"), (.untracked, "Untracked"),
-        ]
-        return groups.compactMap { group, title in
+        return Self.groups.compactMap { group, title in
             let members = files.filter { $0.group == group }
             return members.isEmpty
                 ? nil
-                : Section(title: title, group: group, files: members, collapsed: collapsed.contains(group))
+                : Section(
+                    title: title, group: group, files: members, collapsed: collapsed.contains(group),
+                    rows: rows(members, in: title)
+                )
         }
+    }
+
+    private static let groups: [(ChangeGroup, String)] = [
+        (.staged, "Staged"), (.notStaged, "Not staged"), (.untracked, "Untracked"),
+    ]
+
+    /// Shows the folders above a file again.
+    private func openFolders(of file: ChangesFile) {
+        guard !collapsedFolders.isEmpty else { return }
+        for folder in folders(above: file) {
+            collapsedFolders.remove(folder.key)
+        }
+    }
+
+    /// The folders above a file, from the outermost, with their keys.
+    private func folders(above file: ChangesFile) -> [(key: String, path: String)] {
+        let section = header.grouped ? Self.groups.first { $0.0 == file.group }?.1 ?? "" : ""
+        var path = ""
+        return file.directory.split(separator: "/").map { name in
+            path += path.isEmpty ? String(name) : "/\(name)"
+            return ("\(section)/\(path)", path)
+        }
+    }
+
+    /// Hides the folders above a file whose files are now all viewed:
+    /// the list keeps what is left to read.
+    private func closeViewedFolders(above file: ChangesFile) {
+        guard listMode == .folders else { return }
+        for folder in folders(above: file) {
+            let inside = files.filter { other in
+                (!header.grouped || other.group == file.group) && other.path.hasPrefix(folder.path + "/")
+            }
+            if inside.allSatisfy({ $0.viewed == .viewed }) { collapsedFolders.insert(folder.key) }
+        }
+    }
+
+    /// A section's rows: its files, under their folders when the list is
+    /// by folder. Folders and files keep the order the files came in.
+    private func rows(_ files: [ChangesFile], in section: String) -> [Row] {
+        guard listMode == .folders else { return files.map { .file($0, depth: 0) } }
+        let root = FolderNode(name: "", path: "")
+        for file in files {
+            var node = root
+            for name in file.directory.split(separator: "/") {
+                node = node.folder(String(name))
+            }
+            node.children.append(.file(file))
+        }
+        var rows: [Row] = []
+        add(root, depth: 0, section: section, to: &rows)
+        return rows
+    }
+
+    private func add(_ node: FolderNode, depth: Int, section: String, to rows: inout [Row]) {
+        for child in node.children {
+            switch child {
+            case let .file(file):
+                rows.append(.file(file, depth: depth))
+            case var .folder(folder):
+                // A folder that holds only a folder shares its row.
+                var name = folder.name
+                while folder.children.count == 1, case let .folder(only) = folder.children[0] {
+                    name += "/" + only.name
+                    folder = only
+                }
+                let key = "\(section)/\(folder.path)"
+                let collapsed = collapsedFolders.contains(key)
+                rows.append(.folder(Folder(
+                    key: key, name: name, path: folder.path, depth: depth, count: folder.count,
+                    collapsed: collapsed
+                )))
+                if !collapsed { add(folder, depth: depth + 1, section: section, to: &rows) }
+            }
+        }
+    }
+
+    /// Hides a folder's files under its name, or shows them again.
+    func toggle(_ folder: Folder) {
+        if collapsedFolders.contains(folder.key) {
+            collapsedFolders.remove(folder.key)
+        } else {
+            collapsedFolders.insert(folder.key)
+        }
+    }
+
+    /// The sidebar's button: by folder, or flat.
+    func toggleListMode() {
+        listMode = listMode == .folders ? .flat : .folders
     }
 
     /// Hides a group's files under its title, or shows them again. The
@@ -818,6 +974,7 @@ final class ChangesViewModel {
         if let file { arrived[file.path] = nil }
         // A file reached from the keyboard is shown in the list too.
         if let group = file?.group { collapsed.remove(group) }
+        if let file { openFolders(of: file) }
         guard let file else {
             content = .none
             restartBlame()
@@ -1086,12 +1243,13 @@ final class ChangesViewModel {
 
     /// The second line of a file's row: its folder, then what is unusual
     /// about it.
-    static func detail(_ file: ChangesFile, arrival: Arrival? = nil) -> String {
+    static func detail(_ file: ChangesFile, arrival: Arrival? = nil, folder: Bool = true) -> String {
         // What happened since the file was viewed or listed comes first.
         if file.viewed == .changedSince { return "changed since viewed" }
         var parts: [String] = []
         if arrival == .new { parts.append("new") }
-        if !file.directory.isEmpty { parts.append(file.directory) }
+        // Under its folder's row, the folder is already said.
+        if folder, !file.directory.isEmpty { parts.append(file.directory) }
         if let oldPath = file.oldPath {
             let oldName = URL(fileURLWithPath: oldPath).lastPathComponent
             // The old name when only the name changed, the old path when
@@ -1117,5 +1275,43 @@ final class ChangesViewModel {
 
     private static func count(_ count: Int, _ noun: String) -> String {
         count == 1 ? "1 \(noun)" : "\(count) \(noun)s"
+    }
+}
+
+/// A folder while the list is built: its folders and files, in the
+/// order they came.
+private final class FolderNode {
+    enum Child {
+        case folder(FolderNode)
+        case file(ChangesFile)
+    }
+
+    let name: String
+    let path: String
+    var children: [Child] = []
+    private var folders: [String: FolderNode] = [:]
+
+    init(name: String, path: String) {
+        self.name = name
+        self.path = path
+    }
+
+    /// The folder of that name in this one, added when it is new.
+    func folder(_ name: String) -> FolderNode {
+        if let known = folders[name] { return known }
+        let node = FolderNode(name: name, path: path.isEmpty ? name : "\(path)/\(name)")
+        folders[name] = node
+        children.append(.folder(node))
+        return node
+    }
+
+    /// The files under it, however deep.
+    var count: Int {
+        children.reduce(0) { sum, child in
+            switch child {
+            case let .folder(folder): sum + folder.count
+            case .file: sum + 1
+            }
+        }
     }
 }
