@@ -21,8 +21,15 @@ final class FakeChanges: ChangesSource, @unchecked Sendable {
             repository: "offline-sync", root: "/r", title: "Not committed", detail: "Against HEAD",
             sentence: "Not committed, against HEAD", branch: "feature/offline-sync",
             oldLabel: "HEAD", newLabel: "Working copy", grouped: grouped, live: true, reduced: false,
-            singleFile: false
+            singleFile: false, gitDir: "/r/.git"
         )
+    }
+
+    private(set) var viewed: [(index: UInt32, viewed: Bool)] = []
+
+    func setViewed(index: UInt32, viewed: Bool) throws {
+        if let failure { throw failure }
+        self.viewed.append((index, viewed))
     }
 
     func files() throws -> [ChangesFile] {
@@ -42,15 +49,47 @@ final class FakeChanges: ChangesSource, @unchecked Sendable {
     static func file(
         _ index: UInt32, _ path: String, _ state: ChangeState = .modified, group: ChangeGroup? = .notStaged,
         added: UInt32? = 1, removed: UInt32? = 1, oldPath: String? = nil, binary: Bool = false,
-        partlyStaged: Bool = false
+        partlyStaged: Bool = false, content: String = "1", viewed: ViewedState = .notViewed
     ) -> ChangesFile {
         let url = URL(fileURLWithPath: path)
         let directory = path.contains("/") ? String(path.dropLast(url.lastPathComponent.count)) : ""
         return ChangesFile(
             index: index, path: path, oldPath: oldPath, name: url.lastPathComponent, directory: directory,
             state: state, binary: binary, submodule: false, added: added, removed: removed, group: group,
-            partlyStaged: partlyStaged
+            partlyStaged: partlyStaged, contentId: content, viewed: viewed
         )
+    }
+
+    /// A text diff of `lines` old lines, all kept, with three lines added
+    /// before each of the lines in `addedAt`: the old side is the same
+    /// whatever is added, as under a window on the working copy.
+    static func added(lines: Int, addedAt: [Int]) -> FileDiffInfo {
+        var rows: [DiffRow] = []
+        var unified: [UnifiedDiffLine] = []
+        var changes: [DiffChange] = []
+        var new: UInt32 = 0
+        for line in 0..<lines {
+            if addedAt.contains(line) {
+                changes.append(DiffChange(
+                    firstRow: UInt32(rows.count), rowCount: 3, firstLine: UInt32(unified.count), added: 3, removed: 0
+                ))
+                for _ in 0..<3 {
+                    new += 1
+                    rows.append(DiffRow(kind: .added, old: nil, new: new, oldWords: [], newWords: []))
+                    unified.append(UnifiedDiffLine(kind: .added, old: nil, new: new, words: []))
+                }
+            }
+            new += 1
+            rows.append(DiffRow(kind: .unchanged, old: UInt32(line + 1), new: new, oldWords: [], newWords: []))
+            unified.append(UnifiedDiffLine(kind: .unchanged, old: UInt32(line + 1), new: new, words: []))
+        }
+        let line = DiffLine(text: "line", columns: 4, spans: [])
+        return .text(diff: TextDiffInfo(
+            oldLines: Array(repeating: line, count: lines), newLines: Array(repeating: line, count: Int(new)),
+            rows: rows, unified: unified, changes: changes, longestLine: 4,
+            added: UInt32(addedAt.count * 3), removed: 0,
+            oldMissingFinalNewline: false, newMissingFinalNewline: false, large: false, language: "Swift"
+        ))
     }
 
     /// A text diff of `lines` unchanged lines with a changed block before
@@ -432,11 +471,256 @@ struct ChangesViewModelTests {
         let viewModel = ChangesViewModel(source: sample(), defaults: defaults())
         await viewModel.load()
         #expect(viewModel.toolbarHints == [.nextChange, .changesLayout, .refreshChanges])
-        #expect(viewModel.hintStrip == [.nextFile, .openRepository, .keyboardShortcuts])
+        #expect(viewModel.hintStrip == [.nextFile, .viewed, .openRepository, .keyboardShortcuts])
 
         await viewModel.select(viewModel.files[2])
         #expect(viewModel.toolbarHints == [.previousChange, .changesLayout, .refreshChanges])
-        #expect(viewModel.hintStrip == [.previousFile, .openRepository, .keyboardShortcuts])
+        #expect(viewModel.hintStrip == [.previousFile, .viewed, .openRepository, .keyboardShortcuts])
+    }
+
+    // MARK: Live refresh
+
+    /// After a change on disk the list is read again: the selected file
+    /// stays selected, a file that changed and one that arrived get a dot
+    /// until they are shown, and nothing happens when nothing differs.
+    @Test func refreshKeepsTheSelectionAndMarksWhatArrived() async {
+        let source = sample()
+        let moment = Date(timeIntervalSince1970: 1000)
+        let viewModel = ChangesViewModel(source: source, defaults: defaults(), now: { moment })
+        await viewModel.load()
+        let scrolls = viewModel.scrollRequest
+
+        await viewModel.refresh()
+        #expect(viewModel.updatedAt == nil)
+        #expect(viewModel.arrived.isEmpty)
+
+        source.list[1] = FakeChanges.file(1, "Sources/B.swift", added: 5, removed: 1, content: "2")
+        source.list.append(FakeChanges.file(3, "new.md", .untracked, group: .untracked, added: 3, removed: 0))
+        source.diffs[3] = FakeChanges.text(lines: 3, changesAt: [])
+        await viewModel.refresh()
+        #expect(viewModel.files.count == 4)
+        #expect(viewModel.selected?.path == "Sources/A.swift")
+        #expect(viewModel.arrived == ["Sources/B.swift": .changed, "new.md": .new])
+        #expect(viewModel.updatedAt == moment)
+        // The open file did not change: it is not read again, nor moved.
+        #expect(source.asked.count == 1)
+        #expect(viewModel.scrollRequest == scrolls)
+        #expect(viewModel.placeRequest == 0)
+        #expect(ChangesViewModel.detail(viewModel.files[3], arrival: .new) == "new")
+
+        // A file that arrived and changes again is still new.
+        source.list[3] = FakeChanges.file(3, "new.md", .untracked, group: .untracked, added: 4, removed: 0, content: "2")
+        await viewModel.refresh()
+        #expect(viewModel.arrived["new.md"] == .new)
+
+        await viewModel.select(viewModel.files[1])
+        #expect(viewModel.arrived == ["new.md": .new])
+
+        // Read Again starts from what is there now.
+        await viewModel.load()
+        #expect(viewModel.arrived.isEmpty)
+    }
+
+    /// When the open file changes on disk it is read again in place: no
+    /// loading state, no jump to a block, and the line at the top of the
+    /// view stays at the top though lines arrived above it.
+    @Test func refreshReadsTheOpenFileAgainWithoutMovingIt() async {
+        let source = sample()
+        source.diffs[0] = FakeChanges.added(lines: 20, addedAt: [6, 15])
+        let viewModel = ChangesViewModel(source: source, defaults: defaults())
+        await viewModel.load()
+        await viewModel.nextChange()
+        #expect(viewModel.currentChange == 1)
+        let scrolls = viewModel.scrollRequest
+        // The last added line of the first block, half scrolled away.
+        viewModel.topRow = 8.5
+
+        source.list[0] = FakeChanges.file(0, "Sources/A.swift", group: .staged, added: 6, removed: 3, content: "2")
+        source.diffs[0] = FakeChanges.added(lines: 20, addedAt: [2, 6, 15])
+        await viewModel.refresh()
+        #expect(viewModel.selected?.contentId == "2")
+        #expect(viewModel.changeCount == 3)
+        #expect(viewModel.currentChange == 1)
+        #expect(viewModel.scrollRequest == scrolls)
+        // Three rows arrived above: the same line is three rows lower.
+        #expect(viewModel.placeRequest == 1)
+        #expect(viewModel.placeTarget == 11.5)
+
+        // A change under the view moves nothing.
+        viewModel.topRow = 1
+        source.list[0] = FakeChanges.file(0, "Sources/A.swift", group: .staged, added: 4, removed: 2, content: "3")
+        source.diffs[0] = FakeChanges.added(lines: 20, addedAt: [2, 6])
+        await viewModel.refresh()
+        #expect(viewModel.placeRequest == 1)
+        // The block the user was on is gone: the last one left.
+        #expect(viewModel.currentChange == 1)
+    }
+
+    /// A file that no longer differs leaves the list: the one that took
+    /// its place is shown, or nothing when the list is empty.
+    @Test func refreshLeavesAFileThatNoLongerDiffers() async {
+        let source = sample()
+        let viewModel = ChangesViewModel(source: source, defaults: defaults())
+        await viewModel.load()
+        await viewModel.select(viewModel.files[1])
+
+        source.list = [source.list[0], FakeChanges.file(1, "icon.png", .untracked, group: .untracked, binary: true)]
+        source.diffs[1] = .binary(oldSize: nil, newSize: 2048)
+        await viewModel.refresh()
+        #expect(viewModel.selected?.path == "icon.png")
+        #expect(viewModel.content == .binary(old: nil, new: 2048))
+
+        source.list = []
+        await viewModel.refresh()
+        #expect(viewModel.selected == nil)
+        #expect(viewModel.content == .none)
+
+        // A list that cannot be read leaves what is shown.
+        source.failure = .Failed(message: "git stopped")
+        await viewModel.refresh()
+        #expect(viewModel.listError == nil)
+    }
+
+    /// The top row is followed by its old line, in either layout; a view
+    /// in a file with no old side, or past its end, does not move.
+    @Test func placesTheTopRowByItsOldLine() {
+        guard case .text(let before) = FakeChanges.added(lines: 10, addedAt: [6]),
+              case .text(let after) = FakeChanges.added(lines: 10, addedAt: [2, 6])
+        else { return }
+        #expect(ChangesViewModel.place(of: 0, from: before, to: after, layout: .unified) == 0)
+        #expect(ChangesViewModel.place(of: 4.25, from: before, to: after, layout: .unified) == 7.25)
+        // On an added line: the old line under it is followed.
+        #expect(ChangesViewModel.place(of: 7, from: before, to: after, layout: .split) == 10)
+        #expect(ChangesViewModel.place(of: 7, from: after, to: before, layout: .split) == 4)
+        // Lines the view was on are gone: the top goes to what follows.
+        #expect(ChangesViewModel.place(of: 2, from: after, to: before, layout: .unified) == 0)
+        #expect(ChangesViewModel.place(of: 99, from: before, to: after, layout: .unified) == nil)
+        #expect(ChangesViewModel.place(of: -1, from: before, to: after, layout: .unified) == nil)
+    }
+
+    /// The window listens to the repository only while it shows the
+    /// working copy or the index, and refreshes at each change.
+    @Test func watchRefreshesAtEachChange() async {
+        let source = sample()
+        let (stream, changes) = AsyncStream.makeStream(of: Void.self)
+        let viewModel = ChangesViewModel(source: source, defaults: defaults(), watch: { _ in stream })
+        await viewModel.load()
+        source.list[1] = FakeChanges.file(1, "Sources/B.swift", content: "2")
+        changes.yield()
+        changes.finish()
+        await viewModel.watch()
+        #expect(source.listed == 2)
+        #expect(viewModel.arrived == ["Sources/B.swift": .changed])
+    }
+
+    // MARK: Viewed
+
+    /// A file is marked viewed from its box or from the key, which then
+    /// goes to the next file that is not viewed, from the top after the
+    /// last one; on a viewed file the key removes the mark.
+    @Test func marksFilesViewed() async {
+        let source = sample()
+        let viewModel = ChangesViewModel(source: source, defaults: defaults())
+        await viewModel.load()
+        #expect(viewModel.canMarkViewed)
+        #expect(viewModel.viewedSummary == "0 of 3 viewed")
+
+        viewModel.toggleViewed(viewModel.files[1])
+        #expect(viewModel.files[1].viewed == .viewed)
+        #expect(source.viewed.map(\.index) == [1])
+        #expect(viewModel.viewedSummary == "1 of 3 viewed")
+
+        // From the first file, past the viewed one.
+        await viewModel.markViewedAndGoOn()
+        #expect(viewModel.files[0].viewed == .viewed)
+        #expect(viewModel.selected?.path == "icon.png")
+        #expect(viewModel.viewedShare == 2.0 / 3.0)
+
+        // The last one left: the selection stays.
+        await viewModel.markViewedAndGoOn()
+        #expect(viewModel.viewedCount == 3)
+        #expect(viewModel.selected?.path == "icon.png")
+        #expect(viewModel.selected?.viewed == .viewed)
+
+        await viewModel.markViewedAndGoOn()
+        #expect(viewModel.selected?.viewed == .notViewed)
+        #expect(source.viewed.last?.viewed == false)
+
+        // From the last file, the next one not viewed is before it.
+        viewModel.toggleViewed(viewModel.files[0])
+        await viewModel.markViewedAndGoOn()
+        #expect(viewModel.selected?.path == "Sources/A.swift")
+    }
+
+    /// A file changed since it was viewed says so in its row; a mark that
+    /// cannot be written is reported and changes nothing.
+    @Test func saysWhatChangedSinceViewedAndWhatFailed() async {
+        let source = FakeChanges(files: [
+            FakeChanges.file(0, "Sources/A.swift", viewed: .changedSince),
+            FakeChanges.file(1, "Sources/B.swift", viewed: .viewed),
+        ])
+        source.diffs[0] = FakeChanges.text(lines: 4, changesAt: [1])
+        let viewModel = ChangesViewModel(source: source, defaults: defaults())
+        await viewModel.load()
+        #expect(ChangesViewModel.detail(viewModel.files[0]) == "changed since viewed")
+        #expect(viewModel.viewedCount == 1)
+
+        source.failure = .Failed(message: "The disk is full.")
+        viewModel.toggleViewed(viewModel.files[0])
+        #expect(viewModel.files[0].viewed == .changedSince)
+        #expect(viewModel.status == "The disk is full.")
+        source.failure = nil
+        viewModel.toggleViewed(viewModel.files[0])
+        #expect(viewModel.files[0].viewed == .viewed)
+        #expect(viewModel.status == "1 change · +2 −1")
+    }
+}
+
+struct RepositoryWatcherTests {
+    /// Anything in the working folder matters; in the git folder only the
+    /// index, HEAD and the references, never a lock file or Scry's notes.
+    @Test func tellsWhatCanChangeADiff() {
+        let matters = { RepositoryWatcher.matters($0, root: "/r", gitDir: "/r/.git") }
+        #expect(matters("/r/src/a.swift"))
+        #expect(matters("/r/.git/index"))
+        #expect(matters("/r/.git/HEAD"))
+        #expect(matters("/r/.git/MERGE_HEAD"))
+        #expect(matters("/r/.git/refs/heads/main"))
+        #expect(matters("/r/.git/packed-refs"))
+        #expect(!matters("/r/.git/index.lock"))
+        #expect(!matters("/r/.git/scry/viewed.json"))
+        #expect(!matters("/r/.git/objects/ab/cdef"))
+        #expect(!matters("/other/a.swift"))
+        #expect(!matters("/r2/a.swift"))
+        // A linked worktree's git folder is elsewhere.
+        #expect(RepositoryWatcher.matters("/main/.git/worktrees/w/index", root: "/w", gitDir: "/main/.git/worktrees/w"))
+        #expect(RepositoryWatcher.matters("/w/a.swift", root: "/w", gitDir: "/main/.git/worktrees/w"))
+    }
+
+    /// A file written in the folder is told, once the writes settle.
+    @Test func tellsAWriteInTheFolder() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let changes = RepositoryWatcher.changes(root: folder.path, gitDir: folder.appendingPathComponent(".git").path)
+        let told = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await _ in changes { return true }
+                return false
+            }
+            group.addTask {
+                // The stream starts a moment after it is made.
+                for _ in 0..<40 {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    try? Data("x".utf8).write(to: folder.appendingPathComponent("a.txt"))
+                }
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        #expect(told)
     }
 }
 

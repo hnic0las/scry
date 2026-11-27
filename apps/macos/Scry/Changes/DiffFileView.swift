@@ -50,6 +50,9 @@ struct DiffFileView: View {
     let viewModel: ChangesViewModel
     let diff: TextDiffInfo
     let scroll: SideScroll
+    /// Moves the rows to a place given in points, after the file changed
+    /// on disk.
+    @State private var position = ScrollPosition()
 
     var body: some View {
         GeometryReader { geometry in
@@ -104,6 +107,14 @@ struct DiffFileView: View {
                         }
                     }
                 }
+            }
+            .scrollPosition($position)
+            .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, offset in
+                viewModel.topRow = offset / Metrics.rowHeight
+            }
+            .onChange(of: viewModel.placeRequest) {
+                // The file changed on disk: the line at the top stays there.
+                position.scrollTo(y: viewModel.placeTarget * Metrics.rowHeight)
             }
             // The other layout has other rows: its list is built anew.
             .id(viewModel.layout)

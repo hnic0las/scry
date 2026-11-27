@@ -175,6 +175,10 @@ extension Shortcut {
         id: "changesLayout", title: "Unified or split", section: .changes, key: .character("l"),
         modifiers: [.option, .command], note: "One column, or the old side beside the new", hint: "Layout"
     )
+    static let viewed = Shortcut(
+        id: "viewed", title: "Viewed", section: .changes, key: .character("v"), modifiers: [.option, .command],
+        note: "Then the next file that is not viewed", hint: "Viewed"
+    )
     static let refreshChanges = Shortcut(
         id: "refreshChanges", title: "Read the files again", section: .changes, key: .character("r"),
         modifiers: [.command], hint: "Read again"
@@ -208,7 +212,7 @@ extension Shortcut {
         undo, redo, toggleBase, switchLayout, toggleInspector, explain, suggest, markAsResolved,
         applyEdit, cancelEdit,
         openFile, refresh, continueOperation,
-        previousChange, nextChange, previousFile, nextFile, changesLayout, refreshChanges,
+        previousChange, nextChange, previousFile, nextFile, changesLayout, viewed, refreshChanges,
         openRepository, openConflictedFile, keyboardShortcuts,
         confirmSheet, cancelSheet,
     ]

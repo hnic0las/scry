@@ -96,6 +96,9 @@ impl Comparison {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scope {
     pub comparison: Comparison,
+    /// What was asked, in a fixed form: "uncommitted", "staged",
+    /// "main..HEAD". The "Viewed" marks are kept under it.
+    pub key: String,
     /// What is read: "Not committed", "Staged", a branch or a commit.
     pub title: String,
     /// What it is compared with: "Against HEAD".
@@ -154,6 +157,7 @@ impl Scope {
             };
             return Ok(Scope {
                 comparison,
+                key: format!("{old}...{new}"),
                 detail: format!("Against its merge base with {old} ({base})"),
                 branch: None,
                 old_label: base,
@@ -171,6 +175,7 @@ impl Scope {
                     old: old.clone(),
                     new: new.clone(),
                 },
+                key: format!("{old}..{new}"),
                 detail: format!("Against {old}"),
                 branch: None,
                 old_label: old,
@@ -211,8 +216,13 @@ impl Scope {
                 "Working copy",
             )
         };
+        let side = if staged { "staged" } else { "uncommitted" };
         Ok(Scope {
             comparison,
+            key: match revisions {
+                Some(base) => format!("{side}:{base}"),
+                None => side.to_string(),
+            },
             title: title.to_string(),
             detail: format!("Against {name}"),
             branch,
@@ -305,6 +315,13 @@ pub struct ChangedFile {
     pub group: Option<Group>,
     /// Listed under `NotStaged` with part of its changes staged.
     pub partly_staged: bool,
+    /// The ids git gives the file's content on each side; `None` for a
+    /// side the file is not on, or that git has not hashed (the file on
+    /// disk).
+    #[serde(skip)]
+    pub old_id: Option<String>,
+    #[serde(skip)]
+    pub new_id: Option<String>,
 }
 
 /// An untracked file larger than this is listed without its line count:
@@ -404,6 +421,8 @@ fn changed_file(path: &str, state: FileState) -> ChangedFile {
         removed: None,
         group: None,
         partly_staged: false,
+        old_id: None,
+        new_id: None,
     }
 }
 
@@ -422,7 +441,7 @@ fn tracked_changes(
     comparison: &Comparison,
     paths: &[String],
 ) -> Result<Vec<ChangedFile>, GitError> {
-    let mut arguments = vec!["--raw", "--numstat", "-z"];
+    let mut arguments = vec!["--raw", "--no-abbrev", "--numstat", "-z"];
     arguments.extend(comparison.sides());
     let output = git.run(&diff_arguments(&arguments, paths))?;
     Ok(parse_changes(&output))
@@ -435,7 +454,7 @@ fn changed_paths(
     sides: &[&str],
     paths: &[String],
 ) -> Result<HashSet<String>, GitError> {
-    let mut arguments = vec!["--raw", "--numstat", "-z"];
+    let mut arguments = vec!["--raw", "--no-abbrev", "--numstat", "-z"];
     arguments.extend_from_slice(sides);
     let output = git.run(&diff_arguments(&arguments, paths))?;
     Ok(parse_changes(&output)
@@ -464,7 +483,15 @@ pub fn parse_changes(text: &str) -> Vec<ChangedFile> {
         let mut fields = record[1..].split(' ');
         let old_mode = fields.next().unwrap_or("");
         let new_mode = fields.next().unwrap_or("");
-        let status = fields.nth(2).unwrap_or("");
+        // An id of zeros stands for no content, or content not hashed.
+        let mut id = || {
+            fields
+                .next()
+                .filter(|id| id.contains(|digit| digit != '0'))
+                .map(str::to_string)
+        };
+        let (old_id, new_id) = (id(), id());
+        let status = fields.next().unwrap_or("");
         let Some(first) = tokens.next() else {
             break;
         };
@@ -492,6 +519,8 @@ pub fn parse_changes(text: &str) -> Vec<ChangedFile> {
                 .filter(|_| state == FileState::Renamed)
                 .map(str::to_string),
             submodule: old_mode == SUBMODULE || new_mode == SUBMODULE,
+            old_id,
+            new_id,
             ..changed_file(path, state)
         };
         match index.get(path) {
@@ -582,6 +611,83 @@ fn untracked_files(
             file
         })
         .collect())
+}
+
+/// What identifies a file's change: the content of its two sides. Equal
+/// ids mean the same diff, so a "Viewed" mark holds while they are equal.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ContentId {
+    /// Empty for a file with no old side.
+    pub old: String,
+    pub new: String,
+}
+
+/// A file on disk larger than this is identified by its size and date,
+/// not read: the list is identified again at every refresh.
+const MAX_HASHED: u64 = 16_000_000;
+
+/// The id of `file`'s change in `comparison`. The index and commits are
+/// named by git's own ids; the file on disk is read, whether staged or
+/// not, so that staging a file does not change its id.
+pub fn content_id(
+    git: &dyn Git,
+    root: &Path,
+    comparison: &Comparison,
+    file: &ChangedFile,
+) -> ContentId {
+    let old = file.old_id.clone().unwrap_or_default();
+    let on_disk = matches!(
+        comparison,
+        Comparison::WorkingCopy { .. } | Comparison::Unstaged
+    );
+    let new = if on_disk {
+        disk_id(git, &root.join(&file.path), &file.path)
+    } else {
+        file.new_id.clone().unwrap_or_default()
+    };
+    ContentId { old, new }
+}
+
+/// What identifies the content at `path` on disk: a link's target, a
+/// repository's commit, a file's bytes; "gone" when nothing is there.
+fn disk_id(git: &dyn Git, path: &Path, name: &str) -> String {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return String::from("gone");
+    };
+    if metadata.is_symlink() {
+        let target = fs::read_link(path).unwrap_or_default();
+        return format!("link:{:016x}", fnv(target.to_string_lossy().as_bytes()));
+    }
+    if metadata.is_dir() {
+        return match git.run(&["-C", name, "rev-parse", "HEAD"]) {
+            Ok(commit) => format!("commit:{}", commit.trim()),
+            Err(_) => String::from("folder"),
+        };
+    }
+    let stamp = || {
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |since| since.as_nanos());
+        format!("stamp:{}:{modified}", metadata.len())
+    };
+    if metadata.len() > MAX_HASHED {
+        return stamp();
+    }
+    match fs::read(path) {
+        Ok(bytes) => format!("bytes:{}:{:016x}", bytes.len(), fnv(&bytes)),
+        Err(_) => stamp(),
+    }
+}
+
+/// FNV-1a, 64 bits: the same on every platform and version, which the
+/// standard library's hasher does not promise. It tells an edited file
+/// from the one that was viewed; it guards against nothing.
+fn fnv(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// Whether git would call these bytes binary.

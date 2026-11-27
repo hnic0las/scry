@@ -34,4 +34,5 @@ pub mod review;
 pub mod session;
 pub mod syntax;
 pub mod theme;
+pub mod viewed;
 pub mod words;

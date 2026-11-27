@@ -224,6 +224,7 @@ final class RootViewModel {
         changes = ChangesViewModel(
             source: source,
             queue: queue,
+            watch: { RepositoryWatcher.changes(root: $0.root, gitDir: $0.gitDir) },
             leaveQueue: { [weak self] stop in
                 self?.difftoolStopped = stop
                 self?.difftoolLeft = true

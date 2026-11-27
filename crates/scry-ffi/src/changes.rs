@@ -9,6 +9,7 @@ use scry_core::git::{GitCli, GitError};
 use scry_core::operation;
 use scry_core::overview;
 use scry_core::syntax::Language;
+use scry_core::viewed::{self, Viewed};
 
 use crate::{ByteRange, ScryError, Span, failed, span};
 
@@ -40,6 +41,9 @@ pub struct ChangesHeader {
     pub reduced: bool,
     /// One file alone, with no list to choose from.
     pub single_file: bool,
+    /// The repository's git folder, to watch with `root` when `live`;
+    /// empty without a repository.
+    pub git_dir: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -81,6 +85,19 @@ pub struct ChangesFile {
     pub group: Option<ChangeGroup>,
     /// Under not staged, with part of its changes staged.
     pub partly_staged: bool,
+    /// What identifies the content of its two sides: another one means
+    /// the file changed.
+    pub content_id: String,
+    pub viewed: ViewedState,
+}
+
+/// Where a file stands with its "Viewed" mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ViewedState {
+    NotViewed,
+    Viewed,
+    /// Viewed, and changed since.
+    ChangedSince,
 }
 
 /// A line of one side, as drawn: tabs expanded.
@@ -239,6 +256,8 @@ enum Source {
     Repository {
         git: GitCli,
         root: PathBuf,
+        /// Empty when git could not tell: nothing is then marked viewed.
+        git_dir: PathBuf,
         scope: diff::Scope,
         paths: Vec<String>,
     },
@@ -264,7 +283,14 @@ enum Source {
 pub struct ChangeSet {
     source: Source,
     /// The files as last listed: `file_diff` takes one by its index.
-    files: Mutex<Vec<diff::ChangedFile>>,
+    files: Mutex<Vec<Listed>>,
+}
+
+/// A file of the list, with its content's id when it was listed.
+#[derive(Clone)]
+struct Listed {
+    file: diff::ChangedFile,
+    id: diff::ContentId,
 }
 
 /// A git to compare files outside a repository with: where it runs does
@@ -311,6 +337,7 @@ impl ChangeSet {
             })?;
         Ok(Arc::new(ChangeSet {
             source: Source::Repository {
+                git_dir: scry_core::asks::git_dir(&git).unwrap_or_default(),
                 git,
                 root,
                 scope,
@@ -355,7 +382,13 @@ impl ChangeSet {
 
     pub fn header(&self) -> ChangesHeader {
         match &self.source {
-            Source::Repository { root, scope, .. } => ChangesHeader {
+            Source::Repository {
+                root,
+                scope,
+                git_dir,
+                ..
+            } => ChangesHeader {
+                git_dir: git_dir.display().to_string(),
                 repository: root
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
@@ -389,6 +422,7 @@ impl ChangeSet {
                 live: false,
                 reduced: true,
                 single_file: true,
+                git_dir: String::new(),
             },
             Source::Folders { .. } => ChangesHeader {
                 repository: String::from("git difftool"),
@@ -403,6 +437,7 @@ impl ChangeSet {
                 live: false,
                 reduced: true,
                 single_file: false,
+                git_dir: String::new(),
             },
         }
     }
@@ -415,6 +450,7 @@ impl ChangeSet {
                 root,
                 scope,
                 paths,
+                ..
             } => diff::changed_files(git, root, &scope.comparison, paths)?,
             Source::Files {
                 git,
@@ -442,6 +478,8 @@ impl ChangeSet {
                     removed: None,
                     group: None,
                     partly_staged: false,
+                    old_id: None,
+                    new_id: None,
                 };
                 match read {
                     diff::FileDiff::Text(text) => {
@@ -458,20 +496,72 @@ impl ChangeSet {
                 diff::folder_files(git, old, new).map_err(diff_error)?
             }
         };
-        let infos = files
+        let marks = self.marks();
+        let listed: Vec<Listed> = files
+            .into_iter()
+            .map(|file| {
+                let id = match &self.source {
+                    Source::Repository {
+                        git, root, scope, ..
+                    } => diff::content_id(git, root, &scope.comparison, &file),
+                    _ => diff::ContentId::default(),
+                };
+                Listed { file, id }
+            })
+            .collect();
+        let infos = listed
             .iter()
             .enumerate()
-            .map(|(index, file)| changed_file(index, file))
+            .map(|(index, listed)| {
+                let state = marks.as_ref().map_or(viewed::State::NotViewed, |marks| {
+                    marks.state(&listed.file.path, &listed.id)
+                });
+                changed_file(index, listed, state)
+            })
             .collect();
-        *self.lock() = files;
+        *self.lock() = listed;
         Ok(infos)
+    }
+
+    /// Marks the file at `index` of the last list viewed, with the
+    /// content it had when listed, or removes its mark.
+    pub fn set_viewed(&self, index: u32, viewed: bool) -> Result<(), ScryError> {
+        let Some(mut marks) = self.marks() else {
+            return Err(ScryError::Refused {
+                message: String::from("Files cannot be marked viewed in this window."),
+            });
+        };
+        let listed = self.lock().clone();
+        let Some(file) = listed.get(index as usize) else {
+            return Err(ScryError::Refused {
+                message: String::from("This file is no longer in the list."),
+            });
+        };
+        // With paths asked, the list is not the whole change: the marks
+        // of the files left out are kept.
+        let whole = matches!(&self.source, Source::Repository { paths, .. } if paths.is_empty());
+        let paths: Vec<&str> = listed
+            .iter()
+            .map(|listed| listed.file.path.as_str())
+            .collect();
+        marks
+            .set(
+                &file.file.path,
+                viewed.then_some(&file.id),
+                whole.then_some(paths.as_slice()),
+            )
+            .map_err(failed)
     }
 
     /// The diff of the file at `index` of the last list. A large file
     /// comes without colours and word marks unless `all_marks` asks for
     /// them.
     pub fn file_diff(&self, index: u32, all_marks: bool) -> Result<FileDiffInfo, ScryError> {
-        let Some(file) = self.lock().get(index as usize).cloned() else {
+        let Some(file) = self
+            .lock()
+            .get(index as usize)
+            .map(|listed| listed.file.clone())
+        else {
             return Err(ScryError::Refused {
                 message: String::from("This file is no longer in the list."),
             });
@@ -496,7 +586,18 @@ impl ChangeSet {
 }
 
 impl ChangeSet {
-    fn lock(&self) -> MutexGuard<'_, Vec<diff::ChangedFile>> {
+    /// This change's "Viewed" marks, read again; `None` without a
+    /// repository.
+    fn marks(&self) -> Option<Viewed> {
+        match &self.source {
+            Source::Repository { git_dir, scope, .. } if !git_dir.as_os_str().is_empty() => {
+                Some(Viewed::load(git_dir, &scope.key))
+            }
+            _ => None,
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Vec<Listed>> {
         // The list is replaced whole: a panic elsewhere leaves it usable.
         self.files
             .lock()
@@ -504,8 +605,15 @@ impl ChangeSet {
     }
 }
 
-fn changed_file(index: usize, file: &diff::ChangedFile) -> ChangesFile {
+fn changed_file(index: usize, listed: &Listed, state: viewed::State) -> ChangesFile {
+    let file = &listed.file;
     ChangesFile {
+        content_id: format!("{}>{}", listed.id.old, listed.id.new),
+        viewed: match state {
+            viewed::State::NotViewed => ViewedState::NotViewed,
+            viewed::State::Viewed => ViewedState::Viewed,
+            viewed::State::ChangedSince => ViewedState::ChangedSince,
+        },
         index: index as u32,
         path: file.path.clone(),
         old_path: file.old_path.clone(),
@@ -735,6 +843,62 @@ mod tests {
             (diff.changes[0].first_row, diff.changes[0].first_line),
             (1, 1)
         );
+    }
+
+    /// A file marked viewed stays so until its content changes, then is
+    /// "changed since viewed"; the marks live under the git folder, per
+    /// scope, and a window on two files has none.
+    #[test]
+    fn a_file_is_marked_viewed_until_it_changes() {
+        let dir = repository(&[("a.rs", "one\n"), ("b.rs", "one\n")]);
+        fs::write(dir.path().join("a.rs"), "two\n").unwrap();
+        fs::write(dir.path().join("b.rs"), "two\n").unwrap();
+        let path = dir.path().display().to_string();
+        let changes = ChangeSet::open(path.clone(), false, None, Vec::new()).unwrap();
+        assert!(changes.header().git_dir.ends_with(".git"));
+        let files = changes.files().unwrap();
+        assert_eq!(files[0].viewed, ViewedState::NotViewed);
+
+        changes.set_viewed(0, true).unwrap();
+        let viewed = changes.files().unwrap();
+        assert_eq!(viewed[0].viewed, ViewedState::Viewed);
+        assert_eq!(viewed[1].viewed, ViewedState::NotViewed);
+        assert_eq!(viewed[0].content_id, files[0].content_id);
+        assert!(dir.path().join(".git/scry/viewed.json").is_file());
+        // Nothing is written to the working folder.
+        assert_eq!(viewed.len(), 2);
+
+        // Another window on the same change reads the mark; another
+        // scope does not.
+        let other = ChangeSet::open(path.clone(), false, None, Vec::new()).unwrap();
+        assert_eq!(other.files().unwrap()[0].viewed, ViewedState::Viewed);
+        let against = ChangeSet::open(path, false, Some(String::from("HEAD")), Vec::new()).unwrap();
+        assert_eq!(against.files().unwrap()[0].viewed, ViewedState::NotViewed);
+
+        fs::write(dir.path().join("a.rs"), "three\n").unwrap();
+        let changed = changes.files().unwrap();
+        assert_eq!(changed[0].viewed, ViewedState::ChangedSince);
+        assert_ne!(changed[0].content_id, files[0].content_id);
+        changes.set_viewed(0, true).unwrap();
+        assert_eq!(changes.files().unwrap()[0].viewed, ViewedState::Viewed);
+        changes.set_viewed(0, false).unwrap();
+        assert_eq!(changes.files().unwrap()[0].viewed, ViewedState::NotViewed);
+        assert!(matches!(
+            changes.set_viewed(9, true),
+            Err(ScryError::Refused { .. })
+        ));
+
+        let two = ChangeSet::open_difftool(
+            dir.path().join("a.rs").display().to_string(),
+            dir.path().join("b.rs").display().to_string(),
+            String::new(),
+        );
+        two.files().unwrap();
+        assert!(two.header().git_dir.is_empty());
+        assert!(matches!(
+            two.set_viewed(0, true),
+            Err(ScryError::Refused { .. })
+        ));
     }
 
     /// A range has no groups and cannot change under the window; a file

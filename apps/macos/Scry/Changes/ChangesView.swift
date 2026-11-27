@@ -40,7 +40,10 @@ struct ChangesView: View {
             toggleLayout: { viewModel.layout = viewModel.layout == .unified ? .split : .unified }
         ))
         .task {
-            if loads { await viewModel.load() }
+            if loads {
+                await viewModel.load()
+                await viewModel.watch()
+            }
         }
     }
 
@@ -52,7 +55,10 @@ struct ChangesView: View {
                 Rectangle().fill(Theme.Surfaces.hairline).frame(height: 1)
             }
             content
-            ChangesStatusBar(status: viewModel.status, live: viewModel.header.live, language: viewModel.language)
+            ChangesStatusBar(
+                status: viewModel.status, live: viewModel.header.live, updatedAt: viewModel.updatedAt,
+                language: viewModel.language
+            )
         }
     }
 
@@ -211,6 +217,10 @@ struct ChangesSidebar: View {
                         .font(Metrics.caption)
                         .foregroundStyle(Theme.Surfaces.textSecondary)
                         .monospacedDigit()
+                    if viewModel.canMarkViewed {
+                        ViewedProgress(share: viewModel.viewedShare, summary: viewModel.viewedSummary)
+                            .padding(.top, 3)
+                    }
                 }
             }
             .padding(.horizontal, 12)
@@ -231,11 +241,12 @@ struct ChangesSidebar: View {
                                 ) { viewModel.toggle(group) }
                             }
                             ForEach(section.collapsed ? [] : section.files, id: \.index) { file in
-                                Button { Task { await viewModel.select(file) } } label: {
-                                    ChangesFileRow(file: file, selected: file == viewModel.selected)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityAddTraits(file == viewModel.selected ? .isSelected : [])
+                                ChangesFileRow(
+                                    file: file, selected: file == viewModel.selected,
+                                    arrival: viewModel.arrived[file.path],
+                                    select: { Task { await viewModel.select(file) } },
+                                    toggleViewed: viewModel.canMarkViewed ? { viewModel.toggleViewed(file) } : nil
+                                )
                             }
                         }
                     }
@@ -338,37 +349,143 @@ struct ChangesCounts: View {
     }
 }
 
+/// "7 of 13 viewed", with a thin bar of the share that is.
+struct ViewedProgress: View {
+    let share: Double
+    let summary: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            GeometryReader { geometry in
+                Capsule().fill(Theme.Surfaces.hairline)
+                Capsule().fill(Theme.Interaction.accent).frame(width: geometry.size.width * share)
+            }
+            .frame(height: 3)
+            Text(summary)
+                .font(Metrics.caption)
+                .foregroundStyle(Theme.Surfaces.textSecondary)
+                .monospacedDigit()
+                .fixedSize()
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(summary)
+    }
+}
+
+/// The "Viewed" box of a file: empty, checked, or dashed when the file
+/// changed since it was viewed.
+struct ViewedBox: View {
+    let state: ViewedState
+    let toggle: () -> Void
+
+    static let changedHelp = "Changed since you viewed it. Click to mark it viewed with what it holds now."
+
+    var body: some View {
+        Button(action: toggle) {
+            ViewedMark(state: state)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(state == .viewed ? "Viewed: click to remove the mark" : state == .changedSince ? Self.changedHelp : "Mark as viewed")
+        .accessibilityLabel("Viewed")
+        .accessibilityValue(state == .viewed ? "yes" : state == .changedSince ? "changed since viewed" : "no")
+        .accessibilityAddTraits(.isToggle)
+    }
+}
+
+/// The box alone, 14 pt.
+struct ViewedMark: View {
+    let state: ViewedState
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 3.5)
+        switch state {
+        case .viewed:
+            shape.fill(Theme.Interaction.accent)
+                .frame(width: 14, height: 14)
+                .overlay {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+        case .changedSince:
+            shape.stroke(Theme.States.needsReview, style: StrokeStyle(lineWidth: 1.5, dash: [3, 2]))
+                .frame(width: 14, height: 14)
+        case .notViewed:
+            shape.stroke(Theme.Surfaces.controlBorder, lineWidth: 1)
+                .frame(width: 14, height: 14)
+        }
+    }
+}
+
 struct ChangesFileRow: View {
     let file: ChangesFile
     let selected: Bool
+    /// What happened to the file while the window was open.
+    var arrival: ChangesViewModel.Arrival?
+    var select: () -> Void = {}
+    /// `nil` where files cannot be marked viewed.
+    var toggleViewed: (() -> Void)?
 
     static let height: CGFloat = 38
 
     var body: some View {
-        HStack(spacing: 8) {
-            ChangesBadge(file: file)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(file.name)
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(Theme.Surfaces.text)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(ChangesViewModel.detail(file))
-                    .font(Metrics.caption)
-                    .foregroundStyle(Theme.Surfaces.textSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.head)
+        HStack(spacing: 4) {
+            Button(action: select) {
+                HStack(spacing: 8) {
+                    ChangesBadge(file: file)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(file.name)
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Theme.Surfaces.text)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        // The tag sits under the name, which keeps the row's width.
+                        HStack(spacing: 5) {
+                            Text(ChangesViewModel.detail(file, arrival: arrival))
+                                .font(Metrics.caption)
+                                .foregroundStyle(marked ? Theme.States.needsReview : Theme.Surfaces.textSecondary)
+                                .lineLimit(1)
+                                .truncationMode(file.viewed == .changedSince ? .tail : .head)
+                            // Not beside "changed since viewed", which needs
+                            // the line: the file header has both.
+                            if file.partlyStaged, file.viewed != .changedSince { PartlyStagedTag() }
+                        }
+                    }
+                    Spacer(minLength: 4)
+                    ChangesCounts(added: file.added, removed: file.removed)
+                }
+                .frame(height: Self.height)
+                .contentShape(Rectangle())
             }
-            Spacer(minLength: 4)
-            if file.partlyStaged { PartlyStagedTag() }
-            ChangesCounts(added: file.added, removed: file.removed)
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(selected ? .isSelected : [])
+            if let toggleViewed {
+                ViewedBox(state: file.viewed, toggle: toggleViewed)
+            }
         }
-        .padding(.horizontal, 8)
+        .padding(.leading, 8)
+        .padding(.trailing, toggleViewed == nil ? 8 : 4)
         .frame(height: Self.height)
         .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Theme.Interaction.selection : Color.clear))
         .padding(.horizontal, 4)
-        .contentShape(Rectangle())
+        .overlay(alignment: .leading) {
+            // Changed or arrived while the window was open.
+            if arrival != nil {
+                Circle()
+                    .fill(Theme.States.needsReview)
+                    .frame(width: 5, height: 5)
+                    .padding(.leading, 3)
+                    .accessibilityLabel(arrival == .new ? "New" : "Changed")
+            }
+        }
         .help(file.path)
+    }
+
+    /// The second line says what happened, in the marker's colour.
+    private var marked: Bool {
+        file.viewed == .changedSince || arrival == .new
     }
 }
 
@@ -437,6 +554,19 @@ struct ChangesFileHeader: View {
                 .help(Shortcut.nextFile.help())
                 .disabled(!viewModel.canGoToNextFile)
             }
+            if viewModel.canMarkViewed {
+                Button { Task { await viewModel.markViewedAndGoOn() } } label: {
+                    HStack(spacing: 5) {
+                        ViewedMark(state: file.viewed)
+                        Text("Viewed")
+                    }
+                }
+                .keyboardShortcut(Shortcut.viewed)
+                .help(Shortcut.viewed.help(
+                    file.viewed == .viewed ? "Remove the mark" : "Mark as viewed, and go to the next file that is not"
+                ))
+                .accessibilityValue(file.viewed == .viewed ? "yes" : "no")
+            }
         }
         .controlSize(.small)
         .padding(.horizontal, 12)
@@ -480,12 +610,29 @@ struct ChangesStatusBar: View {
     let status: String
     /// The working copy or the index is read: the files can still change.
     let live: Bool
+    /// When the list last changed by itself.
+    var updatedAt: Date?
     let language: String?
+
+    /// How long "updated just now" stays after a refresh.
+    static let fresh: TimeInterval = 5
 
     var body: some View {
         HStack(spacing: 16) {
             Text(status).monospacedDigit()
             Spacer()
+            if live {
+                TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                    let fresh = updatedAt.map { timeline.date.timeIntervalSince($0) < Self.fresh } ?? false
+                    HStack(spacing: 5) {
+                        if fresh {
+                            Circle().fill(Theme.States.needsReview).frame(width: 6, height: 6)
+                        }
+                        Text(fresh ? "Live · updated just now" : "Live")
+                    }
+                    .help("Scry reads the files again when they change on disk")
+                }
+            }
             if let language {
                 Text(language)
             }

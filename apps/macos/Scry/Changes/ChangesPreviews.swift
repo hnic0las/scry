@@ -70,10 +70,20 @@ enum PreviewChanges {
     """
 
     /// The window on the sample repository, in `layout`.
-    static func window(_ layout: ChangesViewModel.Layout, select path: String = "Sources/Sync/SyncEngine.swift") -> some View {
+    static func window(
+        _ layout: ChangesViewModel.Layout, select path: String = "Sources/Sync/SyncEngine.swift", viewed: Bool = false
+    ) -> some View {
         let viewModel = repository().map { ChangesViewModel(source: $0, defaults: .preview) }
         viewModel?.layout = layout
         viewModel?.loadNow(select: path)
+        if viewed, let viewModel {
+            // Three files viewed, one of them changed since.
+            let names = ["OldCache.swift", "SyncClient.swift", "offline.md"]
+            for file in viewModel.files where names.contains(file.name) { viewModel.toggleViewed(file) }
+            let changed = URL(fileURLWithPath: viewModel.header.root).appending(path: "Sources/Sync/SyncClient.swift")
+            try? "// Changed since it was viewed.\n".write(to: changed, atomically: true, encoding: .utf8)
+            viewModel.loadNow(select: path)
+        }
         return Group {
             if let viewModel {
                 ChangesView(viewModel: viewModel, loads: false)
@@ -139,4 +149,8 @@ enum PreviewChanges {
 
 #Preview("Changes, a binary file", traits: .fixedLayout(width: 1300, height: 760)) {
     PreviewChanges.window(.unified, select: "icon-sync.png")
+}
+
+#Preview("Changes, files viewed", traits: .fixedLayout(width: 1300, height: 760)) {
+    PreviewChanges.window(.unified, viewed: true)
 }

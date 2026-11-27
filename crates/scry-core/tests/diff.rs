@@ -1065,3 +1065,53 @@ fn links_in_a_folder_are_followed_to_their_files() {
     );
     assert_eq!(text(linked.unwrap()).counts(), (1, 0));
 }
+
+/// A file's id changes with its content and with nothing else: staging
+/// it, or writing the same bytes again, leaves the id as it was, so a
+/// "Viewed" mark holds.
+#[test]
+fn a_content_id_follows_the_content_not_the_index() {
+    let repo = Repo::new();
+    repo.write("a.txt", "one\n");
+    repo.git(&["add", "."]);
+    repo.commit("base");
+    repo.write("a.txt", "two\n");
+    repo.write("new.txt", "x\n");
+    let git = repo.scry_git();
+    let id = |path: &str| {
+        let (comparison, files) = repo.uncommitted();
+        diff::content_id(&git, &repo.path(), &comparison, named(&files, path))
+    };
+    let (first, untracked) = (id("a.txt"), id("new.txt"));
+    assert!(!first.old.is_empty() && !first.new.is_empty());
+    assert!(untracked.old.is_empty());
+
+    repo.git(&["add", "a.txt"]);
+    assert_eq!(id("a.txt"), first);
+    repo.write("a.txt", "two\n");
+    assert_eq!(id("a.txt"), first);
+
+    repo.write("a.txt", "three\n");
+    let edited = id("a.txt");
+    assert_eq!(edited.old, first.old);
+    assert_ne!(edited.new, first.new);
+
+    // Deleted on disk: still an id, and another one.
+    fs::remove_file(repo.path().join("a.txt")).unwrap();
+    assert_eq!(id("a.txt").new, "gone");
+
+    // The index and commits are named by git's ids.
+    repo.write("a.txt", "four\n");
+    repo.git(&["add", "a.txt"]);
+    let staged = Comparison::staged(&git).unwrap();
+    let files = repo.files(&staged);
+    let in_index = diff::content_id(&git, &repo.path(), &staged, named(&files, "a.txt"));
+    assert_eq!(in_index.old, first.old);
+    assert_eq!(in_index.new.len(), 40);
+    repo.write("a.txt", "five\n");
+    let files = repo.files(&staged);
+    assert_eq!(
+        diff::content_id(&git, &repo.path(), &staged, named(&files, "a.txt")),
+        in_index
+    );
+}

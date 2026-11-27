@@ -8,6 +8,8 @@ protocol ChangesSource: Sendable {
     func files() throws -> [ChangesFile]
     /// The diff of the file at `index` of the last list.
     func fileDiff(index: UInt32, allMarks: Bool) throws -> FileDiffInfo
+    /// Marks the file at `index` of the last list viewed, or not.
+    func setViewed(index: UInt32, viewed: Bool) throws
 }
 
 extension ChangeSet: ChangesSource {}
@@ -73,7 +75,31 @@ final class ChangesViewModel {
         let current: Bool
     }
 
+    /// Why a row of the list has a dot: what happened to its file while
+    /// the window was open, until the file is shown.
+    enum Arrival: Equatable {
+        /// The file was not in the list.
+        case new
+        case changed
+    }
+
     let header: ChangesHeader
+    /// The files that arrived or changed while the window was open, by
+    /// path.
+    private(set) var arrived: [String: Arrival] = [:]
+    /// When the list last changed by itself.
+    private(set) var updatedAt: Date?
+    /// Why the last "Viewed" mark could not be written.
+    private(set) var viewedError: String?
+    /// Goes up when the file area must move to `placeTarget`, after the
+    /// open file changed on disk.
+    private(set) var placeRequest = 0
+    /// Where the top of the file area must be, in rows from the file's
+    /// first one.
+    private(set) var placeTarget: Double = 0
+    /// Where the top of the file area is, in rows: the view says so as it
+    /// scrolls.
+    @ObservationIgnored var topRow: Double = 0
     private(set) var files: [ChangesFile] = []
     /// The list is being read for the first time.
     private(set) var loadingFiles = true
@@ -115,14 +141,24 @@ final class ChangesViewModel {
     @ObservationIgnored private let leaveQueue: (Bool) -> Void
     /// The latest file asked: a slower, older answer is dropped.
     @ObservationIgnored private var request = 0
+    /// The repository's changes on disk, as they settle.
+    @ObservationIgnored private let watch: ((ChangesHeader) -> AsyncStream<Void>)?
+    /// The open file was asked with its colours and word marks, though
+    /// large.
+    @ObservationIgnored private var allMarks = false
+    @ObservationIgnored private let now: () -> Date
 
     init(
         source: ChangesSource,
         defaults: UserDefaults = .standard,
         queue: Queue? = nil,
+        watch: ((ChangesHeader) -> AsyncStream<Void>)? = nil,
+        now: @escaping () -> Date = Date.init,
         leaveQueue: @escaping (Bool) -> Void = { _ in },
         openConflicted: @escaping (String) -> Void = { _ in }
     ) {
+        self.watch = watch
+        self.now = now
         self.source = source
         self.defaults = defaults
         self.queue = queue
@@ -142,6 +178,7 @@ final class ChangesViewModel {
             let files = try await Task.detached { try source.files() }.value
             self.files = files
             listError = nil
+            arrived = [:]
             let kept = selected.flatMap { old in
                 files.first { $0.path == old.path && $0.group == old.group }
             }
@@ -150,6 +187,142 @@ final class ChangesViewModel {
         } catch {
             loadingFiles = false
             listError = error.message
+        }
+    }
+
+    // MARK: Live refresh
+
+    /// Reads the list again each time the repository changes on disk,
+    /// until the window closes. Only the working copy and the index
+    /// change under a window.
+    func watch() async {
+        guard header.live, let watch else { return }
+        for await _ in watch(header) {
+            await refresh()
+        }
+    }
+
+    /// Reads the list again after a change on disk. The selected file
+    /// stays selected and, when its content changed, is read again with
+    /// the view kept on the same line. The other files that changed or
+    /// arrived get a dot in the list.
+    func refresh() async {
+        let source = source
+        guard let fresh = try? await Task.detached(operation: { try source.files() }).value else { return }
+        guard fresh != files else { return }
+        let before = Dictionary(files.map { ($0.path, $0.contentId) }, uniquingKeysWith: { first, _ in first })
+        var arrived = arrived.filter { path, _ in fresh.contains { $0.path == path } }
+        for file in fresh where before[file.path] != file.contentId {
+            // A file that arrived stays "new" when it changes again.
+            arrived[file.path] = before[file.path] == nil ? .new : arrived[file.path] ?? .changed
+        }
+        let old = selected
+        let oldIndex = old.flatMap { files.firstIndex(of: $0) }
+        files = fresh
+        listError = nil
+        loadingFiles = false
+        updatedAt = now()
+        if let old, let same = fresh.first(where: { $0.path == old.path }) {
+            // The file on screen is being looked at: no dot.
+            arrived[same.path] = nil
+            self.arrived = arrived
+            selected = same
+            if same.contentId != old.contentId { await readAgain(same) }
+        } else {
+            self.arrived = arrived
+            // The file no longer differs: the one that took its place.
+            let next = oldIndex.map { min($0, fresh.count - 1) }.flatMap { fresh.indices.contains($0) ? fresh[$0] : nil }
+            await select(next ?? fresh.first)
+        }
+    }
+
+    /// Reads the selected file again without the loading state and
+    /// without going to a block: the view stays where the user reads.
+    private func readAgain(_ file: ChangesFile) async {
+        request += 1
+        let asked = request
+        let source = source
+        let allMarks = allMarks
+        let result = await Task.detached { Self.read(file, from: source, allMarks: allMarks) }.value
+        guard request == asked else { return }
+        let before = diff
+        let top = topRow
+        content = result
+        atFileEdge = nil
+        guard case .text(let new) = result else {
+            currentChange = 0
+            return
+        }
+        currentChange = min(currentChange, max(new.changes.count - 1, 0))
+        if let before, let target = Self.place(of: top, from: before, to: new, layout: layout), target != top {
+            placeTarget = target
+            placeRequest += 1
+        }
+    }
+
+    /// Where the row at the top of the view, `top` rows into `old`, is in
+    /// `new`: the same line of the old side, which does not change while
+    /// the working copy does. `nil` when the view has no reason to move.
+    nonisolated static func place(
+        of top: Double, from old: TextDiffInfo, to new: TextDiffInfo, layout: Layout
+    ) -> Double? {
+        let oldNumbers = layout == .unified ? old.unified.map(\.old) : old.rows.map(\.old)
+        let newNumbers = layout == .unified ? new.unified.map(\.old) : new.rows.map(\.old)
+        let row = Int(top)
+        guard top >= 0, oldNumbers.indices.contains(row) else { return nil }
+        // The first row at or under the top that has an old line.
+        guard let anchor = oldNumbers[row...].firstIndex(where: { $0 != nil }),
+              let found = newNumbers.firstIndex(of: oldNumbers[anchor])
+        else { return nil }
+        return max(Double(found - (anchor - row)) + top - Double(row), 0)
+    }
+
+    // MARK: Viewed
+
+    /// Files can be marked viewed: not the copies git difftool hands over.
+    var canMarkViewed: Bool { !header.reduced && !header.gitDir.isEmpty }
+
+    var viewedCount: Int { files.count { $0.viewed == .viewed } }
+
+    /// "7 of 13 viewed".
+    var viewedSummary: String { "\(viewedCount) of \(files.count) viewed" }
+
+    /// The share of the files that are viewed, from 0 to 1.
+    var viewedShare: Double {
+        files.isEmpty ? 0 : Double(viewedCount) / Double(files.count)
+    }
+
+    /// Marks `file` viewed with the content it has in the list, or
+    /// removes its mark.
+    func setViewed(_ file: ChangesFile, _ viewed: Bool) {
+        guard canMarkViewed, let index = files.firstIndex(of: file) else { return }
+        do {
+            try source.setViewed(index: file.index, viewed: viewed)
+            viewedError = nil
+        } catch {
+            viewedError = error.message
+            return
+        }
+        files[index].viewed = viewed ? .viewed : .notViewed
+        if selected == file { selected = files[index] }
+    }
+
+    /// The box of a row or of the file header: viewed, or not.
+    func toggleViewed(_ file: ChangesFile) {
+        setViewed(file, file.viewed != .viewed)
+    }
+
+    /// The key: marks the selected file viewed and goes to the next one
+    /// that is not; on a file already viewed, removes the mark.
+    func markViewedAndGoOn() async {
+        guard let selected, canMarkViewed else { return }
+        guard selected.viewed != .viewed else { return setViewed(selected, false) }
+        setViewed(selected, true)
+        guard viewedError == nil, let index = files.firstIndex(where: { $0.path == selected.path }) else { return }
+        // After this file first, then from the top.
+        let order = files[(index + 1)...] + files[..<index]
+        if let next = order.first(where: { $0.viewed != .viewed }) {
+            await select(next)
         }
     }
 
@@ -213,6 +386,7 @@ final class ChangesViewModel {
         var shortcuts: [Shortcut] = []
         if canGoToPreviousFile { shortcuts.append(.previousFile) }
         if canGoToNextFile { shortcuts.append(.nextFile) }
+        if canMarkViewed, selected != nil { shortcuts.append(.viewed) }
         if !header.reduced { shortcuts.append(.openRepository) }
         shortcuts.append(.keyboardShortcuts)
         return shortcuts
@@ -264,6 +438,8 @@ final class ChangesViewModel {
         selected = file
         currentChange = 0
         atFileEdge = nil
+        self.allMarks = allMarks
+        if let file { arrived[file.path] = nil }
         // A file reached from the keyboard is shown in the list too.
         if let group = file?.group { collapsed.remove(group) }
         guard let file else {
@@ -450,6 +626,7 @@ final class ChangesViewModel {
                 let file = atFileEdge == .last ? "next" : "previous"
                 return "\(edge) change · press again for the \(file) file"
             }
+            if let viewedError { return viewedError }
             if diff.changes.isEmpty { return "No change in the content" }
             return "\(Self.count(diff.changes.count, "change")) · +\(diff.added) −\(diff.removed)"
         case .binary: return "Binary file"
@@ -519,8 +696,11 @@ final class ChangesViewModel {
 
     /// The second line of a file's row: its folder, then what is unusual
     /// about it.
-    static func detail(_ file: ChangesFile) -> String {
+    static func detail(_ file: ChangesFile, arrival: Arrival? = nil) -> String {
+        // What happened since the file was viewed or listed comes first.
+        if file.viewed == .changedSince { return "changed since viewed" }
         var parts: [String] = []
+        if arrival == .new { parts.append("new") }
         if !file.directory.isEmpty { parts.append(file.directory) }
         if let oldPath = file.oldPath {
             let oldName = URL(fileURLWithPath: oldPath).lastPathComponent
