@@ -31,8 +31,7 @@ jobs=${SCRY_MUTANTS_JOBS:-4}
 # mutants that grew a vector without end stayed under the limit by RSS
 # while filling memory, and the Mac stopped (a watchdog panic). Checked
 # five times a second, as such a mutant grows by gigabytes a second.
-watch() {
-    python3 -I - "$max_mb" <<'PY'
+watchdog=$(cat <<'PY'
 import ctypes, subprocess, sys, time
 
 limit = int(sys.argv[1]) * 1024 * 1024
@@ -63,9 +62,12 @@ while True:
                 subprocess.run(["kill", "-9", pid])
     time.sleep(0.2)
 PY
-}
+)
 
-watch &
+# Python itself in the background, not a function around it: `$!` is then
+# the watchdog, which the trap stops. A function's subshell was killed
+# instead and left the watchdog running, holding the caller's output open.
+python3 -I -c "$watchdog" "$max_mb" &
 watcher=$!
 trap 'kill "$watcher" 2>/dev/null || true' EXIT
 
