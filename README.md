@@ -11,7 +11,7 @@
 
 Scry (`git-scry`) is a local-first tool, integrated with git, for merging and reviewing changes. It resolves conflicts through `git mergetool`, opens the whole operation in a native app, checks each choice by parsing the file, and works with your Claude Code: your agent resolves, explains and proposes resolutions through Scry's plugin, you review in Scry. It also reads a change before you commit it: the files that differ, each one whole, with its history, its blame and Explain on the lines you select.
 
-Status: version 0.2.0 is the first public release: the merge tool (the macOS app and the `git-scry` CLI) and the Claude Code plugin. The diff viewer described below is on `main` and ships with the next release. Review of branches and pull requests comes next (see [Roadmap](#roadmap)).
+Status: version 0.3.0 adds the diff viewer to the merge tool (the macOS app and the `git-scry` CLI) and the Claude Code plugin. Review of branches and pull requests comes next (see [Roadmap](#roadmap)).
 
 ![The merge editor in use: theirs for the first conflict, then both sides for the second, which Scry marks "Does not parse", then ours, which parses: 2 of 2 conflicts resolved](.github/screenshots/merge-editor.gif)
 
@@ -195,7 +195,7 @@ export PATH="/opt/homebrew/opt/rustup/bin:$PATH"   # rustup is keg-only
 rustup default stable
 ```
 
-Check, lint and test before each commit, as the CI does on macOS, Linux and Windows. The CI runs only when a tag is pushed (`git tag 0.2.0 && git push origin 0.2.0`) or when started by hand (`gh workflow run CI`):
+Check, lint and test before each commit, as the CI does on macOS, Linux and Windows. The CI runs only when a tag is pushed (`git tag 0.3.0 && git push origin 0.3.0`) or when started by hand (`gh workflow run CI`):
 
 ```sh
 cargo fmt --all --check

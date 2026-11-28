@@ -24,7 +24,7 @@ path = "src/bin/uniffi-bindgen.rs"
 all = { level = "warn", priority = -1 }
 
 [dependencies]
-scry-core = { version = "0.2.0", path = "../scry-core" }
+scry-core = { version = "0.3.0", path = "../scry-core" }
 uniffi = { version = "0.32", features = ["cli"] }
 
 [dev-dependencies]
