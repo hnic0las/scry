@@ -749,6 +749,61 @@ fn log_print_lists_a_files_points_through_its_rename() {
     );
 }
 
+/// `log --print` lists every point, past the first page of commits.
+#[test]
+fn log_print_lists_more_than_one_page() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repository(root.path(), &[("a.txt", "0\n")]);
+    // Sixty commits in one git run: `fast-import` instead of sixty
+    // `git commit`.
+    let mut stream = String::new();
+    for number in 1..=60 {
+        let content = format!("{number}\n");
+        stream += &format!(
+            "commit refs/heads/main\ncommitter Scry Test <test@example.com> {} +0000\ndata 2\nc\n",
+            1_700_000_000 + number
+        );
+        if number == 1 {
+            stream += "from refs/heads/main^0\n";
+        }
+        stream += &format!("M 100644 inline a.txt\ndata {}\n{content}\n", content.len());
+    }
+    let mut import = Command::new("git")
+        .current_dir(&repo)
+        .args(["fast-import", "--quiet"])
+        .env("GIT_CONFIG_GLOBAL", root.path().join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    import
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stream.as_bytes())
+        .unwrap();
+    assert!(import.wait().unwrap().success());
+    let reset = Command::new("git")
+        .current_dir(&repo)
+        .args(["reset", "--quiet", "--hard"])
+        .env("GIT_CONFIG_GLOBAL", root.path().join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .status()
+        .unwrap();
+    assert!(reset.success());
+
+    let output = git_scry_in(root.path(), &repo, &["log", "--print", "a.txt"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.starts_with("History of a.txt · 61 commits"),
+        "{stdout}"
+    );
+    // The header, then one line per commit.
+    assert_eq!(stdout.lines().count(), 62, "{stdout}");
+}
+
 /// Without `--print`, `log` opens the app on the file's history: the
 /// app gets the repository's root after `--history`, then the file from
 /// the root after `--path`.

@@ -514,3 +514,26 @@ fn line_count(text: &str) -> String {
         count => format!("({count} lines)"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_closed_pipe;
+
+    /// Only printing to a reader that is gone ends quietly: another
+    /// failure, or another message with the same code, is a panic.
+    #[test]
+    fn a_closed_pipe_is_told_by_its_code() {
+        let code = if cfg!(windows) {
+            "(os error 232)"
+        } else {
+            "(os error 32)"
+        };
+        assert!(is_closed_pipe(&format!(
+            "failed printing to stdout: Broken pipe {code}"
+        )));
+        assert!(!is_closed_pipe(
+            "failed printing to stdout: Permission denied (os error 13)"
+        ));
+        assert!(!is_closed_pipe(&format!("something else {code}")));
+    }
+}

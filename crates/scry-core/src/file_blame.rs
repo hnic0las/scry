@@ -318,5 +318,28 @@ mod tests {
         assert_eq!(short_age(0, 65 * day), "2 mo");
         assert_eq!(short_age(0, 800 * day), "2 y");
         assert_eq!(short_age(500, 100), "now");
+        // From any time, not only from 1970.
+        let then = 1_700_000_000;
+        assert_eq!(short_age(then, then + 8 * day), "8 d");
+        assert_eq!(short_age(then, then + 3_599), "now");
+        assert_eq!(short_age(then, then + 3_600), "1 h");
+    }
+
+    /// A line is an entry's header only with a whole commit id: other
+    /// lines of git's output are not taken for one.
+    #[test]
+    fn only_a_whole_commit_id_starts_an_entry() {
+        let short = format!("{} 1 1 2\nfilename a.rs\n", &A[..39]);
+        assert!(read(&short).0.is_empty());
+        let not_hex = format!("{}x 1 1 2\nfilename a.rs\n", &A[..39]);
+        assert!(read(&not_hex).0.is_empty());
+        assert_eq!(read(&format!("{A} 1 1 2\nfilename a.rs\n")).0.len(), 1);
+    }
+
+    #[test]
+    fn only_a_commit_holds_no_line_not_committed() {
+        assert!(!Target::Commit(String::from("abc")).can_be_uncommitted());
+        assert!(Target::WorkingCopy.can_be_uncommitted());
+        assert!(Target::Index.can_be_uncommitted());
     }
 }

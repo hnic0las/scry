@@ -308,6 +308,10 @@ fn commits_come_by_pages_and_from_another_commit() {
     assert_eq!(subjects(&first.points), ["Change 4", "Change 3"]);
     let last = history::commits(&git, None, "a.txt", 4, 2).unwrap();
     assert!(!last.more);
+    // A page that ends with the oldest commit has nothing after it.
+    let exact = history::commits(&git, None, "a.txt", 3, 2).unwrap();
+    assert_eq!(exact.points.len(), 2);
+    assert!(!exact.more);
     assert_eq!(subjects(&last.points), ["Change 0"]);
     // From an older commit: the history as it was there.
     let from = history::commits(&git, Some("HEAD~3"), "a.txt", 0, 50).unwrap();
@@ -351,6 +355,7 @@ fn a_pin_across_a_rename_compares_the_content_whatever_git_finds_alike() {
     repo.commit("new.txt", "a\nw\nx\ny\nz\n", "Rewrite");
     repo.write("new.txt", "a\nw\nx\ny\nz\nmore\n");
     let points = repo.points("new.txt");
+    blobs_name_the_file_in_its_folder();
     assert_eq!(points.len(), 4);
     let pin = Pin::Commit {
         id: points[1].id.clone(),
@@ -388,4 +393,33 @@ fn a_pin_across_a_rename_compares_the_content_whatever_git_finds_alike() {
     };
     assert_eq!(repo.counts(&points[0], Some(&start), Order::Newer), "+5 −3");
     assert_eq!(repo.counts(&points[1], Some(&start), Order::Newer), "+4 −3");
+}
+
+/// A pin across a rename into a folder: the file's name and folder are
+/// those of its new path.
+fn blobs_name_the_file_in_its_folder() {
+    let repo = Repo::new();
+    repo.commit("old.txt", "a\nb\nc\nd\n", "Start");
+    fs::create_dir_all(repo.path().join("src/app")).unwrap();
+    repo.git(&["mv", "old.txt", "src/app/new.txt"]);
+    repo.commit("src/app/new.txt", "a\nb\nc\nd\ne\n", "Move");
+    repo.commit("src/app/new.txt", "a\nw\nx\ny\nz\n", "Rewrite");
+    let points = repo.points("src/app/new.txt");
+    let pin = Pin::Commit {
+        id: points[2].id.clone(),
+        path: points[2].path.clone(),
+    };
+    let (_, file) = history::point_file(
+        &repo.scry_git(),
+        &repo.path(),
+        &points[0],
+        Some(&pin),
+        Order::Newer,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        (file.name.as_str(), file.directory.as_str()),
+        ("new.txt", "src/app/")
+    );
 }

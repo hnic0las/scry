@@ -153,5 +153,12 @@ mod tests {
         assert_eq!(date(951_782_400), "2000-02-29");
         assert_eq!(date(1_795_816_800), "2026-11-27");
         assert_eq!(date(1_704_067_199), "2023-12-31");
+        // Around the centuries, where the leap rules change.
+        assert_eq!(date(-2_203_977_600), "1900-02-28");
+        assert_eq!(date(-2_203_891_200), "1900-03-01");
+        assert_eq!(date(946_598_400), "1999-12-31");
+        assert_eq!(date(4_107_456_000), "2100-02-28");
+        assert_eq!(date(4_107_542_400), "2100-03-01");
+        assert_eq!(date(13_574_563_200), "2400-02-29");
     }
 }

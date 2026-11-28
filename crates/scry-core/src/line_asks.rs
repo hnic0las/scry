@@ -621,5 +621,102 @@ diff --git a/f.txt b/f.txt
         let text = excerpt(&diff(), true, 3, 3);
         assert!(text.contains(">     3 - three\n"), "{text}");
         assert!(text.contains("      3 + THREE\n"), "{text}");
+        // Lines both sides hold are numbered on the old side too.
+        assert!(text.contains("      7   seven\n"), "{text}");
+    }
+
+    /// A file of `count` lines, all added.
+    fn added(count: usize) -> TextDiff {
+        let mut patch = format!(
+            "diff --git a/f.txt b/f.txt\n--- /dev/null\n+++ b/f.txt\n@@ -0,0 +1,{count} @@\n"
+        );
+        for number in 1..=count {
+            patch += &format!("+line {number}\n");
+        }
+        TextDiff::from_patch(parse_patch(&patch), Marks::Auto)
+    }
+
+    #[test]
+    fn at_most_four_hundred_lines_are_asked_about() {
+        let diff = added(MAX_LINES + 1);
+        let ask = |first, last| {
+            prepare(
+                "f.txt",
+                &diff,
+                false,
+                first,
+                last,
+                Target::WorkingCopy,
+                "",
+                &[],
+                1,
+            )
+        };
+        assert!(ask(1, MAX_LINES).is_ok());
+        assert!(ask(2, MAX_LINES + 1).is_ok());
+        let refused = ask(1, MAX_LINES + 1);
+        assert_eq!(refused, Err(AskError::TooManyLines(MAX_LINES + 1)));
+        assert!(refused.unwrap_err().to_string().contains("401"));
+        assert_eq!(
+            AskError::NoSuchLines.to_string(),
+            "These lines are no longer in the file."
+        );
+    }
+
+    #[test]
+    fn the_excerpt_keeps_twelve_lines_each_way() {
+        let text = excerpt(&added(40), false, 20, 20);
+        let numbers: Vec<&str> = text.lines().map(|line| line[1..7].trim()).collect();
+        assert_eq!(numbers.first(), Some(&"8"));
+        assert_eq!(numbers.last(), Some(&"32"));
+        assert_eq!(numbers.len(), 25);
+    }
+
+    #[test]
+    fn an_ask_beside_an_explanation_leaves_it_and_one_overlapping_replaces_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LineStore::new(dir.path());
+        let lines = diff().new_lines;
+        let (ask, _) = ask_on(2, 3, &[], 10);
+        let id = ask.id.clone();
+        store.ask("f.txt", ask, &[]).unwrap();
+        store.answer("f.txt", answer(&id, 20)).unwrap();
+        let shown = store.explained("f.txt", &lines, &Target::WorkingCopy);
+
+        // Lines after it, and before it: not touched.
+        let (after, replaced) = ask_on(5, 6, &shown, 30);
+        assert!(replaced.is_empty());
+        assert_eq!((after.first, after.last), (5, 6));
+        let (before, replaced) = ask_on(1, 1, &shown, 30);
+        assert!(replaced.is_empty() && before.id != id);
+
+        // Overlapping it without being its lines: a new ask on both.
+        let (wider, replaced) = ask_on(3, 4, &shown, 30);
+        assert_eq!((wider.first, wider.last), (2, 4));
+        assert_ne!(wider.id, id);
+        assert_eq!(replaced, std::slice::from_ref(&id));
+
+        // Its very lines, but stale: a new ask too.
+        let mut stale = shown.clone();
+        stale[0].stale = true;
+        let (again, replaced) = ask_on(2, 3, &stale, 30);
+        assert_ne!(again.id, id);
+        assert_eq!(replaced, [id]);
+    }
+
+    #[test]
+    fn lines_are_found_at_the_edges_of_a_file() {
+        let (mut ask, _) = ask_on(9, 10, &[], 1);
+        let lines = diff().new_lines;
+        // At the very end of the file.
+        assert_eq!(locate(&lines, &ask), Some((9, 10)));
+        // The file is exactly the lines.
+        assert_eq!(locate(&ask.lines.clone(), &ask), Some((1, 2)));
+        // The file is shorter than the lines.
+        assert_eq!(locate(&lines[..1], &ask), None);
+        // The file shrank under the place they were: found where they are.
+        ask.lines = vec![String::from("one")];
+        ask.first = 2;
+        assert_eq!(locate(&lines[..1], &ask), Some((1, 1)));
     }
 }

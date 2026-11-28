@@ -1052,6 +1052,16 @@ fn plural(count: usize, noun: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Only `L` and hexadecimal digits name an ask about lines: anything
+    /// else is taken for a conflict's id.
+    #[test]
+    fn line_asks_are_told_from_conflicts_by_their_id() {
+        assert!(line_ask("Labb221dd"));
+        assert!(!line_ask("L"));
+        assert!(!line_ask("Lnothex"));
+        assert!(!line_ask("abb221dd"));
+    }
+
     /// A conflict's text holding a fence still reads back exactly: the
     /// fence around it is longer than any run of backticks inside.
     #[test]
